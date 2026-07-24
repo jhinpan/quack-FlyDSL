@@ -129,7 +129,8 @@ def _select_rmsnorm_bwd_config(
         num_cus = _BWD_CU_COUNT_CACHE.get(device)
         if num_cus is None:
             num_cus = torch.cuda.get_device_properties(device).multi_processor_count
-            _BWD_CU_COUNT_CACHE[device] = num_cus
+            if not torch.compiler.is_compiling():
+                _BWD_CU_COUNT_CACHE[device] = num_cus
         if is_rmsnorm_bwd_two_stage_vec_config(n, dtype_str):
             num_programs = num_cus if m < 2048 else (3 * num_cus) // 2
         else:
@@ -138,16 +139,15 @@ def _select_rmsnorm_bwd_config(
     return "atomic", None
 
 
-def _rmsnorm_fwd(
+def _launch_rmsnorm_fwd(
     x: torch.Tensor,
     weight: torch.Tensor,
+    out: torch.Tensor,
+    rstd: torch.Tensor,
     eps: float,
-    *,
     store_rstd: bool,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
+) -> None:
     m, n = x.shape
-    out = torch.empty_like(x)
-    rstd = torch.empty((m,), device=x.device, dtype=torch.float32) if store_rstd else None
     dtype_str = _dtype_to_str(x.dtype)
     weight_dtype_str = _dtype_to_str(weight.dtype)
 
@@ -177,25 +177,107 @@ def _rmsnorm_fwd(
             run_compiled(launcher, x, weight, out, rstd, m, stream)
         else:
             run_compiled(launcher, x, weight, out, m, stream)
-    return out, rstd
 
 
-def _rmsnorm_bwd(
+@torch.library.custom_op(
+    "quack::_rmsnorm_flydsl_fwd",
+    mutates_args=("out", "rstd"),
+    device_types="cuda",
+    schema=(
+        "(Tensor x, Tensor weight, Tensor(a2!) out, Tensor(a3!) rstd, "
+        "float eps, bool store_rstd) -> ()"
+    ),
+)
+def _rmsnorm_flydsl_fwd_op(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    out: torch.Tensor,
+    rstd: torch.Tensor,
+    eps: float,
+    store_rstd: bool,
+) -> None:
+    _launch_rmsnorm_fwd(x, weight, out, rstd, eps, store_rstd)
+
+
+@_rmsnorm_flydsl_fwd_op.register_fake
+def _rmsnorm_flydsl_fwd_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    out: torch.Tensor,
+    rstd: torch.Tensor,
+    eps: float,
+    store_rstd: bool,
+) -> None:
+    return None
+
+
+def _dispatch_rmsnorm_fwd(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    out: torch.Tensor,
+    rstd: torch.Tensor,
+    eps: float,
+    store_rstd: bool,
+) -> None:
+    if torch.compiler.is_compiling():
+        _rmsnorm_flydsl_fwd_op(
+            x,
+            weight,
+            out,
+            rstd,
+            eps,
+            store_rstd,
+        )
+    else:
+        _launch_rmsnorm_fwd(
+            x,
+            weight,
+            out,
+            rstd,
+            eps,
+            store_rstd,
+        )
+
+
+def _rmsnorm_fwd(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    *,
+    store_rstd: bool,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    m = x.shape[0]
+    out = torch.empty_like(x)
+    rstd = torch.empty(
+        (m if store_rstd else 0,),
+        device=x.device,
+        dtype=torch.float32,
+    )
+    _dispatch_rmsnorm_fwd(
+        x,
+        weight,
+        out,
+        rstd,
+        eps,
+        store_rstd,
+    )
+    return out, rstd if store_rstd else None
+
+
+def _launch_rmsnorm_bwd(
     x: torch.Tensor,
     weight: torch.Tensor,
     dout: torch.Tensor,
     rstd: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    dx: torch.Tensor,
+    dweight: torch.Tensor,
+    partial: torch.Tensor,
+    num_programs: int,
+) -> None:
     m, n = x.shape
     dtype_str = _dtype_to_str(x.dtype)
     weight_dtype_str = _dtype_to_str(weight.dtype)
-    path, num_programs = _select_rmsnorm_bwd_config(
-        m,
-        n,
-        dtype_str,
-        x.device,
-    )
-    dx = torch.empty_like(x)
+    path = "two_stage" if num_programs > 0 else "atomic"
 
     with torch.cuda.device(x.device):
         arch = _validate_arch(x.device)
@@ -211,13 +293,6 @@ def _rmsnorm_bwd(
         launcher = _BWD_CACHE.get(key)
         stream = _current_raw_stream(x.device)
         if path == "two_stage":
-            assert num_programs is not None
-            dweight = torch.empty_like(weight)
-            partial = torch.empty(
-                (num_programs * n,),
-                device=x.device,
-                dtype=torch.float32,
-            )
             if launcher is None:
                 launcher = build_rmsnorm_bwd_two_stage_module(
                     n,
@@ -238,9 +313,8 @@ def _rmsnorm_bwd(
                 m,
                 stream,
             )
-            return dx, dweight
+            return
 
-        dweight_fp32 = torch.zeros((n,), device=x.device, dtype=torch.float32)
         if launcher is None:
             launcher = build_rmsnorm_bwd_module(
                 n,
@@ -255,11 +329,129 @@ def _rmsnorm_bwd(
             dout,
             rstd,
             dx,
-            dweight_fp32,
+            dweight,
             m,
             stream,
         )
-        return dx, dweight_fp32.to(weight.dtype)
+
+
+@torch.library.custom_op(
+    "quack::_rmsnorm_flydsl_bwd",
+    mutates_args=("dx", "dweight", "partial"),
+    device_types="cuda",
+    schema=(
+        "(Tensor x, Tensor weight, Tensor dout, Tensor rstd, Tensor(a4!) dx, "
+        "Tensor(a5!) dweight, Tensor(a6!) partial, int num_programs) -> ()"
+    ),
+)
+def _rmsnorm_flydsl_bwd_op(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    dout: torch.Tensor,
+    rstd: torch.Tensor,
+    dx: torch.Tensor,
+    dweight: torch.Tensor,
+    partial: torch.Tensor,
+    num_programs: int,
+) -> None:
+    _launch_rmsnorm_bwd(
+        x,
+        weight,
+        dout,
+        rstd,
+        dx,
+        dweight,
+        partial,
+        num_programs,
+    )
+
+
+@_rmsnorm_flydsl_bwd_op.register_fake
+def _rmsnorm_flydsl_bwd_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    dout: torch.Tensor,
+    rstd: torch.Tensor,
+    dx: torch.Tensor,
+    dweight: torch.Tensor,
+    partial: torch.Tensor,
+    num_programs: int,
+) -> None:
+    return None
+
+
+def _dispatch_rmsnorm_bwd(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    dout: torch.Tensor,
+    rstd: torch.Tensor,
+    dx: torch.Tensor,
+    dweight: torch.Tensor,
+    partial: torch.Tensor,
+    num_programs: int,
+) -> None:
+    if torch.compiler.is_compiling():
+        _rmsnorm_flydsl_bwd_op(
+            x,
+            weight,
+            dout,
+            rstd,
+            dx,
+            dweight,
+            partial,
+            num_programs,
+        )
+    else:
+        _launch_rmsnorm_bwd(
+            x,
+            weight,
+            dout,
+            rstd,
+            dx,
+            dweight,
+            partial,
+            num_programs,
+        )
+
+
+def _rmsnorm_bwd(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    dout: torch.Tensor,
+    rstd: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    m, n = x.shape
+    dtype_str = _dtype_to_str(x.dtype)
+    path, selected_programs = _select_rmsnorm_bwd_config(
+        m,
+        n,
+        dtype_str,
+        x.device,
+    )
+    num_programs = selected_programs if path == "two_stage" else 0
+    dx = torch.empty_like(x)
+    if num_programs:
+        dweight = torch.empty_like(weight)
+        partial = torch.empty(
+            (num_programs * n,),
+            device=x.device,
+            dtype=torch.float32,
+        )
+    else:
+        dweight = torch.zeros((n,), device=x.device, dtype=torch.float32)
+        partial = torch.empty((0,), device=x.device, dtype=torch.float32)
+
+    _dispatch_rmsnorm_bwd(
+        x,
+        weight,
+        dout,
+        rstd,
+        dx,
+        dweight,
+        partial,
+        num_programs,
+    )
+    return dx, dweight.to(weight.dtype)
 
 
 class _RMSNormFunction(torch.autograd.Function):
