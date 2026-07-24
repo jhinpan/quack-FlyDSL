@@ -13,6 +13,7 @@ if torch.version.hip is None:
 pytest.importorskip("flydsl")
 
 from quack._flydsl import FLYDSL_UPSTREAM_SHA  # noqa: E402
+import quack.rmsnorm_flydsl as rmsnorm_flydsl_impl  # noqa: E402
 from quack.rmsnorm_flydsl import rmsnorm  # noqa: E402
 
 
@@ -30,6 +31,25 @@ def _assert_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
         torch.testing.assert_close(actual, expected, rtol=2e-4, atol=2e-5)
     else:
         torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+
+def _reference_with_grads(x, weight, dout, eps):
+    x_ref = x.detach().float().requires_grad_(True)
+    weight_ref = weight.detach().float().requires_grad_(True)
+    out_ref = _reference(x_ref, weight_ref, eps)
+    dx_ref, dweight_ref = torch.autograd.grad(
+        out_ref,
+        (x_ref, weight_ref),
+        dout.float(),
+    )
+    return out_ref.to(x.dtype), dx_ref.to(x.dtype), dweight_ref.to(weight.dtype)
+
+
+def _assert_grad_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
+    if actual.dtype == torch.float32:
+        torch.testing.assert_close(actual, expected, rtol=5e-3, atol=5e-3)
+    else:
+        torch.testing.assert_close(actual, expected, rtol=3e-2, atol=3e-2)
 
 
 @pytest.mark.parametrize(
@@ -145,10 +165,112 @@ def test_public_contract_rejects_mixed_devices():
         rmsnorm(x, weight)
 
 
+@pytest.mark.parametrize(
+    ("expected_path", "shape", "dtype", "weight_dtype"),
+    [
+        ("atomic", (17, 513), torch.float16, torch.float16),
+        ("two_stage", (512, 4096), torch.bfloat16, torch.float32),
+        ("two_stage", (512, 3001), torch.float16, torch.float16),
+    ],
+)
+def test_backward_paths_match_fp32_reference(
+    expected_path,
+    shape,
+    dtype,
+    weight_dtype,
+):
+    torch.manual_seed(2)
+    x = (torch.randn(shape, device="cuda", dtype=dtype) * 0.5).requires_grad_()
+    weight = (
+        1.0 + torch.randn(shape[-1], device="cuda", dtype=weight_dtype) * 0.1
+    ).requires_grad_()
+    dout = torch.randn(shape, device="cuda", dtype=dtype) * 0.1
+    eps = 1e-6
+    dtype_str = rmsnorm_flydsl_impl._dtype_to_str(dtype)
+    path, _ = rmsnorm_flydsl_impl._select_rmsnorm_bwd_config(
+        shape[0],
+        shape[1],
+        dtype_str,
+        x.device,
+    )
+    assert path == expected_path
+
+    actual = rmsnorm(x, weight, eps=eps)
+    actual.backward(dout)
+    out_ref, dx_ref, dweight_ref = _reference_with_grads(x, weight, dout, eps)
+
+    _assert_close(actual, out_ref)
+    _assert_grad_close(x.grad, dx_ref)
+    _assert_grad_close(weight.grad, dweight_ref)
+
+
+@pytest.mark.parametrize(
+    ("requires_x", "requires_weight"),
+    [(True, False), (False, True), (True, True)],
+)
+def test_autograd_respects_requested_gradients(requires_x, requires_weight):
+    torch.manual_seed(3)
+    n = 257
+    x = (
+        torch.randn((2, n, 3), device="cuda", dtype=torch.float16)
+        .transpose(1, 2)
+        .detach()
+        .requires_grad_(requires_x)
+    )
+    weight = (
+        torch.randn(n * 2, device="cuda", dtype=torch.float32)[::2]
+        .detach()
+        .requires_grad_(requires_weight)
+    )
+    dout = torch.randn_like(x)
+    assert not x.is_contiguous()
+    assert not weight.is_contiguous()
+
+    actual = rmsnorm(x, weight)
+    actual.backward(dout)
+    _, dx_ref, dweight_ref = _reference_with_grads(x, weight, dout, 1e-6)
+
+    if requires_x:
+        _assert_grad_close(x.grad, dx_ref)
+    else:
+        assert x.grad is None
+    if requires_weight:
+        _assert_grad_close(weight.grad, dweight_ref)
+    else:
+        assert weight.grad is None
+
+
+def test_empty_m_autograd_returns_empty_and_zero_weight_grad():
+    x = torch.empty(
+        (2, 0, 128),
+        device="cuda",
+        dtype=torch.float16,
+        requires_grad=True,
+    )
+    weight = torch.ones(
+        128,
+        device="cuda",
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+
+    out = rmsnorm(x, weight)
+    out.sum().backward()
+
+    assert out.shape == x.shape
+    assert x.grad is not None and x.grad.numel() == 0
+    torch.testing.assert_close(weight.grad, torch.zeros_like(weight))
+
+
 def test_vendored_source_is_pinned_and_isolated():
     assert FLYDSL_UPSTREAM_SHA == UPSTREAM_SHA
     source_root = Path(__file__).resolve().parents[1] / "quack" / "_flydsl"
-    for filename in ("rmsnorm_kernel.py", "rmsnorm_common.py", "kernel_utils.py"):
+    for filename in (
+        "rmsnorm_kernel.py",
+        "rmsnorm_bwd_kernel.py",
+        "rmsnorm_common.py",
+        "kernel_utils.py",
+    ):
         source = (source_root / filename).read_text(encoding="utf-8")
         assert "from kernels." not in source
         assert "import kernels." not in source

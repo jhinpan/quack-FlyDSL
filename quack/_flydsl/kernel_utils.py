@@ -8,6 +8,11 @@
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir import ir
+from flydsl._mlir.dialects import fly as _fly
+from flydsl._mlir.dialects import llvm as _llvm
+from flydsl.expr import arith, const_expr
+from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch, is_rdna_arch
 
 
@@ -26,6 +31,37 @@ def get_warp_size(arch=None) -> int:
     """Return the wavefront size for the selected ROCm architecture."""
     arch = get_rocm_arch() if arch is None else arch
     return 32 if is_rdna_arch(arch) else 64
+
+
+def atomic_add(
+    destination,
+    offset,
+    value,
+    *,
+    dtype_bytes: int = 4,
+):
+    """Atomically add a scalar into a global-memory tensor element."""
+    pointer_type = ir.Type.parse("!llvm.ptr<1>")
+    base_pointer = _fly.extract_aligned_pointer_as_index(pointer_type, destination)
+    base_pointer = _llvm.PtrToIntOp(T.i64, base_pointer).result
+    byte_offset = arith.index_cast(T.i64, fx.Index(offset) * fx.Index(dtype_bytes))
+    pointer = _llvm.AddOp(
+        base_pointer,
+        byte_offset,
+        _llvm.IntegerOverflowFlags(0),
+    ).result
+    pointer = _llvm.IntToPtrOp(pointer_type, pointer).result
+    pointer = pointer._value if const_expr(hasattr(pointer, "_value")) else pointer
+
+    raw_value = value.ir_value() if const_expr(hasattr(value, "ir_value")) else value
+    return _llvm.AtomicRMWOp(
+        _llvm.AtomicBinOp.fadd,
+        pointer,
+        raw_value,
+        _llvm.AtomicOrdering.monotonic,
+        syncscope="agent",
+        alignment=dtype_bytes,
+    ).result
 
 
 def run_compiled(executable, *args) -> None:
