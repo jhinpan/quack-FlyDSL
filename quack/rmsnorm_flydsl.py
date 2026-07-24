@@ -13,6 +13,11 @@ import os
 import torch
 
 from quack._flydsl.kernel_utils import run_compiled
+from quack._flydsl.rmsnorm_bwd_kernel import (
+    build_rmsnorm_bwd_module,
+    build_rmsnorm_bwd_two_stage_module,
+    is_rmsnorm_bwd_two_stage_vec_config,
+)
 from quack._flydsl.rmsnorm_common import EPS
 from quack._flydsl.rmsnorm_kernel import build_rmsnorm_module
 
@@ -21,6 +26,10 @@ __all__ = ["rmsnorm"]
 
 _SUPPORTED_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 _FWD_CACHE: dict[tuple, object] = {}
+_BWD_CACHE: dict[tuple, object] = {}
+_BWD_CU_COUNT_CACHE: dict[torch.device, int] = {}
+_BWD_TWO_STAGE_MIN_ROWS = 512
+_BWD_TWO_STAGE_MAX_N = 8192
 
 
 def _dtype_to_str(dtype: torch.dtype) -> str:
@@ -110,6 +119,25 @@ def _current_raw_stream(device: torch.device) -> int:
     return torch.cuda.current_stream(device).cuda_stream
 
 
+def _select_rmsnorm_bwd_config(
+    m: int,
+    n: int,
+    dtype_str: str,
+    device: torch.device,
+) -> tuple[str, int | None]:
+    if m >= _BWD_TWO_STAGE_MIN_ROWS and n <= _BWD_TWO_STAGE_MAX_N:
+        num_cus = _BWD_CU_COUNT_CACHE.get(device)
+        if num_cus is None:
+            num_cus = torch.cuda.get_device_properties(device).multi_processor_count
+            _BWD_CU_COUNT_CACHE[device] = num_cus
+        if is_rmsnorm_bwd_two_stage_vec_config(n, dtype_str):
+            num_programs = num_cus if m < 2048 else (3 * num_cus) // 2
+        else:
+            num_programs = num_cus if m < 1024 else 2 * num_cus
+        return "two_stage", min(m, num_programs)
+    return "atomic", None
+
+
 def _rmsnorm_fwd(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -152,6 +180,120 @@ def _rmsnorm_fwd(
     return out, rstd
 
 
+def _rmsnorm_bwd(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    dout: torch.Tensor,
+    rstd: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    m, n = x.shape
+    dtype_str = _dtype_to_str(x.dtype)
+    weight_dtype_str = _dtype_to_str(weight.dtype)
+    path, num_programs = _select_rmsnorm_bwd_config(
+        m,
+        n,
+        dtype_str,
+        x.device,
+    )
+    dx = torch.empty_like(x)
+
+    with torch.cuda.device(x.device):
+        arch = _validate_arch(x.device)
+        key = (
+            path,
+            x.device.index,
+            arch,
+            n,
+            dtype_str,
+            weight_dtype_str,
+            num_programs,
+        )
+        launcher = _BWD_CACHE.get(key)
+        stream = _current_raw_stream(x.device)
+        if path == "two_stage":
+            assert num_programs is not None
+            dweight = torch.empty_like(weight)
+            partial = torch.empty(
+                (num_programs * n,),
+                device=x.device,
+                dtype=torch.float32,
+            )
+            if launcher is None:
+                launcher = build_rmsnorm_bwd_two_stage_module(
+                    n,
+                    dtype_str,
+                    num_programs,
+                    weight_dtype_str=weight_dtype_str,
+                )
+                _BWD_CACHE[key] = launcher
+            run_compiled(
+                launcher,
+                x,
+                weight,
+                dout,
+                rstd,
+                dx,
+                dweight,
+                partial,
+                m,
+                stream,
+            )
+            return dx, dweight
+
+        dweight_fp32 = torch.zeros((n,), device=x.device, dtype=torch.float32)
+        if launcher is None:
+            launcher = build_rmsnorm_bwd_module(
+                n,
+                dtype_str,
+                weight_dtype_str=weight_dtype_str,
+            )
+            _BWD_CACHE[key] = launcher
+        run_compiled(
+            launcher,
+            x,
+            weight,
+            dout,
+            rstd,
+            dx,
+            dweight_fp32,
+            m,
+            stream,
+        )
+        return dx, dweight_fp32.to(weight.dtype)
+
+
+class _RMSNormFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, weight: torch.Tensor, eps: float):
+        needs_grad = ctx.needs_input_grad[0] or ctx.needs_input_grad[1]
+        out, rstd = _rmsnorm_fwd(
+            x,
+            weight,
+            eps,
+            store_rstd=needs_grad,
+        )
+        if needs_grad:
+            ctx.save_for_backward(x, weight, rstd)
+            ctx.x_needs_grad = ctx.needs_input_grad[0]
+            ctx.weight_needs_grad = ctx.needs_input_grad[1]
+        return out
+
+    @staticmethod
+    def backward(ctx, dout: torch.Tensor):
+        x, weight, rstd = ctx.saved_tensors
+        dx, dweight = _rmsnorm_bwd(
+            x,
+            weight,
+            dout.contiguous(),
+            rstd,
+        )
+        return (
+            dx if ctx.x_needs_grad else None,
+            dweight if ctx.weight_needs_grad else None,
+            None,
+        )
+
+
 def rmsnorm(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -160,14 +302,13 @@ def rmsnorm(
     """Apply plain RMSNorm over the last dimension using the FlyDSL backend."""
     m, n, eps = _validate_inputs(x, weight, eps)
     if m == 0:
-        return torch.empty_like(x)
+        return x * weight.to(x.dtype)
 
     x_flat = x.reshape(-1, n).contiguous()
     weight_contiguous = weight.contiguous()
-    out_flat, _ = _rmsnorm_fwd(
+    out_flat = _RMSNormFunction.apply(
         x_flat,
         weight_contiguous,
         eps,
-        store_rstd=False,
     )
     return out_flat.reshape(x.shape)
