@@ -228,9 +228,11 @@ def pytest_configure(config):
 
 def pytest_unconfigure(config):
     """Tear down the compile pool and undo any pytest-internal patches."""
-    from quack.cache.async_compile import get_active_pool, deactivate
+    import sys
 
-    pool = get_active_pool()
+    # Do not import the CUDA-only cache when --async-compile was never enabled.
+    async_compile = sys.modules.get("quack.cache.async_compile")
+    pool = async_compile.get_active_pool() if async_compile is not None else None
     if pool is not None:
         stats = pool.stats()
         defer_plugin = config.pluginmanager.get_plugin(
@@ -254,7 +256,7 @@ def pytest_unconfigure(config):
             print(f"\n{summary}")
             for line in detail:
                 print(line)
-        deactivate()
+        async_compile.deactivate()
 
     # Always undo the global monkey-patches we installed. This keeps the
     # process clean for downstream callers (e.g. notebook hosts that
