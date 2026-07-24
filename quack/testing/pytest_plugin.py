@@ -283,9 +283,15 @@ def _defer_if_compile_pending(item, outcome, force_pass: bool) -> bool:
     """
     if outcome.excinfo is None:
         return False
-    from quack.cache.async_compile import CompilePending
+    import sys
 
-    if not issubclass(outcome.excinfo[0], CompilePending):
+    # Pool activation loads this module before CompilePending can escape.
+    # Avoid bootstrapping the CUDA cache to classify unrelated exceptions.
+    async_compile = sys.modules.get("quack.cache.async_compile")
+    if async_compile is None:
+        return False
+
+    if not issubclass(outcome.excinfo[0], async_compile.CompilePending):
         return False
     item._quack_pending_sha = outcome.excinfo[1].sha
     if force_pass:
