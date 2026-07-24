@@ -217,3 +217,58 @@ def test_pytest_plugin_collects_on_rocm_without_cutlass(tmp_path):
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
     assert "1 test collected" in output
+
+
+def test_pytest_plugin_preserves_non_compile_outcomes_without_cutlass(tmp_path):
+    if not _is_rocm_build():
+        pytest.skip("requires a real ROCm PyTorch build")
+
+    suite = tmp_path / "suite"
+    suite.mkdir()
+    (suite / "conftest.py").write_text(
+        'pytest_plugins = ["quack.testing.pytest_plugin"]\n',
+        encoding="utf-8",
+    )
+    (suite / "test_outcomes.py").write_text(
+        textwrap.dedent(
+            """
+            import pytest
+
+
+            def test_failure():
+                raise RuntimeError("expected ordinary failure")
+
+
+            def test_skip():
+                pytest.skip("expected ordinary skip")
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    pythonpath = [str(ROOT)]
+    if env.get("PYTHONPATH"):
+        pythonpath.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(suite),
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ],
+        cwd=suite,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    assert "RuntimeError: expected ordinary failure" in output
+    assert "1 failed, 1 skipped" in output
+    assert "cutlass" not in output
