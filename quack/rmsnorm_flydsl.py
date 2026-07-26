@@ -194,7 +194,15 @@ def _select_rmsnorm_bwd_config(
     dtype_str: str,
     device: torch.device,
 ) -> tuple[str, int | None]:
-    if m >= _BWD_TWO_STAGE_MIN_ROWS and n <= _BWD_TWO_STAGE_MAX_N:
+    """Pick the weight-gradient reduction.
+
+    The atomic path accumulates dweight with unordered fp32 atomics, so it is
+    not run-to-run reproducible. The staged path uses a fixed reduction tree,
+    and n is capped well below _BWD_TWO_STAGE_MAX_N by the public API, so it
+    is always available when reproducibility is asked for.
+    """
+    deterministic = torch.are_deterministic_algorithms_enabled()
+    if n <= _BWD_TWO_STAGE_MAX_N and (deterministic or m >= _BWD_TWO_STAGE_MIN_ROWS):
         num_cus = _BWD_CU_COUNT_CACHE.get(device)
         if num_cus is None:
             num_cus = torch.cuda.get_device_properties(device).multi_processor_count

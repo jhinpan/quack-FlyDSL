@@ -1,10 +1,14 @@
 # Copyright (c) 2026, Tri Dao.
 
-"""Single source of truth for how a RMSNorm row maps onto a thread block.
+"""Single source of truth for the width of a RMSNorm memory access.
 
-Every RMSNorm kernel derives its vector width, block size, and tile-loop trip
-count from :func:`select_row_tiling` so the forward, atomic backward, and
-staged backward cannot drift apart. Pure arithmetic: no FlyDSL, no torch.
+:func:`select_row_tiling` decides vector width, block size and tile-loop trip
+count for the one-block-per-row forward. :func:`select_column_io_width` reuses
+the same vector-width rule for the persistent backward, which owns its block
+size and so only needs the width. The atomic backward and the multi-row
+small-N forward are scalar and set their own geometry.
+
+Pure arithmetic: no FlyDSL, no torch.
 """
 
 from dataclasses import dataclass

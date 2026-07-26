@@ -134,18 +134,20 @@ def to_elem_scalar(dtype_str: str, elem_dtype, value):
     return value.to(elem_dtype)
 
 
-def to_elem_vec(dtype_str: str, elem_dtype, use_hw_cvt_bf16: bool, value):
+def to_elem_vec(dtype_str: str, elem_dtype, use_hw_cvt_bf16: bool, value, vec_width: int):
     if const_expr(dtype_str == "bf16"):
         if const_expr(use_hw_cvt_bf16):
             return value.to(elem_dtype)
+        # Round to nearest even by hand, then pack pairs of results into one
+        # 32-bit lane each. Pre-gfx95x has no packed convert to do this.
         bits = value.bitcast(fx.Uint32)
         upper = bits >> 16
         lsb = upper & 1
         bias = lsb + 0x7FFF
         rounded = value.bitcast(fx.Uint32) + bias
         bf16_bits = rounded >> 16
-        even = bf16_bits.shuffle(bf16_bits, [0, 2, 4, 6])
-        odd = bf16_bits.shuffle(bf16_bits, [1, 3, 5, 7])
+        even = bf16_bits.shuffle(bf16_bits, list(range(0, vec_width, 2)))
+        odd = bf16_bits.shuffle(bf16_bits, list(range(1, vec_width, 2)))
         return (even | (odd << 16)).bitcast(elem_dtype)
     if const_expr(dtype_str == "f32"):
         return value

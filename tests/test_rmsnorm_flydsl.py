@@ -65,6 +65,14 @@ def _assert_grad_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
         ((3, 3001), torch.float16, torch.float32, 1e-6),
         ((2, 3001), torch.bfloat16, torch.bfloat16, 1e-5),
         ((2, 4096), torch.float32, torch.float32, 1e-6),
+        # Vectorized with a predicated final tile: 375 vectors over 256 threads.
+        ((3, 3000), torch.bfloat16, torch.bfloat16, 1e-6),
+        ((2, 3000), torch.float16, torch.float32, 1e-6),
+        # Predicated inside a single tile: 125 vectors over a 128-thread block.
+        ((4, 1000), torch.bfloat16, torch.float32, 1e-6),
+        # 128-bit FP32 loads, exact and predicated.
+        ((2, 2048), torch.float32, torch.float32, 1e-6),
+        ((2, 1020), torch.float32, torch.float32, 1e-6),
     ],
 )
 def test_forward_matches_fp32_reference(shape, dtype, weight_dtype, eps):
@@ -176,6 +184,10 @@ def test_public_contract_rejects_mixed_devices():
         ("atomic", (5, 257), torch.float32, torch.float32),
         ("two_stage", (512, 4096), torch.bfloat16, torch.float32),
         ("two_stage", (512, 3001), torch.float16, torch.float16),
+        # Staged backward with 128-bit FP32 column I/O.
+        ("two_stage", (512, 2048), torch.float32, torch.float32),
+        # Staged backward whose column count is not a whole number of blocks.
+        ("two_stage", (512, 3000), torch.bfloat16, torch.float32),
     ],
 )
 def test_backward_paths_match_fp32_reference(
@@ -789,6 +801,50 @@ def test_operands_larger_than_one_buffer_descriptor():
     reference_tail = _reference(x_tail, weight_tail, 1e-6)
     reference_tail.backward(torch.ones_like(reference_tail))
     _assert_grad_close(x.grad[tail], x_tail.grad.to(x.dtype))
+
+
+def test_deterministic_mode_avoids_the_atomic_weight_reduction():
+    """Unordered fp32 atomics make dweight vary run to run.
+
+    Without this, whether a backward is reproducible depends on the batch
+    size, because the atomic path is only chosen below 512 rows.
+    """
+    torch.manual_seed(4)
+    x = torch.randn((64, 512), device="cuda", dtype=torch.bfloat16)
+    dout = torch.randn_like(x)
+
+    def weight_grad():
+        torch.manual_seed(4)
+        weight = torch.randn(512, device="cuda", dtype=torch.float32).requires_grad_(True)
+        rmsnorm(x, weight).backward(dout)
+        return weight.grad.clone()
+
+    _clear_caches()
+    torch.use_deterministic_algorithms(True)
+    try:
+        grads = [weight_grad() for _ in range(6)]
+        assert {key[0] for key in rmsnorm_flydsl_impl._BWD_CACHE} == {"two_stage"}
+    finally:
+        torch.use_deterministic_algorithms(False)
+
+    for later in grads[1:]:
+        torch.testing.assert_close(later, grads[0], rtol=0, atol=0)
+
+
+def test_small_batches_still_use_the_atomic_backward_by_default():
+    _clear_caches()
+    torch.manual_seed(5)
+    x = torch.randn((64, 512), device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    weight = torch.randn(512, device="cuda", dtype=torch.float32, requires_grad=True)
+    dout = torch.randn_like(x)
+
+    out = rmsnorm(x, weight)
+    out.backward(dout)
+
+    assert {key[0] for key in rmsnorm_flydsl_impl._BWD_CACHE} == {"atomic"}
+    _, dx_expected, dweight_expected = _reference_with_grads(x, weight, dout, 1e-6)
+    _assert_grad_close(x.grad, dx_expected)
+    _assert_grad_close(weight.grad, dweight_expected)
 
 
 def test_unsupported_architectures_are_named(monkeypatch):
