@@ -509,7 +509,6 @@ def test_compile_target_must_match_the_device(monkeypatch):
     monkeypatch.setattr(rmsnorm_flydsl_impl, "_flydsl_compile_target", lambda: ("rocm", other))
     with pytest.raises(ValueError, match="mixed architectures"):
         rmsnorm_flydsl_impl._validate_arch(torch.device("cuda", 0))
-    assert not rmsnorm_flydsl_impl._DEVICE_ARCH_CACHE
 
 
 def test_non_rocm_compile_backend_is_rejected(monkeypatch):
@@ -519,25 +518,63 @@ def test_non_rocm_compile_backend_is_rejected(monkeypatch):
         rmsnorm_flydsl_impl._validate_arch(torch.device("cuda", 0))
 
 
-def test_architecture_is_validated_once_per_device(monkeypatch):
-    """The warm launch path must not re-query the device or the compiler."""
+def test_the_device_query_is_memoized_but_the_compile_target_is_not(monkeypatch):
+    """Warm launches must not query anything; every build must recheck the target.
+
+    The device behind an index cannot change within a process, but FlyDSL's
+    compile target is environment-driven and can.
+    """
     _clear_caches()
-    calls = []
-    real = rmsnorm_flydsl_impl._flydsl_compile_target
+    device_queries = []
+    target_queries = []
+    real_target = rmsnorm_flydsl_impl._flydsl_compile_target
+    real_properties = torch.cuda.get_device_properties
     monkeypatch.setattr(
         rmsnorm_flydsl_impl,
         "_flydsl_compile_target",
-        lambda: (calls.append(1), real())[1],
+        lambda: (target_queries.append(1), real_target())[1],
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda index: (device_queries.append(1), real_properties(index))[1],
     )
 
     weight = torch.randn(512, device="cuda", dtype=torch.float32)
-    for _ in range(4):
+    for _ in range(3):
         for n_cols in (256, 512):
             x = torch.randn((8, n_cols), device="cuda", dtype=torch.bfloat16)
             rmsnorm(x, weight[:n_cols])
 
-    assert len(calls) == 1
+    # Two distinct shapes means two builds; everything after that is a cache hit.
+    assert len(device_queries) == 1
+    assert len(target_queries) == 2
     assert set(rmsnorm_flydsl_impl._DEVICE_ARCH_CACHE) == {0}
+
+
+def test_a_compile_target_change_is_caught_on_the_next_build(monkeypatch):
+    """Regression: a warm architecture memo used to skip all later target checks."""
+    _clear_caches()
+    weight = torch.randn(512, device="cuda", dtype=torch.float32)
+    rmsnorm(torch.randn((8, 512), device="cuda", dtype=torch.bfloat16), weight)
+
+    device_arch = rmsnorm_flydsl_impl._normalize_arch(
+        torch.cuda.get_device_properties(0).gcnArchName
+    )
+    other = "gfx942" if device_arch != "gfx942" else "gfx950"
+    monkeypatch.setattr(rmsnorm_flydsl_impl, "_flydsl_compile_target", lambda: ("rocm", other))
+    with pytest.raises(ValueError, match="mixed architectures"):
+        rmsnorm(torch.randn((8, 256), device="cuda", dtype=torch.bfloat16), weight[:256])
+
+
+def test_a_warp_size_mismatch_is_rejected():
+    """The reductions bake in a wavefront size; a disagreeing target must fail loudly."""
+    from quack._flydsl.rmsnorm_common import assert_arch_matches_reductions
+
+    assert_arch_matches_reductions("gfx942")
+    assert_arch_matches_reductions("gfx950")
+    with pytest.raises(RuntimeError, match="wavefront"):
+        assert_arch_matches_reductions("gfx1100")
 
 
 def test_concurrent_first_calls_build_one_launcher():
@@ -669,7 +706,7 @@ def test_software_bf16_rounding_matches_the_hardware_convert():
     stream = torch.cuda.current_stream().cuda_stream
 
     rounded = {}
-    for use_hw in (True, False):
+    for arch in ("gfx950", "gfx942"):
         out = torch.empty_like(x)
         launcher = build_rmsnorm_module(
             n,
@@ -677,14 +714,14 @@ def test_software_bf16_rounding_matches_the_hardware_convert():
             store_rstd=False,
             eps=1e-6,
             weight_dtype_str="f32",
-            use_hw_cvt_bf16=use_hw,
+            arch=arch,
         )
         run_compiled(launcher, x, weight, out, x.shape[0], stream)
         torch.cuda.synchronize()
-        rounded[use_hw] = out
+        rounded[arch] = out
 
-    torch.testing.assert_close(rounded[False], rounded[True], rtol=0, atol=0)
-    _assert_close(rounded[False], _reference(x, weight, 1e-6))
+    torch.testing.assert_close(rounded["gfx942"], rounded["gfx950"], rtol=0, atol=0)
+    _assert_close(rounded["gfx942"], _reference(x, weight, 1e-6))
 
 
 def test_operands_larger_than_one_buffer_descriptor():

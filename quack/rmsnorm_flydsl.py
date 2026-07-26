@@ -64,22 +64,22 @@ def _flydsl_compile_target() -> tuple[str, str]:
 def _validate_arch(device: torch.device) -> str:
     """Resolve and validate the architecture behind ``device``.
 
-    Both the device query and the FlyDSL target query cost more than a kernel
-    launch on small rows, and neither answer can change for a device index
-    within a process, so the result is memoized and the checks only run on
-    the build path.
+    The device query is memoized because a device index cannot change identity
+    within a process. FlyDSL's compile target is *not* memoized: it is driven
+    by the environment and can change under a long-lived process, so every
+    build rechecks it. Both only run on the build path, never on a launch.
     """
     index = device.index if device.index is not None else torch.cuda.current_device()
-    memoized = _DEVICE_ARCH_CACHE.get(index)
-    if memoized is not None:
-        return memoized
+    actual = _DEVICE_ARCH_CACHE.get(index)
+    if actual is None:
+        actual = _normalize_arch(torch.cuda.get_device_properties(index).gcnArchName)
+        if actual not in _SUPPORTED_ARCHES:
+            raise ValueError(
+                f"FlyDSL RMSNorm supports {', '.join(sorted(_SUPPORTED_ARCHES))}; "
+                f"cuda:{index} is {actual}"
+            )
+        _DEVICE_ARCH_CACHE[index] = actual
 
-    actual = _normalize_arch(torch.cuda.get_device_properties(index).gcnArchName)
-    if actual not in _SUPPORTED_ARCHES:
-        raise ValueError(
-            f"FlyDSL RMSNorm supports {', '.join(sorted(_SUPPORTED_ARCHES))}; "
-            f"cuda:{index} is {actual}"
-        )
     backend, compile_arch = _flydsl_compile_target()
     if backend != "rocm":
         raise RuntimeError(
@@ -91,8 +91,6 @@ def _validate_arch(device: torch.device) -> str:
             f"cuda:{index} is {actual}, but FlyDSL compiles for {compile_arch}. "
             "Set ARCH and FLYDSL_GPU_ARCH to the device architecture."
         )
-    if not torch.compiler.is_compiling():
-        _DEVICE_ARCH_CACHE[index] = actual
     return actual
 
 
@@ -175,14 +173,14 @@ def _current_raw_stream(device: torch.device) -> int:
 def _build_cached(cache: dict, key: tuple, device: torch.device, build):
     """Build a launcher at most once, even if several threads race here.
 
-    This is also the only place the architecture is validated: the warm launch
-    path must not pay for a device or compiler query.
+    This is also the only place the architecture is validated, and the
+    validated architecture is what the builder specializes on, so the kernels
+    can never disagree with the target FlyDSL will compile for.
     """
     with FLYDSL_BUILD_LOCK:
         launcher = cache.get(key)
         if launcher is None:
-            _validate_arch(device)
-            launcher = build()
+            launcher = build(_validate_arch(device))
             cache[key] = launcher
     return launcher
 
@@ -234,12 +232,13 @@ def _launch_rmsnorm_fwd(
                 _FWD_CACHE,
                 key,
                 x.device,
-                lambda: build_rmsnorm_module(
+                lambda arch: build_rmsnorm_module(
                     n,
                     dtype_str,
                     store_rstd=store_rstd,
                     eps=eps,
                     weight_dtype_str=weight_dtype_str,
+                    arch=arch,
                 ),
             )
         stream = _current_raw_stream(x.device)
@@ -366,11 +365,12 @@ def _launch_rmsnorm_bwd(
                     _BWD_CACHE,
                     key,
                     x.device,
-                    lambda: build_rmsnorm_bwd_two_stage_module(
+                    lambda arch: build_rmsnorm_bwd_two_stage_module(
                         n,
                         dtype_str,
                         num_programs,
                         weight_dtype_str=weight_dtype_str,
+                        arch=arch,
                     ),
                 )
             run_compiled(
@@ -392,10 +392,11 @@ def _launch_rmsnorm_bwd(
                 _BWD_CACHE,
                 key,
                 x.device,
-                lambda: build_rmsnorm_bwd_module(
+                lambda arch: build_rmsnorm_bwd_module(
                     n,
                     dtype_str,
                     weight_dtype_str=weight_dtype_str,
+                    arch=arch,
                 ),
             )
         run_compiled(

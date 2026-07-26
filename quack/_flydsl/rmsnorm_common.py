@@ -19,6 +19,21 @@ BLOCK_THREADS = 256
 WARP_SIZE = get_warp_size()
 
 
+def assert_arch_matches_reductions(arch: str) -> None:
+    """Fail loudly if a target's wavefront differs from the baked-in one.
+
+    The block reductions unroll over ``WARP_SIZE``, which is resolved once at
+    import time. Every architecture this backend supports is wave64, so this
+    only fires if the supported set grows without the reductions following.
+    """
+    target_warp_size = get_warp_size(arch)
+    if target_warp_size != WARP_SIZE:
+        raise RuntimeError(
+            f"FlyDSL RMSNorm reductions are built for a wavefront of {WARP_SIZE}, "
+            f"but {arch} has {target_warp_size}"
+        )
+
+
 def row_buffer(tensor, row, elem_bits: int, n: int):
     """Wrap a single row of ``tensor`` in its own buffer descriptor.
 
