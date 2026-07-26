@@ -8,11 +8,10 @@ FlyDSL, and this backend does not alter Quack's existing CUDA/CuTe dispatch.
 
 import math
 import numbers
-import threading
 
 import torch
 
-from quack._flydsl.kernel_utils import run_compiled
+from quack._flydsl.kernel_utils import FLYDSL_BUILD_LOCK, run_compiled
 from quack._flydsl.rmsnorm_bwd_kernel import (
     build_rmsnorm_bwd_module,
     build_rmsnorm_bwd_two_stage_module,
@@ -30,7 +29,6 @@ _FWD_CACHE: dict[tuple, object] = {}
 _BWD_CACHE: dict[tuple, object] = {}
 _BWD_CU_COUNT_CACHE: dict[torch.device, int] = {}
 _DEVICE_ARCH_CACHE: dict[int, str] = {}
-_BUILD_LOCK = threading.Lock()
 _BWD_TWO_STAGE_MIN_ROWS = 512
 _BWD_TWO_STAGE_MAX_N = 8192
 
@@ -154,7 +152,7 @@ def _build_cached(cache: dict, key: tuple, device: torch.device, build):
     This is also the only place the architecture is validated: the warm launch
     path must not pay for a device or compiler query.
     """
-    with _BUILD_LOCK:
+    with FLYDSL_BUILD_LOCK:
         launcher = cache.get(key)
         if launcher is None:
             _validate_arch(device)
