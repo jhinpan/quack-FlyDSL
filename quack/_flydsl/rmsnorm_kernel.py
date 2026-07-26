@@ -13,11 +13,13 @@ import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import ReductionOp
+from flydsl.runtime.device import get_rocm_arch
 
 from .kernel_utils import dtype_to_elem_bits, dtype_to_elem_type, has_hw_bf16_convert
 from .rmsnorm_common import (
     EPS,
     WARP_SIZE,
+    assert_arch_matches_reductions,
     load_scalar,
     load_vec,
     load_weight_vec,
@@ -39,14 +41,17 @@ def build_rmsnorm_module(
     store_rstd: bool = False,
     eps: float = EPS,
     weight_dtype_str: str | None = None,
-    use_hw_cvt_bf16: bool | None = None,
+    arch: str | None = None,
 ):
     """Build a plain RMSNorm launcher specialized by hidden size and dtypes.
 
-    ``use_hw_cvt_bf16`` defaults to the running architecture; tests override it
-    to exercise the software rounding path that only pre-gfx95x parts take.
+    ``arch`` is the architecture the caller has already validated FlyDSL will
+    compile for. It defaults to autodetection, but the adapter always passes
+    the validated value so kernel codegen cannot disagree with the target.
     """
     weight_dtype_str = resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
+    arch = get_rocm_arch() if arch is None else arch
+    assert_arch_matches_reductions(arch)
     elem_bits = dtype_to_elem_bits(dtype_str)
     if use_multi_row_kernel(n, elem_bits):
         return _build_rmsnorm_small_n_module(
@@ -57,8 +62,7 @@ def build_rmsnorm_module(
             weight_dtype_str,
         )
 
-    if use_hw_cvt_bf16 is None:
-        use_hw_cvt_bf16 = has_hw_bf16_convert()
+    use_hw_cvt_bf16 = has_hw_bf16_convert(arch)
     tiling = select_row_tiling(n, elem_bits)
     block_threads = tiling.block_threads
     red_slots = max(1, (block_threads + WARP_SIZE - 1) // WARP_SIZE)
