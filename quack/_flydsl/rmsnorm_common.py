@@ -11,12 +11,12 @@ from flydsl.expr import const_expr
 from flydsl.expr.typing import full
 
 from .kernel_utils import get_warp_size
+from .rmsnorm_tiling import VECTOR_BITS
 
 
 EPS = 1e-6
 BLOCK_THREADS = 256
 WARP_SIZE = get_warp_size()
-VEC_WIDTH = 8
 
 
 def make_reduction_storage(red_slots: int):
@@ -57,22 +57,40 @@ def load_vec(copy_atom, vec_width, elem_dtype, divided_tensor, index):
     return fx.memref_load_vec(register)
 
 
-def load_weight_vec(copy_atom, weight_dtype_str, weight_elem_dtype, divided_tensor, index):
-    """Load eight weights as fp32 using one 128-bit load per source vector."""
-    if const_expr(weight_dtype_str == "f32"):
-        lo = load_vec(copy_atom, VEC_WIDTH // 2, weight_elem_dtype, divided_tensor, index * 2)
-        hi = load_vec(
+def load_weight_vec(
+    copy_atom,
+    weight_elem_dtype,
+    weight_elem_bits,
+    divided_tensor,
+    index,
+    vec_width,
+):
+    """Load ``vec_width`` weights as fp32 using whole 128-bit accesses.
+
+    An FP32 weight paired with 16-bit activations needs two accesses to cover
+    one activation vector; every other combination needs exactly one.
+    """
+    per_access = weight_vec_width(weight_elem_bits)
+    accesses = vec_width // per_access
+    if const_expr(accesses <= 1):
+        return load_vec(
             copy_atom,
-            VEC_WIDTH // 2,
+            vec_width,
             weight_elem_dtype,
             divided_tensor,
-            index * 2 + 1,
+            index,
+        ).to(fx.Float32)
+    elements = []
+    for part in range(accesses):
+        chunk = load_vec(
+            copy_atom,
+            per_access,
+            weight_elem_dtype,
+            divided_tensor,
+            index * accesses + part,
         )
-        return fx.Vector.from_elements(
-            [lo[0], lo[1], lo[2], lo[3], hi[0], hi[1], hi[2], hi[3]],
-            fx.Float32,
-        )
-    return load_vec(copy_atom, VEC_WIDTH, weight_elem_dtype, divided_tensor, index).to(fx.Float32)
+        elements.extend(chunk[lane] for lane in range(per_access))
+    return fx.Vector.from_elements(elements, fx.Float32)
 
 
 def store_vec(copy_atom, vec_width, elem_dtype, value, divided_tensor, index):
@@ -123,5 +141,6 @@ def resolve_rmsnorm_weight_dtype(
     return weight_dtype_str
 
 
-def weight_vec_width(weight_dtype_str: str) -> int:
-    return VEC_WIDTH // 2 if weight_dtype_str == "f32" else VEC_WIDTH
+def weight_vec_width(weight_elem_bits: int) -> int:
+    """Weight elements carried by one 128-bit access."""
+    return VECTOR_BITS // weight_elem_bits

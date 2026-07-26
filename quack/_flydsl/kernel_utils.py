@@ -27,6 +27,15 @@ def dtype_to_elem_type(dtype_str: str):
     raise ValueError(f"unsupported dtype: {dtype_str!r}")
 
 
+def dtype_to_elem_bits(dtype_str: str) -> int:
+    """Storage width of one element, the basis for every vector width."""
+    if dtype_str == "f32":
+        return 32
+    if dtype_str in ("f16", "bf16"):
+        return 16
+    raise ValueError(f"unsupported dtype: {dtype_str!r}")
+
+
 def get_warp_size(arch=None) -> int:
     """Return the wavefront size for the selected ROCm architecture."""
     arch = get_rocm_arch() if arch is None else arch

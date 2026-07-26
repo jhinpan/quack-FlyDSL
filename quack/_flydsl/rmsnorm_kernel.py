@@ -15,11 +15,9 @@ from flydsl.expr import math as fmath
 from flydsl.expr.typing import ReductionOp
 from flydsl.runtime.device import get_rocm_arch
 
-from .kernel_utils import dtype_to_elem_type
+from .kernel_utils import dtype_to_elem_bits, dtype_to_elem_type
 from .rmsnorm_common import (
-    BLOCK_THREADS,
     EPS,
-    VEC_WIDTH,
     WARP_SIZE,
     load_scalar,
     load_vec,
@@ -32,9 +30,7 @@ from .rmsnorm_common import (
     to_elem_vec,
     weight_vec_width,
 )
-
-
-SMALL_N_THRESHOLD = 2048
+from .rmsnorm_tiling import select_row_tiling, use_multi_row_kernel
 
 
 def build_rmsnorm_module(
@@ -42,12 +38,12 @@ def build_rmsnorm_module(
     dtype_str: str,
     store_rstd: bool = False,
     eps: float = EPS,
-    block_threads: int = BLOCK_THREADS,
     weight_dtype_str: str | None = None,
 ):
     """Build a plain RMSNorm launcher specialized by hidden size and dtypes."""
     weight_dtype_str = resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
-    if n <= SMALL_N_THRESHOLD:
+    elem_bits = dtype_to_elem_bits(dtype_str)
+    if use_multi_row_kernel(n, elem_bits):
         return _build_rmsnorm_small_n_module(
             n,
             dtype_str,
@@ -58,14 +54,13 @@ def build_rmsnorm_module(
 
     arch = get_rocm_arch()
     use_hw_cvt_bf16 = arch == "gfx950" or str(arch).startswith("gfx95")
-    tile_cols = block_threads * VEC_WIDTH
+    tiling = select_row_tiling(n, elem_bits)
+    block_threads = tiling.block_threads
     red_slots = max(1, (block_threads + WARP_SIZE - 1) // WARP_SIZE)
-    elem_bits = 32 if dtype_str == "f32" else 16
-    weight_elem_bits = 32 if weight_dtype_str == "f32" else 16
-    kernel_kwargs = {} if block_threads <= 256 else {"known_block_size": [block_threads, 1, 1]}
+    weight_elem_bits = dtype_to_elem_bits(weight_dtype_str)
     shared_storage = make_reduction_storage(red_slots)
 
-    @flyc.kernel(**kernel_kwargs)
+    @flyc.kernel
     def rmsnorm_kernel(
         input_tensor: fx.Tensor,
         gamma: fx.Tensor,
@@ -132,13 +127,15 @@ def build_rmsnorm_module(
         row_input = fx.slice(input_buffer, (row, None))
         row_output = fx.slice(output_buffer, (row, None))
 
-        if const_expr(n >= tile_cols and n % tile_cols == 0 and elem_bits <= 16):
-            num_tiles = n // tile_cols
-            input_div = fx.logical_divide(row_input, fx.make_layout(VEC_WIDTH, 1))
-            output_div = fx.logical_divide(row_output, fx.make_layout(VEC_WIDTH, 1))
+        if const_expr(tiling.vectorized):
+            vec_width = tiling.vec_width
+            num_vecs = tiling.num_vecs
+            last_tile = tiling.num_tiles - 1
+            input_div = fx.logical_divide(row_input, fx.make_layout(vec_width, 1))
+            output_div = fx.logical_divide(row_output, fx.make_layout(vec_width, 1))
             gamma_div = fx.logical_divide(
                 gamma_buffer,
-                fx.make_layout(weight_vec_width(weight_dtype_str), 1),
+                fx.make_layout(weight_vec_width(weight_elem_bits), 1),
             )
             copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
             gamma_copy_atom = fx.make_copy_atom(
@@ -148,15 +145,23 @@ def build_rmsnorm_module(
 
             thread_sumsq = fx.Float32(0.0)
             input_local = []
-            for tile_i in range_constexpr(num_tiles):
+            for tile_i in range_constexpr(tiling.num_tiles):
+                # Only the final tile can run off the end of the row.
+                partial = tiling.needs_predicate and tile_i == last_tile
                 index = tid + tile_i * block_threads
-                vector = load_vec(copy_atom, VEC_WIDTH, elem_dtype, input_div, index)
+                if const_expr(partial):
+                    in_row = index < num_vecs
+                    index = in_row.select(index, 0)
+                vector = load_vec(copy_atom, vec_width, elem_dtype, input_div, index)
                 input_local.append(vector)
                 values = vector.to(fx.Float32)
-                thread_sumsq = thread_sumsq + (values * values).reduce(
+                contribution = (values * values).reduce(
                     ReductionOp.ADD,
                     fastmath=fast_math,
                 )
+                if const_expr(partial):
+                    contribution = in_row.select(contribution, fx.Float32(0.0))
+                thread_sumsq = thread_sumsq + contribution
 
             _, sum_sq = block_reduce_add2(fx.Float32(0.0), thread_sumsq)
             rrms = fmath.rsqrt(sum_sq / float(n) + eps, fastmath=fast_math)
@@ -172,14 +177,20 @@ def build_rmsnorm_module(
                         rrms,
                     )
 
-            for tile_i in range_constexpr(num_tiles):
+            for tile_i in range_constexpr(tiling.num_tiles):
+                partial = tiling.needs_predicate and tile_i == last_tile
                 index = tid + tile_i * block_threads
+                safe_index = index
+                if const_expr(partial):
+                    in_row = index < num_vecs
+                    safe_index = in_row.select(index, 0)
                 weights = load_weight_vec(
                     gamma_copy_atom,
-                    weight_dtype_str,
                     weight_elem_dtype,
+                    weight_elem_bits,
                     gamma_div,
-                    index,
+                    safe_index,
+                    vec_width,
                 )
                 values = input_local[tile_i].to(fx.Float32)
                 result = to_elem_vec(
@@ -188,7 +199,11 @@ def build_rmsnorm_module(
                     use_hw_cvt_bf16,
                     values * rrms * weights,
                 )
-                store_vec(copy_atom, VEC_WIDTH, elem_dtype, result, output_div, index)
+                if const_expr(partial):
+                    if in_row:
+                        store_vec(copy_atom, vec_width, elem_dtype, result, output_div, index)
+                else:
+                    store_vec(copy_atom, vec_width, elem_dtype, result, output_div, index)
         else:
             copy_atom = fx.make_copy_atom(
                 fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
@@ -306,8 +321,8 @@ def _build_rmsnorm_small_n_module(
     block_m = max(min(16384 // block_n, 32), 8)
     threads_per_row = min(WARP_SIZE, 1024 // block_m)
     block_threads = block_m * threads_per_row
-    elem_bits = 32 if dtype_str == "f32" else 16
-    weight_elem_bits = 32 if weight_dtype_str == "f32" else 16
+    elem_bits = dtype_to_elem_bits(dtype_str)
+    weight_elem_bits = dtype_to_elem_bits(weight_dtype_str)
 
     @flyc.kernel(known_block_size=[block_threads, 1, 1])
     def rmsnorm_small_n_kernel(
