@@ -117,6 +117,17 @@ Benchmarking (see tools/matmul_heuristic/common.py for the reference protocol):
 - Pin the CPU (taskset) when launch overhead matters; the Python/FFI launch
   path floor is ~3.5us and drifts 2-3x unpinned.
 
+ROCm / FlyDSL (see AI/flydsl_rmsnorm_notes.md):
+- A buffer descriptor addresses at most 4 GiB and `make_buffer_tensor`
+  defaults to that maximum. Wrap the row, not the tensor, or every row past
+  the mark silently returns another row's data.
+- Two architecture authorities disagree: the compiler target reads ARCH,
+  `get_rocm_arch()` reads FLYDSL_GPU_ARCH. Resolve once, validate against the
+  device, pass that value into the builders.
+- The AST rewriter does not follow calls. A module-level helper containing a
+  data-dependent `if` is traced as plain Python and raises; only data movement
+  and traced-value math can be shared out of a kernel body.
+
 CuTe-DSL:
 - Dtype views of swizzled smem drop the swizzle: re-attach the SAME
   byte-addressed swizzle via `recast_ptr`, never plain `recast_tensor`.
