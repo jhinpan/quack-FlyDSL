@@ -14,10 +14,9 @@ from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr.typing import ReductionOp
 from flydsl.runtime.device import get_rocm_arch
 
-from .kernel_utils import atomic_add, dtype_to_elem_type
+from .kernel_utils import atomic_add, dtype_to_elem_bits, dtype_to_elem_type
 from .rmsnorm_common import (
     BLOCK_THREADS,
-    VEC_WIDTH,
     WARP_SIZE,
     load_scalar,
     load_vec,
@@ -29,6 +28,7 @@ from .rmsnorm_common import (
     to_elem_vec,
     weight_vec_width,
 )
+from .rmsnorm_tiling import select_row_tiling
 
 
 DWEIGHT_REDUCE_COLS = 64
@@ -37,13 +37,18 @@ DWEIGHT_REDUCE_THREADS = DWEIGHT_REDUCE_COLS * DWEIGHT_REDUCE_ROW_LANES
 TWO_STAGE_PARTIAL_THREADS = 512
 
 
+def rmsnorm_bwd_two_stage_io_width(n: int, dtype_str: str) -> int:
+    """Elements per staged-backward column access; 1 means scalar I/O.
+
+    The staged kernel owns its own 512-thread persistent block, so only the
+    vector width is shared with the forward tiling rule.
+    """
+    return select_row_tiling(n, dtype_to_elem_bits(dtype_str)).vec_width
+
+
 def is_rmsnorm_bwd_two_stage_vec_config(n: int, dtype_str: str) -> bool:
-    """Return whether the staged kernel can use full-width vec8 column I/O."""
-    return (
-        dtype_str in ("f16", "bf16")
-        and n >= TWO_STAGE_PARTIAL_THREADS * VEC_WIDTH
-        and n % VEC_WIDTH == 0
-    )
+    """Return whether the staged kernel can use 128-bit column I/O."""
+    return rmsnorm_bwd_two_stage_io_width(n, dtype_str) > 1
 
 
 def build_rmsnorm_bwd_module(
@@ -54,8 +59,8 @@ def build_rmsnorm_bwd_module(
     """Build the one-block-per-row backward with fp32 weight atomics."""
     weight_dtype_str = resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
     red_slots = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
-    elem_bits = 32 if dtype_str == "f32" else 16
-    weight_elem_bits = 32 if weight_dtype_str == "f32" else 16
+    elem_bits = dtype_to_elem_bits(dtype_str)
+    weight_elem_bits = dtype_to_elem_bits(weight_dtype_str)
     shared_storage = make_single_reduction_storage(red_slots)
 
     @flyc.kernel
@@ -230,11 +235,11 @@ def build_rmsnorm_bwd_two_stage_module(
         1,
         (TWO_STAGE_PARTIAL_THREADS + WARP_SIZE - 1) // WARP_SIZE,
     )
-    elem_bits = 32 if dtype_str == "f32" else 16
-    weight_elem_bits = 32 if weight_dtype_str == "f32" else 16
-    use_vec = is_rmsnorm_bwd_two_stage_vec_config(n, dtype_str)
-    io_width = VEC_WIDTH if use_vec else 1
-    weight_io_width = weight_vec_width(weight_dtype_str) if use_vec else 1
+    elem_bits = dtype_to_elem_bits(dtype_str)
+    weight_elem_bits = dtype_to_elem_bits(weight_dtype_str)
+    io_width = rmsnorm_bwd_two_stage_io_width(n, dtype_str)
+    use_vec = io_width > 1
+    weight_io_width = weight_vec_width(weight_elem_bits) if use_vec else 1
     num_io_tiles = (n + io_width - 1) // io_width
     num_io_iters = (num_io_tiles + TWO_STAGE_PARTIAL_THREADS - 1) // TWO_STAGE_PARTIAL_THREADS
     partial_acc_size = num_io_iters * io_width
@@ -332,10 +337,11 @@ def build_rmsnorm_bwd_two_stage_module(
                 gamma_local.append(
                     load_weight_vec(
                         gamma_copy_atom,
-                        weight_dtype_str,
                         weight_elem_dtype,
+                        weight_elem_bits,
                         gamma_div,
                         safe_index,
+                        io_width,
                     )
                 )
 
