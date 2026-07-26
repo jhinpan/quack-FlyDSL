@@ -473,6 +473,7 @@ def build_rmsnorm_bwd_two_stage_module(
                             elem_dtype,
                             use_hw_cvt_bf16,
                             dx_value,
+                            io_width,
                         )
                         store_vec(
                             copy_atom,

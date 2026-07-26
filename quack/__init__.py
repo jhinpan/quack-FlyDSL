@@ -30,3 +30,8 @@ if torch.version.hip is None:
         "cross_entropy",
         "RoundingMode",
     ]
+else:
+    # The CuTe kernels need cutlass, which is CUDA-only. ROCm users reach the
+    # FlyDSL backend explicitly through quack.rmsnorm_flydsl; exporting nothing
+    # keeps `from quack import *` from re-exporting the torch imported above.
+    __all__ = []

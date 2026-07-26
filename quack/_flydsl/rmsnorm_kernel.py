@@ -203,6 +203,7 @@ def build_rmsnorm_module(
                     elem_dtype,
                     use_hw_cvt_bf16,
                     values * rrms * weights,
+                    vec_width,
                 )
                 if const_expr(partial):
                     if in_row:
