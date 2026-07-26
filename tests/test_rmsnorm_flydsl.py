@@ -687,6 +687,47 @@ def test_software_bf16_rounding_matches_the_hardware_convert():
     _assert_close(rounded[False], _reference(x, weight, 1e-6))
 
 
+def test_operands_larger_than_one_buffer_descriptor():
+    """An AMD buffer descriptor addresses at most 4 GiB.
+
+    The descriptor is built per row, so a tensor larger than that must still
+    be correct. Before that fix every row past the 4 GiB mark wrapped back to
+    the start of the allocation and returned another row's data.
+    """
+    n = 8192
+    rows_per_descriptor = 2**32 // (n * 2)
+    m = rows_per_descriptor + 3
+    # x, out, dout and dx are live at once in the backward, plus a chunked
+    # fp32 reference over the rows actually compared.
+    peak_bytes = 4 * m * n * 2 + 8 * 4 * n * 4
+    torch.cuda.empty_cache()
+    free_bytes = torch.cuda.mem_get_info()[0]
+    if peak_bytes > free_bytes * 0.9:
+        pytest.skip(
+            f"Insufficient free VRAM ({free_bytes // 2**30} GiB free, "
+            f"need ~{peak_bytes // 2**30} GiB)"
+        )
+
+    torch.manual_seed(0)
+    x = torch.randn((m, n), device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    weight = torch.randn(n, device="cuda", dtype=torch.float32, requires_grad=True)
+
+    out = rmsnorm(x, weight)
+    # Only the rows straddling and following the 4 GiB mark can be wrong, and
+    # materializing a full reference would double the footprint.
+    tail = slice(m - 4, m)
+    _assert_close(out[tail], _reference(x[tail], weight, 1e-6))
+
+    out.backward(torch.ones_like(out))
+    assert x.grad is not None
+
+    x_tail = x[tail].detach().float().requires_grad_(True)
+    weight_tail = weight.detach().float().requires_grad_(True)
+    reference_tail = _reference(x_tail, weight_tail, 1e-6)
+    reference_tail.backward(torch.ones_like(reference_tail))
+    _assert_grad_close(x.grad[tail], x_tail.grad.to(x.dtype))
+
+
 def test_unsupported_architectures_are_named(monkeypatch):
     _clear_caches()
     monkeypatch.setattr(rmsnorm_flydsl_impl, "_normalize_arch", lambda _: "gfx90a")

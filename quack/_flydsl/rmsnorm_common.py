@@ -19,6 +19,20 @@ BLOCK_THREADS = 256
 WARP_SIZE = get_warp_size()
 
 
+def row_buffer(tensor, row, elem_bits: int, n: int):
+    """Wrap a single row of ``tensor`` in its own buffer descriptor.
+
+    A buffer descriptor addresses at most 4 GiB, so wrapping the whole tensor
+    and then slicing a row would silently wrap around on any operand larger
+    than that. Slicing first keeps every descriptor one row wide, which also
+    turns the hardware bounds check into a real per-row guard.
+    """
+    return fx.rocdl.make_buffer_tensor(
+        fx.slice(tensor, (row, None)),
+        num_records_bytes=n * (elem_bits // 8),
+    )
+
+
 def make_reduction_storage(red_slots: int):
     @fx.struct
     class SharedStorage:

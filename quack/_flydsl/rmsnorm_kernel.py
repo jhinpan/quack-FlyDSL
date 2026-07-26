@@ -23,6 +23,7 @@ from .rmsnorm_common import (
     load_weight_vec,
     make_reduction_storage,
     resolve_rmsnorm_weight_dtype,
+    row_buffer,
     store_scalar,
     store_vec,
     to_elem_scalar,
@@ -125,11 +126,9 @@ def build_rmsnorm_module(
             gpu.barrier()
             return fx.memref_load(s_red, 0), fx.memref_load(s_red2, 0)
 
-        input_buffer = fx.rocdl.make_buffer_tensor(input_tensor)
-        output_buffer = fx.rocdl.make_buffer_tensor(output)
+        row_input = row_buffer(input_tensor, row, elem_bits, n)
+        row_output = row_buffer(output, row, elem_bits, n)
         gamma_buffer = fx.rocdl.make_buffer_tensor(gamma)
-        row_input = fx.slice(input_buffer, (row, None))
-        row_output = fx.slice(output_buffer, (row, None))
 
         if const_expr(tiling.vectorized):
             vec_width = tiling.vec_width
@@ -347,21 +346,19 @@ def _build_rmsnorm_small_n_module(
             weight_elem_dtype = dtype_to_elem_type(weight_dtype_str)
             fast_math = arith.FastMathFlags.fast
 
-            input_buffer = fx.rocdl.make_buffer_tensor(input_tensor)
             gamma_buffer = fx.rocdl.make_buffer_tensor(gamma)
-            output_buffer = fx.rocdl.make_buffer_tensor(output)
             if const_expr(store_rstd):
                 rstd_buffer = fx.rocdl.make_buffer_tensor(rstd_tensor)
                 rstd_div = fx.logical_divide(rstd_buffer, fx.make_layout(1, 1))
                 rstd_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
 
             input_div = fx.logical_divide(
-                fx.slice(input_buffer, (row, None)),
+                row_buffer(input_tensor, row, elem_bits, n),
                 fx.make_layout(1, 1),
             )
             gamma_div = fx.logical_divide(gamma_buffer, fx.make_layout(1, 1))
             output_div = fx.logical_divide(
-                fx.slice(output_buffer, (row, None)),
+                row_buffer(output, row, elem_bits, n),
                 fx.make_layout(1, 1),
             )
             copy_atom = fx.make_copy_atom(
