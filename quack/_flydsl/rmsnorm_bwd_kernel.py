@@ -27,6 +27,7 @@ from .rmsnorm_common import (
     load_weight_vec,
     make_single_reduction_storage,
     resolve_rmsnorm_weight_dtype,
+    row_buffer,
     store_scalar,
     store_vec,
     to_elem_vec,
@@ -113,24 +114,21 @@ def build_rmsnorm_bwd_module(
             gpu.barrier()
             return fx.memref_load(s_red, 0)
 
-        input_buffer = fx.rocdl.make_buffer_tensor(input_tensor)
         gamma_buffer = fx.rocdl.make_buffer_tensor(gamma)
-        dy_buffer = fx.rocdl.make_buffer_tensor(dy)
         rstd_buffer = fx.rocdl.make_buffer_tensor(rstd_tensor)
-        dx_buffer = fx.rocdl.make_buffer_tensor(dx)
 
         input_div = fx.logical_divide(
-            fx.slice(input_buffer, (row, None)),
+            row_buffer(input_tensor, row, elem_bits, n),
             fx.make_layout(1, 1),
         )
         gamma_div = fx.logical_divide(gamma_buffer, fx.make_layout(1, 1))
         dy_div = fx.logical_divide(
-            fx.slice(dy_buffer, (row, None)),
+            row_buffer(dy, row, elem_bits, n),
             fx.make_layout(1, 1),
         )
         rstd_div = fx.logical_divide(rstd_buffer, fx.make_layout(1, 1))
         dx_div = fx.logical_divide(
-            fx.slice(dx_buffer, (row, None)),
+            row_buffer(dx, row, elem_bits, n),
             fx.make_layout(1, 1),
         )
 
@@ -298,11 +296,8 @@ def build_rmsnorm_bwd_two_stage_module(
             gpu.barrier()
             return fx.memref_load(s_red, 0)
 
-        input_buffer = fx.rocdl.make_buffer_tensor(input_tensor)
         gamma_buffer = fx.rocdl.make_buffer_tensor(gamma)
-        dy_buffer = fx.rocdl.make_buffer_tensor(dy)
         rstd_buffer = fx.rocdl.make_buffer_tensor(rstd_tensor)
-        dx_buffer = fx.rocdl.make_buffer_tensor(dx)
         partial_buffer = fx.rocdl.make_buffer_tensor(dweight_partial)
         rstd_div = fx.logical_divide(rstd_buffer, fx.make_layout(1, 1))
         partial_div = fx.logical_divide(partial_buffer, fx.make_layout(1, 1))
@@ -355,15 +350,15 @@ def build_rmsnorm_bwd_two_stage_module(
         )
         for row in range(fx.Int32(block), m, num_programs):
             input_div = fx.logical_divide(
-                fx.slice(input_buffer, (row, None)),
+                row_buffer(input_tensor, row, elem_bits, n),
                 fx.make_layout(io_width, 1),
             )
             dy_div = fx.logical_divide(
-                fx.slice(dy_buffer, (row, None)),
+                row_buffer(dy, row, elem_bits, n),
                 fx.make_layout(io_width, 1),
             )
             dx_div = fx.logical_divide(
-                fx.slice(dx_buffer, (row, None)),
+                row_buffer(dx, row, elem_bits, n),
                 fx.make_layout(io_width, 1),
             )
             rstd = load_scalar(f32_copy_atom, fx.Float32, rstd_div, row)
