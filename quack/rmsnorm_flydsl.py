@@ -8,7 +8,7 @@ FlyDSL, and this backend does not alter Quack's existing CUDA/CuTe dispatch.
 
 import math
 import numbers
-import os
+import threading
 
 import torch
 
@@ -25,9 +25,12 @@ from quack._flydsl.rmsnorm_kernel import build_rmsnorm_module
 __all__ = ["rmsnorm"]
 
 _SUPPORTED_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
+_SUPPORTED_ARCHES = frozenset({"gfx942", "gfx950"})
 _FWD_CACHE: dict[tuple, object] = {}
 _BWD_CACHE: dict[tuple, object] = {}
 _BWD_CU_COUNT_CACHE: dict[torch.device, int] = {}
+_DEVICE_ARCH_CACHE: dict[int, str] = {}
+_BUILD_LOCK = threading.Lock()
 _BWD_TWO_STAGE_MIN_ROWS = 512
 _BWD_TWO_STAGE_MAX_N = 8192
 
@@ -52,20 +55,46 @@ def _normalize_arch(arch: str) -> str:
     return arch
 
 
+def _flydsl_compile_target() -> tuple[str, str]:
+    """Ask FlyDSL what it will actually generate code for."""
+    from flydsl.compiler.backends import get_backend
+
+    target = get_backend().target
+    return target.backend, _normalize_arch(target.arch)
+
+
 def _validate_arch(device: torch.device) -> str:
-    properties = torch.cuda.get_device_properties(device)
-    actual = _normalize_arch(properties.gcnArchName)
-    flydsl_override = os.environ.get("FLYDSL_GPU_ARCH")
-    arch_override = os.environ.get("ARCH")
-    if flydsl_override is not None:
-        requested = _normalize_arch(flydsl_override)
-        if arch_override is not None and _normalize_arch(arch_override) != requested:
-            raise ValueError("ARCH and FLYDSL_GPU_ARCH must select the same architecture")
-        if requested != actual:
-            raise ValueError(
-                "FlyDSL RMSNorm does not support mixed architectures: "
-                f"device is {actual}, FLYDSL_GPU_ARCH selects {requested}"
-            )
+    """Resolve and validate the architecture behind ``device``.
+
+    Both the device query and the FlyDSL target query cost more than a kernel
+    launch on small rows, and neither answer can change for a device index
+    within a process, so the result is memoized and the checks only run on
+    the build path.
+    """
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    memoized = _DEVICE_ARCH_CACHE.get(index)
+    if memoized is not None:
+        return memoized
+
+    actual = _normalize_arch(torch.cuda.get_device_properties(index).gcnArchName)
+    if actual not in _SUPPORTED_ARCHES:
+        raise ValueError(
+            f"FlyDSL RMSNorm supports {', '.join(sorted(_SUPPORTED_ARCHES))}; "
+            f"cuda:{index} is {actual}"
+        )
+    backend, compile_arch = _flydsl_compile_target()
+    if backend != "rocm":
+        raise RuntimeError(
+            f"FlyDSL RMSNorm requires FlyDSL's ROCm backend, but it is targeting {backend!r}"
+        )
+    if compile_arch != actual:
+        raise ValueError(
+            "FlyDSL RMSNorm does not support mixed architectures: "
+            f"cuda:{index} is {actual}, but FlyDSL compiles for {compile_arch}. "
+            "Set ARCH and FLYDSL_GPU_ARCH to the device architecture."
+        )
+    if not torch.compiler.is_compiling():
+        _DEVICE_ARCH_CACHE[index] = actual
     return actual
 
 
@@ -119,6 +148,21 @@ def _current_raw_stream(device: torch.device) -> int:
     return torch.cuda.current_stream(device).cuda_stream
 
 
+def _build_cached(cache: dict, key: tuple, device: torch.device, build):
+    """Build a launcher at most once, even if several threads race here.
+
+    This is also the only place the architecture is validated: the warm launch
+    path must not pay for a device or compiler query.
+    """
+    with _BUILD_LOCK:
+        launcher = cache.get(key)
+        if launcher is None:
+            _validate_arch(device)
+            launcher = build()
+            cache[key] = launcher
+    return launcher
+
+
 def _select_rmsnorm_bwd_config(
     m: int,
     n: int,
@@ -152,10 +196,8 @@ def _launch_rmsnorm_fwd(
     weight_dtype_str = _dtype_to_str(weight.dtype)
 
     with torch.cuda.device(x.device):
-        arch = _validate_arch(x.device)
         key = (
             x.device.index,
-            arch,
             n,
             dtype_str,
             weight_dtype_str,
@@ -164,14 +206,18 @@ def _launch_rmsnorm_fwd(
         )
         launcher = _FWD_CACHE.get(key)
         if launcher is None:
-            launcher = build_rmsnorm_module(
-                n,
-                dtype_str,
-                store_rstd=store_rstd,
-                eps=eps,
-                weight_dtype_str=weight_dtype_str,
+            launcher = _build_cached(
+                _FWD_CACHE,
+                key,
+                x.device,
+                lambda: build_rmsnorm_module(
+                    n,
+                    dtype_str,
+                    store_rstd=store_rstd,
+                    eps=eps,
+                    weight_dtype_str=weight_dtype_str,
+                ),
             )
-            _FWD_CACHE[key] = launcher
         stream = _current_raw_stream(x.device)
         if store_rstd:
             run_compiled(launcher, x, weight, out, rstd, m, stream)
@@ -280,11 +326,9 @@ def _launch_rmsnorm_bwd(
     path = "two_stage" if num_programs > 0 else "atomic"
 
     with torch.cuda.device(x.device):
-        arch = _validate_arch(x.device)
         key = (
             path,
             x.device.index,
-            arch,
             n,
             dtype_str,
             weight_dtype_str,
@@ -294,13 +338,17 @@ def _launch_rmsnorm_bwd(
         stream = _current_raw_stream(x.device)
         if path == "two_stage":
             if launcher is None:
-                launcher = build_rmsnorm_bwd_two_stage_module(
-                    n,
-                    dtype_str,
-                    num_programs,
-                    weight_dtype_str=weight_dtype_str,
+                launcher = _build_cached(
+                    _BWD_CACHE,
+                    key,
+                    x.device,
+                    lambda: build_rmsnorm_bwd_two_stage_module(
+                        n,
+                        dtype_str,
+                        num_programs,
+                        weight_dtype_str=weight_dtype_str,
+                    ),
                 )
-                _BWD_CACHE[key] = launcher
             run_compiled(
                 launcher,
                 x,
@@ -316,12 +364,16 @@ def _launch_rmsnorm_bwd(
             return
 
         if launcher is None:
-            launcher = build_rmsnorm_bwd_module(
-                n,
-                dtype_str,
-                weight_dtype_str=weight_dtype_str,
+            launcher = _build_cached(
+                _BWD_CACHE,
+                key,
+                x.device,
+                lambda: build_rmsnorm_bwd_module(
+                    n,
+                    dtype_str,
+                    weight_dtype_str=weight_dtype_str,
+                ),
             )
-            _BWD_CACHE[key] = launcher
         run_compiled(
             launcher,
             x,

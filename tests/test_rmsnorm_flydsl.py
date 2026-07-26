@@ -1,6 +1,7 @@
 # Copyright (c) 2026, Tri Dao.
 
 import math
+import threading
 from pathlib import Path
 
 import pytest
@@ -277,6 +278,7 @@ def _clear_caches():
     rmsnorm_flydsl_impl._FWD_CACHE.clear()
     rmsnorm_flydsl_impl._BWD_CACHE.clear()
     rmsnorm_flydsl_impl._BWD_CU_COUNT_CACHE.clear()
+    rmsnorm_flydsl_impl._DEVICE_ARCH_CACHE.clear()
 
 
 def test_custom_ops_are_unique_mutation_only_and_fake_safe():
@@ -494,11 +496,69 @@ def test_same_architecture_eight_device_caches_are_device_local():
     assert {key[1] for key in rmsnorm_flydsl_impl._BWD_CACHE} == set(range(8))
 
 
-def test_architecture_overrides_must_agree(monkeypatch):
-    monkeypatch.setenv("ARCH", "gfx942")
-    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx950")
-    with pytest.raises(ValueError, match="must select the same"):
+def test_compile_target_must_match_the_device(monkeypatch):
+    """FlyDSL's own target is the authority, not the ARCH environment."""
+    _clear_caches()
+    device_arch = rmsnorm_flydsl_impl._normalize_arch(
+        torch.cuda.get_device_properties(0).gcnArchName
+    )
+    other = "gfx942" if device_arch != "gfx942" else "gfx950"
+    monkeypatch.setattr(rmsnorm_flydsl_impl, "_flydsl_compile_target", lambda: ("rocm", other))
+    with pytest.raises(ValueError, match="mixed architectures"):
         rmsnorm_flydsl_impl._validate_arch(torch.device("cuda", 0))
+    assert not rmsnorm_flydsl_impl._DEVICE_ARCH_CACHE
+
+
+def test_non_rocm_compile_backend_is_rejected(monkeypatch):
+    _clear_caches()
+    monkeypatch.setattr(rmsnorm_flydsl_impl, "_flydsl_compile_target", lambda: ("cuda", "sm_90"))
+    with pytest.raises(RuntimeError, match="ROCm backend"):
+        rmsnorm_flydsl_impl._validate_arch(torch.device("cuda", 0))
+
+
+def test_architecture_is_validated_once_per_device(monkeypatch):
+    """The warm launch path must not re-query the device or the compiler."""
+    _clear_caches()
+    calls = []
+    real = rmsnorm_flydsl_impl._flydsl_compile_target
+    monkeypatch.setattr(
+        rmsnorm_flydsl_impl,
+        "_flydsl_compile_target",
+        lambda: (calls.append(1), real())[1],
+    )
+
+    weight = torch.randn(512, device="cuda", dtype=torch.float32)
+    for _ in range(4):
+        for n_cols in (256, 512):
+            x = torch.randn((8, n_cols), device="cuda", dtype=torch.bfloat16)
+            rmsnorm(x, weight[:n_cols])
+
+    assert len(calls) == 1
+    assert set(rmsnorm_flydsl_impl._DEVICE_ARCH_CACHE) == {0}
+
+
+def test_concurrent_first_calls_build_one_launcher():
+    _clear_caches()
+    weight = torch.randn(1024, device="cuda", dtype=torch.float32)
+    barrier = threading.Barrier(4)
+    errors = []
+
+    def call():
+        try:
+            barrier.wait(timeout=60)
+            x = torch.randn((8, 1024), device="cuda", dtype=torch.bfloat16)
+            rmsnorm(x, weight)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=call) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=120)
+
+    assert not errors
+    assert len(rmsnorm_flydsl_impl._FWD_CACHE) == 1
 
 
 def test_fullgraph_empty_m_autograd():
