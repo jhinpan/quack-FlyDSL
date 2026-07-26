@@ -88,6 +88,30 @@ kernel fell back to scalar I/O, landing at 29% of the copy roofline. Sizing
 the block to the row and launching proportionally more blocks took
 32768x1024 fp16 from 137.5 us to 62.4 us (2.20x, 29% -> 62% of roofline).
 
+## A same-device copy is not the bandwidth ceiling
+
+The harness originally normalized against a `torch.copy_`, which sustains only
+4.89 TB/s on MI355X — low enough that the RMSNorm forward exceeded it and
+reported over 100%. Probing three patterns over 2 GiB buffers:
+
+| pattern | TB/s | share of the 8 TB/s HBM3E spec |
+| --- | --- | --- |
+| pure write | 6.84 | 85% |
+| two read + one write | 6.09 | 76% |
+| same-device copy | 4.89 | 61% |
+
+The forward peaks at 5.73 TB/s, which is 84% of the best probe, 94% of the
+mixed-traffic probe, and 72% of the datasheet number. Report against the best
+probe; it is the conservative denominator because a pure write has no
+read/write turnaround on the bus.
+
+## Against PyTorch on the same part
+
+`torch.nn.functional.rms_norm`, same harness. Forward: 38 of 45 cells ours,
+median 1.46x, with the seven losses all small-batch and launch-bound.
+Backward: 45 of 45, median 4.51x, because torch's backward sits at 14-15% of
+peak bandwidth on every large shape while ours reaches 76%.
+
 ## Where the backend stands against the CuTe kernel
 
 Same harness on all three machines, `benchmarks/benchmark_rmsnorm_flydsl.py`,
