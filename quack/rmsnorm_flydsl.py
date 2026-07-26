@@ -96,6 +96,29 @@ def _validate_arch(device: torch.device) -> str:
     return actual
 
 
+def _reject_unsupported_features(**kwargs) -> None:
+    """Reject the parts of the upstream RMSNorm contract this backend lacks.
+
+    Keeping the list in one place means an unsupported call names the missing
+    feature instead of failing somewhere deeper with a shape or dtype error.
+    """
+    unsupported = (
+        ("bias", None, "a bias"),
+        ("residual", None, "residual fusion"),
+        ("out_dtype", None, "out_dtype"),
+        ("residual_dtype", None, "residual_dtype"),
+        ("prenorm", False, "prenorm outputs"),
+        ("weight_offset", 0.0, "weight_offset"),
+    )
+    for name, default, description in unsupported:
+        if kwargs[name] is not default and kwargs[name] != default:
+            raise NotImplementedError(
+                f"the FlyDSL RMSNorm backend does not support {description} ({name})"
+            )
+    if kwargs["weight"] is None:
+        raise NotImplementedError("the FlyDSL RMSNorm backend requires an explicit weight")
+
+
 def _validate_inputs(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -108,7 +131,10 @@ def _validate_inputs(
     if x.ndim < 1:
         raise ValueError("x must have at least one dimension")
     if weight.ndim != 1:
-        raise ValueError(f"weight must be 1-D, got shape {tuple(weight.shape)}")
+        raise NotImplementedError(
+            "the FlyDSL RMSNorm backend does not support per-head weights; "
+            f"weight must be 1-D, got shape {tuple(weight.shape)}"
+        )
 
     n = x.shape[-1]
     if weight.shape[0] != n:
@@ -538,10 +564,30 @@ class _RMSNormFunction(torch.autograd.Function):
 
 def rmsnorm(
     x: torch.Tensor,
-    weight: torch.Tensor,
+    weight: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+    residual: torch.Tensor | None = None,
+    out_dtype: torch.dtype | None = None,
+    residual_dtype: torch.dtype | None = None,
     eps: float = EPS,
+    prenorm: bool = False,
+    weight_offset: float = 0.0,
 ) -> torch.Tensor:
-    """Apply plain RMSNorm over the last dimension using the FlyDSL backend."""
+    """Apply plain RMSNorm over the last dimension using the FlyDSL backend.
+
+    The signature mirrors :func:`quack.rmsnorm` so this backend can stand in
+    for it. Everything beyond plain weighted RMSNorm is rejected by name
+    rather than silently ignored.
+    """
+    _reject_unsupported_features(
+        weight=weight,
+        bias=bias,
+        residual=residual,
+        out_dtype=out_dtype,
+        residual_dtype=residual_dtype,
+        prenorm=prenorm,
+        weight_offset=weight_offset,
+    )
     m, n, eps = _validate_inputs(x, weight, eps)
     if m == 0:
         return x * weight.to(x.dtype)

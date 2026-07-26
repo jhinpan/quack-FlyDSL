@@ -1,5 +1,7 @@
 # Copyright (c) 2026, Tri Dao.
 
+import ast
+import inspect
 import math
 import threading
 from pathlib import Path
@@ -107,9 +109,10 @@ def test_forward_empty_m_returns_empty_without_launching():
     ("x", "weight", "error", "message"),
     [
         ("not-a-tensor", torch.ones(8), TypeError, "x must be a torch.Tensor"),
-        (torch.ones(8), None, TypeError, "weight must be a torch.Tensor"),
+        (torch.ones(8), None, NotImplementedError, "requires an explicit weight"),
+        (torch.ones(8), 5.0, TypeError, "weight must be a torch.Tensor"),
         (torch.tensor(1.0), torch.ones(1), ValueError, "at least one dimension"),
-        (torch.ones(2, 8), torch.ones(2, 8), ValueError, "weight must be 1-D"),
+        (torch.ones(2, 8), torch.ones(2, 8), NotImplementedError, "per-head"),
         (torch.ones(2, 8), torch.ones(7), ValueError, "last dimension"),
         (torch.empty(2, 0), torch.empty(0), ValueError, "between 1 and 8192"),
         (torch.ones(1, 8193), torch.ones(8193), ValueError, "between 1 and 8192"),
@@ -583,6 +586,112 @@ def test_fullgraph_empty_m_autograd():
     assert out.shape == x.shape
     assert x.grad is not None and x.grad.numel() == 0
     torch.testing.assert_close(weight.grad, torch.zeros_like(weight))
+
+
+def _upstream_rmsnorm_signature() -> tuple[list[str], dict[str, str]]:
+    """Read quack.rmsnorm's signature from source.
+
+    Importing the CuTe module would pull in cutlass, which is deliberately
+    absent on ROCm, so parse it instead of importing it.
+    """
+    source = (Path(__file__).resolve().parents[1] / "quack" / "rmsnorm.py").read_text()
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.FunctionDef) and node.name == "rmsnorm":
+            names = [argument.arg for argument in node.args.args]
+            defaults = [ast.unparse(default) for default in node.args.defaults]
+            return names, dict(zip(names[len(names) - len(defaults) :], defaults))
+    raise AssertionError("quack/rmsnorm.py no longer defines a top-level rmsnorm")
+
+
+def test_public_signature_matches_upstream_rmsnorm():
+    """The backend must be substitutable for quack.rmsnorm, not a lookalike."""
+    names, defaults = _upstream_rmsnorm_signature()
+    ours = inspect.signature(rmsnorm).parameters
+    assert list(ours) == names
+    for name, default in defaults.items():
+        assert repr(ours[name].default) == default, name
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "feature"),
+    [
+        ({"bias": "tensor"}, "bias"),
+        ({"residual": "tensor"}, "residual"),
+        ({"out_dtype": torch.float32}, "out_dtype"),
+        ({"residual_dtype": torch.float32}, "residual_dtype"),
+        ({"prenorm": True}, "prenorm"),
+        ({"weight_offset": 1.0}, "weight_offset"),
+    ],
+)
+def test_unsupported_upstream_features_name_themselves(kwargs, feature):
+    x = torch.randn((2, 128), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(128, device="cuda", dtype=torch.bfloat16)
+    if kwargs.get("bias") == "tensor":
+        kwargs["bias"] = weight
+    if kwargs.get("residual") == "tensor":
+        kwargs["residual"] = x
+    with pytest.raises(NotImplementedError, match=feature):
+        rmsnorm(x, weight, **kwargs)
+
+
+def test_omitting_the_weight_is_rejected():
+    x = torch.randn((2, 128), device="cuda", dtype=torch.bfloat16)
+    with pytest.raises(NotImplementedError, match="weight"):
+        rmsnorm(x)
+
+
+def test_per_head_weight_is_rejected():
+    x = torch.randn((2, 4, 32), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn((4, 32), device="cuda", dtype=torch.bfloat16)
+    with pytest.raises(NotImplementedError, match="per-head"):
+        rmsnorm(x, weight)
+
+
+def test_upstream_defaults_still_run():
+    x = torch.randn((2, 128), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(128, device="cuda", dtype=torch.bfloat16)
+    _assert_close(rmsnorm(x, weight), _reference(x, weight, 1e-6))
+
+
+def test_software_bf16_rounding_matches_the_hardware_convert():
+    """Cover the rounding path that only pre-gfx95x parts take.
+
+    gfx942 has no packed fp32->bf16 convert, so the kernel rounds to nearest
+    even by hand. That branch is otherwise dead on this machine.
+    """
+    from quack._flydsl.kernel_utils import run_compiled
+    from quack._flydsl.rmsnorm_kernel import build_rmsnorm_module
+
+    torch.manual_seed(3)
+    n = 4096
+    x = torch.randn((64, n), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(n, device="cuda", dtype=torch.float32)
+    stream = torch.cuda.current_stream().cuda_stream
+
+    rounded = {}
+    for use_hw in (True, False):
+        out = torch.empty_like(x)
+        launcher = build_rmsnorm_module(
+            n,
+            "bf16",
+            store_rstd=False,
+            eps=1e-6,
+            weight_dtype_str="f32",
+            use_hw_cvt_bf16=use_hw,
+        )
+        run_compiled(launcher, x, weight, out, x.shape[0], stream)
+        torch.cuda.synchronize()
+        rounded[use_hw] = out
+
+    torch.testing.assert_close(rounded[False], rounded[True], rtol=0, atol=0)
+    _assert_close(rounded[False], _reference(x, weight, 1e-6))
+
+
+def test_unsupported_architectures_are_named(monkeypatch):
+    _clear_caches()
+    monkeypatch.setattr(rmsnorm_flydsl_impl, "_normalize_arch", lambda _: "gfx90a")
+    with pytest.raises(ValueError, match="gfx942, gfx950"):
+        rmsnorm_flydsl_impl._validate_arch(torch.device("cuda", 0))
 
 
 def test_vendored_source_is_pinned_and_isolated():
