@@ -1,0 +1,207 @@
+# Copyright (c) 2026, Tri Dao.
+
+"""Specification for how a FlyDSL RMSNorm row is split across a thread block.
+
+Pure arithmetic with no FlyDSL, torch, or GPU dependency, so it runs
+everywhere. The kernels consume :class:`RmsNormRowConfig` as the single source
+of truth for vector size, block width, and tile-loop trip count.
+"""
+
+import math
+
+import pytest
+
+from quack.flydsl.rmsnorm_config import (
+    ACCESS_BITS,
+    MAX_NUM_THREADS,
+    MIN_NUM_THREADS,
+    RmsNormRowConfig,
+    use_multi_row_kernel,
+)
+
+
+DTYPE_WIDTHS = (16, 32)
+HIDDEN_SIZES = (
+    1,
+    3,
+    7,
+    8,
+    16,
+    64,
+    127,
+    128,
+    255,
+    256,
+    512,
+    1000,
+    1020,
+    1024,
+    2048,
+    3000,
+    3001,
+    4092,
+    4095,
+    4096,
+    6144,
+    8191,
+    8192,
+)
+# The persistent backward accepts a wider block than the one-block-per-row
+# forward because it also has to keep the machine busy across rows.
+STAGED_MAX_THREADS = 512
+
+
+def config(N, dtype_width, max_num_threads=MAX_NUM_THREADS):
+    return RmsNormRowConfig.from_analytical_heuristic(N, dtype_width, max_num_threads)
+
+
+@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
+def test_a_whole_row_uses_the_full_128_bit_access(dtype_width):
+    assert config(4096, dtype_width).access_bits == ACCESS_BITS
+
+
+def test_fp32_rows_vectorize():
+    """Regression: FP32 used to fall through to a scalar loop unconditionally."""
+    assert config(4096, 32).vecsize == 4
+
+
+@pytest.mark.parametrize(
+    ("N", "dtype_width", "vecsize"),
+    [
+        (4096, 16, 8),
+        (4092, 16, 4),
+        (1020, 16, 4),
+        (1018, 16, 2),
+        (3001, 16, 1),
+        (4096, 32, 4),
+        (4094, 32, 2),
+        (4095, 32, 1),
+    ],
+)
+def test_vecsize_degrades_by_gcd_rather_than_collapsing_to_scalar(N, dtype_width, vecsize):
+    """Matches quack.rmsnorm: gcd(N, 128 // dtype_width), not an all-or-nothing test."""
+    assert config(N, dtype_width).vecsize == vecsize
+
+
+@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
+@pytest.mark.parametrize("N", HIDDEN_SIZES)
+def test_the_access_is_always_a_whole_power_of_two_number_of_bits(N, dtype_width):
+    access = config(N, dtype_width).access_bits
+    assert access in (8, 16, 32, 64, 128)
+    assert access <= ACCESS_BITS
+
+
+@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
+@pytest.mark.parametrize("N", HIDDEN_SIZES)
+def test_vectors_tile_the_row_exactly(N, dtype_width):
+    c = config(N, dtype_width)
+    assert c.vecsize == math.gcd(N, ACCESS_BITS // dtype_width)
+    assert c.num_vecs * c.vecsize == N
+
+
+@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
+@pytest.mark.parametrize("N", HIDDEN_SIZES)
+def test_tiles_cover_the_row_without_a_dead_pass(N, dtype_width):
+    c = config(N, dtype_width)
+    assert c.num_tiles * c.num_threads * c.vecsize >= N
+    assert (c.num_tiles - 1) * c.num_threads * c.vecsize < N
+
+
+@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
+@pytest.mark.parametrize("N", HIDDEN_SIZES)
+def test_block_width_stays_within_bounds_and_is_a_power_of_two(N, dtype_width):
+    c = config(N, dtype_width)
+    assert MIN_NUM_THREADS <= c.num_threads <= MAX_NUM_THREADS
+    assert c.num_threads & (c.num_threads - 1) == 0
+
+
+@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
+@pytest.mark.parametrize("N", HIDDEN_SIZES)
+def test_registers_cached_per_thread_stay_bounded(N, dtype_width):
+    """The forward keeps the whole row in registers between its two passes."""
+    assert config(N, dtype_width).elems_per_thread <= 32
+
+
+@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
+@pytest.mark.parametrize("N", HIDDEN_SIZES)
+def test_predication_flag_matches_the_arithmetic(N, dtype_width):
+    c = config(N, dtype_width)
+    assert c.needs_predicate is not (c.num_vecs == c.num_tiles * c.num_threads)
+
+
+def test_small_rows_do_not_reserve_a_whole_wide_block():
+    """A 512-element bf16 row is one 64-thread tile, not a quarter-idle 256."""
+    c = config(512, 16)
+    assert (c.num_threads, c.num_tiles, c.needs_predicate) == (64, 1, False)
+
+
+def test_wide_rows_saturate_the_block_and_add_tiles():
+    c = config(8192, 16)
+    assert (c.num_threads, c.num_tiles, c.needs_predicate) == (MAX_NUM_THREADS, 4, False)
+
+
+@pytest.mark.parametrize(
+    ("N", "dtype_width", "vecsize", "num_threads"),
+    [
+        (1024, 16, 8, 128),
+        (2048, 16, 8, 256),
+        (4096, 16, 8, 512),
+        (8192, 16, 8, 512),
+        (1024, 32, 4, 256),
+        (2048, 32, 4, 512),
+        (8192, 32, 4, 512),
+    ],
+)
+def test_the_staged_block_shrinks_to_the_row(N, dtype_width, vecsize, num_threads):
+    """Regression: a fixed 512-thread block forced short rows back to scalar."""
+    c = config(N, dtype_width, STAGED_MAX_THREADS)
+    assert (c.vecsize, c.num_threads) == (vecsize, num_threads)
+    assert not c.needs_predicate
+
+
+@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
+@pytest.mark.parametrize("N", HIDDEN_SIZES)
+def test_the_staged_block_stays_within_its_wider_ceiling(N, dtype_width):
+    c = config(N, dtype_width, STAGED_MAX_THREADS)
+    assert MIN_NUM_THREADS <= c.num_threads <= STAGED_MAX_THREADS
+    assert c.num_tiles * c.num_threads * c.vecsize >= N
+
+
+@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
+@pytest.mark.parametrize("N", HIDDEN_SIZES)
+def test_selection_is_deterministic(N, dtype_width):
+    assert config(N, dtype_width) == config(N, dtype_width)
+
+
+def test_unsupported_element_width_is_rejected():
+    with pytest.raises(ValueError, match="element width"):
+        config(4096, 24)
+
+
+@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
+@pytest.mark.parametrize("N", (1, 3, 7, 8, 16, 64, 127, 128, 255))
+def test_tiny_rows_are_batched_several_to_a_block(N, dtype_width):
+    """One block per row wastes a launch when the row cannot fill one wave."""
+    assert use_multi_row_kernel(N, dtype_width)
+
+
+@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
+@pytest.mark.parametrize("N", (1024, 2048, 4096, 6144, 8192))
+def test_rows_that_fill_a_block_use_the_vectorized_kernel(N, dtype_width):
+    """Regression: 1024 and 2048 used to be forced onto the scalar kernel."""
+    assert not use_multi_row_kernel(N, dtype_width)
+    assert config(N, dtype_width).vectorized
+
+
+@pytest.mark.parametrize("N", (3001, 4095, 8191))
+def test_wide_unvectorizable_rows_prefer_one_block_per_row(N):
+    """A long scalar row still beats batching it into a multi-row block."""
+    assert not use_multi_row_kernel(N, 16)
+
+
+def test_the_vectorized_crossover_is_one_minimum_block_of_vectors():
+    """bf16 crosses over at 64 x 8 elements, fp32 at 64 x 4."""
+    assert use_multi_row_kernel(504, 16)
+    assert not use_multi_row_kernel(512, 16)
+    assert use_multi_row_kernel(252, 32)
+    assert not use_multi_row_kernel(256, 32)

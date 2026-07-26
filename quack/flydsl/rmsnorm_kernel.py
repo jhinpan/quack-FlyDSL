@@ -19,6 +19,7 @@ from .kernel_utils import dtype_to_elem_bits, dtype_to_elem_type, has_hw_bf16_co
 from .rmsnorm_common import (
     WARP_SIZE,
     assert_arch_matches_reductions,
+    buffer_copy_atom,
     load_scalar,
     load_vec,
     load_weight_vec,
@@ -29,9 +30,9 @@ from .rmsnorm_common import (
     store_vec,
     to_elem_scalar,
     to_elem_vec,
-    weight_vec_width,
+    weight_access_plan,
 )
-from .rmsnorm_tiling import select_row_tiling, use_multi_row_kernel
+from .rmsnorm_config import RmsNormRowConfig, use_multi_row_kernel
 
 
 def build_rmsnorm_module(
@@ -60,8 +61,8 @@ def build_rmsnorm_module(
         )
 
     use_hw_cvt_bf16 = has_hw_bf16_convert(arch)
-    tiling = select_row_tiling(n, elem_bits)
-    block_threads = tiling.block_threads
+    config = RmsNormRowConfig.from_analytical_heuristic(n, elem_bits)
+    block_threads = config.num_threads
     red_slots = max(1, (block_threads + WARP_SIZE - 1) // WARP_SIZE)
     weight_elem_bits = dtype_to_elem_bits(weight_dtype_str)
     shared_storage = make_reduction_storage(red_slots)
@@ -88,7 +89,7 @@ def build_rmsnorm_module(
         if const_expr(store_rstd):
             rstd_buffer = fx.rocdl.make_buffer_tensor(rstd_tensor)
             rstd_div = fx.logical_divide(rstd_buffer, fx.make_layout(1, 1))
-            rstd_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
+            rstd_copy_atom = buffer_copy_atom(32, 32)
 
         def wave_reduce_add(value):
             result = value
@@ -132,32 +133,30 @@ def build_rmsnorm_module(
         row_output = row_buffer(output, row, elem_bits, n)
         gamma_buffer = fx.rocdl.make_buffer_tensor(gamma)
 
-        if const_expr(tiling.vectorized):
-            vec_width = tiling.vec_width
-            num_vecs = tiling.num_vecs
-            last_tile = tiling.num_tiles - 1
-            input_div = fx.logical_divide(row_input, fx.make_layout(vec_width, 1))
-            output_div = fx.logical_divide(row_output, fx.make_layout(vec_width, 1))
-            gamma_div = fx.logical_divide(
-                gamma_buffer,
-                fx.make_layout(weight_vec_width(weight_elem_bits), 1),
-            )
-            copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
-            gamma_copy_atom = fx.make_copy_atom(
-                fx.rocdl.BufferCopy128b(),
+        if const_expr(config.vectorized):
+            vecsize = config.vecsize
+            num_vecs = config.num_vecs
+            last_tile = config.num_tiles - 1
+            weight_accesses, weight_per_access = weight_access_plan(vecsize, weight_elem_bits)
+            input_div = fx.logical_divide(row_input, fx.make_layout(vecsize, 1))
+            output_div = fx.logical_divide(row_output, fx.make_layout(vecsize, 1))
+            gamma_div = fx.logical_divide(gamma_buffer, fx.make_layout(weight_per_access, 1))
+            copy_atom = buffer_copy_atom(config.access_bits, elem_bits)
+            gamma_copy_atom = buffer_copy_atom(
+                weight_per_access * weight_elem_bits,
                 weight_elem_bits,
             )
 
             thread_sumsq = fx.Float32(0.0)
             input_local = []
-            for tile_i in range_constexpr(tiling.num_tiles):
+            for tile_i in range_constexpr(config.num_tiles):
                 # Only the final tile can run off the end of the row.
-                partial = tiling.needs_predicate and tile_i == last_tile
+                partial = config.needs_predicate and tile_i == last_tile
                 index = tid + tile_i * block_threads
                 if const_expr(partial):
                     in_row = index < num_vecs
                     index = in_row.select(index, 0)
-                vector = load_vec(copy_atom, vec_width, elem_dtype, input_div, index)
+                vector = load_vec(copy_atom, vecsize, elem_dtype, input_div, index)
                 input_local.append(vector)
                 values = vector.to(fx.Float32)
                 contribution = (values * values).reduce(
@@ -182,8 +181,8 @@ def build_rmsnorm_module(
                         rrms,
                     )
 
-            for tile_i in range_constexpr(tiling.num_tiles):
-                partial = tiling.needs_predicate and tile_i == last_tile
+            for tile_i in range_constexpr(config.num_tiles):
+                partial = config.needs_predicate and tile_i == last_tile
                 index = tid + tile_i * block_threads
                 safe_index = index
                 if const_expr(partial):
@@ -195,7 +194,7 @@ def build_rmsnorm_module(
                     weight_elem_bits,
                     gamma_div,
                     safe_index,
-                    vec_width,
+                    vecsize,
                 )
                 values = input_local[tile_i].to(fx.Float32)
                 result = to_elem_vec(
@@ -203,22 +202,16 @@ def build_rmsnorm_module(
                     elem_dtype,
                     use_hw_cvt_bf16,
                     values * rrms * weights,
-                    vec_width,
+                    vecsize,
                 )
                 if const_expr(partial):
                     if in_row:
-                        store_vec(copy_atom, vec_width, elem_dtype, result, output_div, index)
+                        store_vec(copy_atom, vecsize, elem_dtype, result, output_div, index)
                 else:
-                    store_vec(copy_atom, vec_width, elem_dtype, result, output_div, index)
+                    store_vec(copy_atom, vecsize, elem_dtype, result, output_div, index)
         else:
-            copy_atom = fx.make_copy_atom(
-                fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
-                elem_bits,
-            )
-            gamma_copy_atom = fx.make_copy_atom(
-                (fx.rocdl.BufferCopy16b() if weight_elem_bits <= 16 else fx.rocdl.BufferCopy32b()),
-                weight_elem_bits,
-            )
+            copy_atom = buffer_copy_atom(elem_bits, elem_bits)
+            gamma_copy_atom = buffer_copy_atom(weight_elem_bits, weight_elem_bits)
             input_div = fx.logical_divide(row_input, fx.make_layout(1, 1))
             gamma_div = fx.logical_divide(gamma_buffer, fx.make_layout(1, 1))
             output_div = fx.logical_divide(row_output, fx.make_layout(1, 1))
@@ -355,7 +348,7 @@ def _build_rmsnorm_small_n_module(
             if const_expr(store_rstd):
                 rstd_buffer = fx.rocdl.make_buffer_tensor(rstd_tensor)
                 rstd_div = fx.logical_divide(rstd_buffer, fx.make_layout(1, 1))
-                rstd_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
+                rstd_copy_atom = buffer_copy_atom(32, 32)
 
             input_div = fx.logical_divide(
                 row_buffer(input_tensor, row, elem_bits, n),
@@ -366,14 +359,8 @@ def _build_rmsnorm_small_n_module(
                 row_buffer(output, row, elem_bits, n),
                 fx.make_layout(1, 1),
             )
-            copy_atom = fx.make_copy_atom(
-                fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
-                elem_bits,
-            )
-            gamma_copy_atom = fx.make_copy_atom(
-                (fx.rocdl.BufferCopy16b() if weight_elem_bits <= 16 else fx.rocdl.BufferCopy32b()),
-                weight_elem_bits,
-            )
+            copy_atom = buffer_copy_atom(elem_bits, elem_bits)
+            gamma_copy_atom = buffer_copy_atom(weight_elem_bits, weight_elem_bits)
 
             def group_reduce_add(value):
                 result = value

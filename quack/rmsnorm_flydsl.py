@@ -11,15 +11,15 @@ import numbers
 
 import torch
 
-from quack._flydsl.kernel_utils import FLYDSL_BUILD_LOCK, run_compiled
-from quack._flydsl.rmsnorm_bwd_kernel import (
+from quack.flydsl.kernel_utils import FLYDSL_BUILD_LOCK, run_compiled
+from quack.flydsl.rmsnorm_bwd_kernel import (
     build_rmsnorm_bwd_module,
     build_rmsnorm_bwd_two_stage_module,
-    TWO_STAGE_MAX_BLOCK_THREADS,
-    rmsnorm_bwd_two_stage_tiling,
+    TWO_STAGE_MAX_NUM_THREADS,
+    rmsnorm_bwd_two_stage_config,
 )
-from quack._flydsl.rmsnorm_common import EPS
-from quack._flydsl.rmsnorm_kernel import build_rmsnorm_module
+from quack.flydsl.rmsnorm_common import EPS
+from quack.flydsl.rmsnorm_kernel import build_rmsnorm_module
 
 
 __all__ = ["rmsnorm"]
@@ -209,14 +209,14 @@ def _select_rmsnorm_bwd_config(
             num_cus = torch.cuda.get_device_properties(device).multi_processor_count
             if not torch.compiler.is_compiling():
                 _BWD_CU_COUNT_CACHE[device] = num_cus
-        tiling = rmsnorm_bwd_two_stage_tiling(n, dtype_str)
-        if tiling.vectorized:
+        config = rmsnorm_bwd_two_stage_config(n, dtype_str)
+        if config.vectorized:
             num_programs = num_cus if m < 2048 else (3 * num_cus) // 2
         else:
             num_programs = num_cus if m < 1024 else 2 * num_cus
         # A row narrower than the widest block gets a narrower block, so launch
         # proportionally more of them to keep the same threads resident.
-        num_programs *= TWO_STAGE_MAX_BLOCK_THREADS // tiling.block_threads
+        num_programs *= TWO_STAGE_MAX_NUM_THREADS // config.num_threads
         return "two_stage", min(m, num_programs)
     return "atomic", None
 

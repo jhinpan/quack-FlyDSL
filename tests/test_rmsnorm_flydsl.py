@@ -15,7 +15,7 @@ if torch.version.hip is None:
 
 pytest.importorskip("flydsl")
 
-from quack._flydsl import FLYDSL_UPSTREAM_SHA  # noqa: E402
+from quack.flydsl import FLYDSL_UPSTREAM_SHA  # noqa: E402
 import quack.rmsnorm_flydsl as rmsnorm_flydsl_impl  # noqa: E402
 from quack.rmsnorm_flydsl import rmsnorm  # noqa: E402
 
@@ -608,7 +608,7 @@ def test_a_compile_target_change_is_caught_on_the_next_build(monkeypatch):
 
 def test_a_warp_size_mismatch_is_rejected():
     """The reductions bake in a wavefront size; a disagreeing target must fail loudly."""
-    from quack._flydsl.rmsnorm_common import assert_arch_matches_reductions
+    from quack.flydsl.rmsnorm_common import assert_arch_matches_reductions
 
     assert_arch_matches_reductions("gfx942")
     assert_arch_matches_reductions("gfx950")
@@ -735,8 +735,8 @@ def test_software_bf16_rounding_matches_the_hardware_convert():
     gfx942 has no packed fp32->bf16 convert, so the kernel rounds to nearest
     even by hand. That branch is otherwise dead on this machine.
     """
-    from quack._flydsl.kernel_utils import run_compiled
-    from quack._flydsl.rmsnorm_kernel import build_rmsnorm_module
+    from quack.flydsl.kernel_utils import run_compiled
+    from quack.flydsl.rmsnorm_kernel import build_rmsnorm_module
 
     torch.manual_seed(3)
     n = 4096
@@ -856,7 +856,7 @@ def test_unsupported_architectures_are_named(monkeypatch):
 
 def test_vendored_source_is_pinned_and_isolated():
     assert FLYDSL_UPSTREAM_SHA == UPSTREAM_SHA
-    source_root = Path(__file__).resolve().parents[1] / "quack" / "_flydsl"
+    source_root = Path(__file__).resolve().parents[1] / "quack" / "flydsl"
     for filename in (
         "rmsnorm_kernel.py",
         "rmsnorm_bwd_kernel.py",

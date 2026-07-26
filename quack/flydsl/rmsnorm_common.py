@@ -11,12 +11,44 @@ from flydsl.expr import const_expr
 from flydsl.expr.typing import full
 
 from .kernel_utils import get_warp_size
-from .rmsnorm_tiling import VECTOR_BITS
+from .rmsnorm_config import ACCESS_BITS
 
 
 EPS = 1e-6
 BLOCK_THREADS = 256
 WARP_SIZE = get_warp_size()
+
+_BUFFER_COPY_OPS = {
+    8: fx.rocdl.BufferCopy8b,
+    16: fx.rocdl.BufferCopy16b,
+    32: fx.rocdl.BufferCopy32b,
+    64: fx.rocdl.BufferCopy64b,
+    128: fx.rocdl.BufferCopy128b,
+}
+
+
+def buffer_copy_atom(access_bits: int, elem_bits: int):
+    """Copy atom that moves ``access_bits`` at a time.
+
+    The width follows from the vector size the config picked, so a row that is
+    not a whole number of 128-bit vectors uses the widest access that does
+    divide it rather than dropping to scalar.
+    """
+    try:
+        copy_op = _BUFFER_COPY_OPS[access_bits]
+    except KeyError:
+        raise ValueError(f"no buffer copy for a {access_bits}-bit access") from None
+    return fx.make_copy_atom(copy_op(), elem_bits)
+
+
+def weight_access_plan(vecsize: int, weight_dtype_width: int) -> tuple[int, int]:
+    """Split ``vecsize`` weights into whole accesses of at most 128 bits.
+
+    Returns the number of accesses and the elements each one carries. Only an
+    FP32 weight paired with a full 16-bit activation vector needs more than one.
+    """
+    accesses = max(1, (vecsize * weight_dtype_width) // ACCESS_BITS)
+    return accesses, vecsize // accesses
 
 
 def assert_arch_matches_reductions(arch: str) -> None:
@@ -89,22 +121,21 @@ def load_vec(copy_atom, vec_width, elem_dtype, divided_tensor, index):
 def load_weight_vec(
     copy_atom,
     weight_elem_dtype,
-    weight_elem_bits,
+    weight_dtype_width,
     divided_tensor,
     index,
-    vec_width,
+    vecsize,
 ):
-    """Load ``vec_width`` weights as fp32 using whole 128-bit accesses.
+    """Load ``vecsize`` weights as fp32 using whole accesses.
 
-    An FP32 weight paired with 16-bit activations needs two accesses to cover
-    one activation vector; every other combination needs exactly one.
+    An FP32 weight paired with a full 16-bit activation vector needs two
+    accesses to cover it; every other combination needs exactly one.
     """
-    per_access = weight_vec_width(weight_elem_bits)
-    accesses = vec_width // per_access
+    accesses, per_access = weight_access_plan(vecsize, weight_dtype_width)
     if const_expr(accesses <= 1):
         return load_vec(
             copy_atom,
-            vec_width,
+            vecsize,
             weight_elem_dtype,
             divided_tensor,
             index,
@@ -170,8 +201,3 @@ def resolve_rmsnorm_weight_dtype(
             f"FP16/BF16 activations with FP32 weights, got {dtype_str}/{weight_dtype_str}"
         )
     return weight_dtype_str
-
-
-def weight_vec_width(weight_elem_bits: int) -> int:
-    """Weight elements carried by one 128-bit access."""
-    return VECTOR_BITS // weight_elem_bits
