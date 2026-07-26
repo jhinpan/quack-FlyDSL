@@ -13,6 +13,7 @@ from quack._flydsl.rmsnorm_tiling import (
     MAX_BLOCK_THREADS,
     MIN_BLOCK_THREADS,
     VECTOR_BITS,
+    select_column_io_width,
     select_row_tiling,
     use_multi_row_kernel,
 )
@@ -163,3 +164,37 @@ def test_the_vectorized_crossover_is_one_minimum_block_of_vectors():
     assert not use_multi_row_kernel(512, 16)
     assert use_multi_row_kernel(252, 32)
     assert not use_multi_row_kernel(256, 32)
+
+
+# A persistent kernel cannot shrink its block to fit the row, so the column
+# width has its own rule.
+PERSISTENT_BLOCK = 512
+
+
+@pytest.mark.parametrize(
+    ("n", "elem_bits", "expected"),
+    [
+        (8192, 16, 8),
+        (4096, 16, 8),
+        (3000, 16, 8),
+        (2048, 16, 8),
+        (1024, 16, 1),
+        (512, 16, 1),
+        (8192, 32, 4),
+        (2048, 32, 4),
+        (1024, 32, 4),
+        (512, 32, 1),
+        (3001, 16, 1),
+    ],
+)
+def test_column_io_width_keeps_the_persistent_block_busy(n, elem_bits, expected):
+    """Below half a block of columns the wider access costs more than it saves."""
+    assert select_column_io_width(n, elem_bits, PERSISTENT_BLOCK) == expected
+
+
+@pytest.mark.parametrize("elem_bits", ELEM_BITS)
+@pytest.mark.parametrize("n", HIDDEN_SIZES)
+def test_column_io_width_never_exceeds_the_row_vector_width(n, elem_bits):
+    width = select_column_io_width(n, elem_bits, PERSISTENT_BLOCK)
+    assert width in (1, select_row_tiling(n, elem_bits).vec_width)
+    assert n % width == 0
