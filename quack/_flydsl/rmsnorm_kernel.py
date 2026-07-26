@@ -17,7 +17,6 @@ from flydsl.runtime.device import get_rocm_arch
 
 from .kernel_utils import dtype_to_elem_bits, dtype_to_elem_type, has_hw_bf16_convert
 from .rmsnorm_common import (
-    EPS,
     WARP_SIZE,
     assert_arch_matches_reductions,
     load_scalar,
@@ -39,7 +38,6 @@ def build_rmsnorm_module(
     n: int,
     dtype_str: str,
     store_rstd: bool = False,
-    eps: float = EPS,
     weight_dtype_str: str | None = None,
     arch: str | None = None,
 ):
@@ -58,7 +56,6 @@ def build_rmsnorm_module(
             n,
             dtype_str,
             store_rstd,
-            eps,
             weight_dtype_str,
         )
 
@@ -75,6 +72,7 @@ def build_rmsnorm_module(
         gamma: fx.Tensor,
         rstd_tensor: fx.Tensor,
         output: fx.Tensor,
+        eps: fx.Float32,
     ):
         row = fx.block_idx.x
         tid = fx.thread_idx.x
@@ -287,9 +285,10 @@ def build_rmsnorm_module(
             output: fx.Tensor,
             rstd_tensor: fx.Tensor,
             m: fx.Int32,
+            eps: fx.Float32,
             stream: fx.Stream = fx.Stream(None),
         ):
-            launcher = rmsnorm_kernel(input_tensor, gamma, rstd_tensor, output)
+            launcher = rmsnorm_kernel(input_tensor, gamma, rstd_tensor, output, eps)
             launcher.launch(
                 grid=(m, 1, 1),
                 block=(block_threads, 1, 1),
@@ -304,9 +303,10 @@ def build_rmsnorm_module(
         gamma: fx.Tensor,
         output: fx.Tensor,
         m: fx.Int32,
+        eps: fx.Float32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        launcher = rmsnorm_kernel(input_tensor, gamma, gamma, output)
+        launcher = rmsnorm_kernel(input_tensor, gamma, gamma, output, eps)
         launcher.launch(
             grid=(m, 1, 1),
             block=(block_threads, 1, 1),
@@ -320,7 +320,6 @@ def _build_rmsnorm_small_n_module(
     n: int,
     dtype_str: str,
     store_rstd: bool,
-    eps: float,
     weight_dtype_str: str,
 ):
     weight_dtype_str = resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
@@ -338,6 +337,7 @@ def _build_rmsnorm_small_n_module(
         rstd_tensor: fx.Tensor,
         output: fx.Tensor,
         m: fx.Int32,
+        eps: fx.Float32,
     ):
         block = fx.block_idx.x
         tid = fx.thread_idx.x
@@ -446,6 +446,7 @@ def _build_rmsnorm_small_n_module(
             output: fx.Tensor,
             rstd_tensor: fx.Tensor,
             m: fx.Int32,
+            eps: fx.Float32,
             stream: fx.Stream = fx.Stream(None),
         ):
             launcher = rmsnorm_small_n_kernel(
@@ -454,6 +455,7 @@ def _build_rmsnorm_small_n_module(
                 rstd_tensor,
                 output,
                 m,
+                eps,
             )
             launcher.launch(
                 grid=((m + fx.Int32(block_m - 1)) // fx.Int32(block_m), 1, 1),
@@ -469,9 +471,10 @@ def _build_rmsnorm_small_n_module(
         gamma: fx.Tensor,
         output: fx.Tensor,
         m: fx.Int32,
+        eps: fx.Float32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        launcher = rmsnorm_small_n_kernel(input_tensor, gamma, gamma, output, m)
+        launcher = rmsnorm_small_n_kernel(input_tensor, gamma, gamma, output, m, eps)
         launcher.launch(
             grid=((m + fx.Int32(block_m - 1)) // fx.Int32(block_m), 1, 1),
             block=(block_threads, 1, 1),

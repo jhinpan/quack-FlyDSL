@@ -159,7 +159,10 @@ def _validate_inputs(
     if isinstance(eps, bool) or not isinstance(eps, numbers.Real):
         raise TypeError(f"eps must be a real number, got {type(eps).__name__}")
     eps = float(eps)
-    if not math.isfinite(eps) or eps <= 0.0:
+    # Spelled as a comparison chain rather than math.isfinite so it still
+    # traces when Dynamo hands us a symbolic float under dynamic=True. It
+    # rejects NaN, both infinities and non-positive values just the same.
+    if not 0.0 < eps < math.inf:
         raise ValueError(f"eps must be finite and positive, got {eps}")
 
     m = x.numel() // n
@@ -224,7 +227,6 @@ def _launch_rmsnorm_fwd(
             dtype_str,
             weight_dtype_str,
             store_rstd,
-            eps,
         )
         launcher = _FWD_CACHE.get(key)
         if launcher is None:
@@ -236,16 +238,15 @@ def _launch_rmsnorm_fwd(
                     n,
                     dtype_str,
                     store_rstd=store_rstd,
-                    eps=eps,
                     weight_dtype_str=weight_dtype_str,
                     arch=arch,
                 ),
             )
         stream = _current_raw_stream(x.device)
         if store_rstd:
-            run_compiled(launcher, x, weight, out, rstd, m, stream)
+            run_compiled(launcher, x, weight, out, rstd, m, eps, stream)
         else:
-            run_compiled(launcher, x, weight, out, m, stream)
+            run_compiled(launcher, x, weight, out, m, eps, stream)
 
 
 @torch.library.custom_op(

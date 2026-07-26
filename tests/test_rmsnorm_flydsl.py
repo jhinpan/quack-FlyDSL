@@ -412,7 +412,8 @@ def test_fullgraph_two_stage_backward():
     assert {key[0] for key in rmsnorm_flydsl_impl._BWD_CACHE} == {"two_stage"}
 
 
-def test_forward_cache_identity_includes_n_dtype_and_eps():
+def test_forward_cache_identity_is_shape_and_dtype_only():
+    """eps is a launch argument, so it must not multiply compiled kernels."""
     _clear_caches()
 
     def call(n, dtype, eps):
@@ -420,18 +421,44 @@ def test_forward_cache_identity_includes_n_dtype_and_eps():
         weight = torch.randn(n, device="cuda", dtype=dtype)
         return rmsnorm(x, weight, eps=eps)
 
-    first = call(129, torch.float16, 1e-6)
+    call(129, torch.float16, 1e-6)
     first_launcher = next(iter(rmsnorm_flydsl_impl._FWD_CACHE.values()))
-    second = call(129, torch.float16, 1e-6)
-    _assert_close(first, first)
-    _assert_close(second, second)
+    call(129, torch.float16, 1e-6)
     assert len(rmsnorm_flydsl_impl._FWD_CACHE) == 1
     assert next(iter(rmsnorm_flydsl_impl._FWD_CACHE.values())) is first_launcher
 
+    for eps in (1e-5, 1e-4, 3e-7, 0.5):
+        call(129, torch.float16, eps)
+    assert len(rmsnorm_flydsl_impl._FWD_CACHE) == 1
+
     call(130, torch.float16, 1e-6)
     call(129, torch.bfloat16, 1e-6)
-    call(129, torch.float16, 1e-5)
-    assert len(rmsnorm_flydsl_impl._FWD_CACHE) == 4
+    assert len(rmsnorm_flydsl_impl._FWD_CACHE) == 3
+
+
+def test_a_runtime_eps_still_reaches_the_kernel():
+    """A cached kernel must honour a new eps rather than the one it was built with."""
+    _clear_caches()
+    torch.manual_seed(11)
+    x = torch.randn((4, 256), device="cuda", dtype=torch.float32)
+    weight = torch.randn(256, device="cuda", dtype=torch.float32)
+
+    for eps in (1e-6, 0.5, 8.0):
+        _assert_close(rmsnorm(x, weight, eps=eps), _reference(x, weight, eps))
+    assert len(rmsnorm_flydsl_impl._FWD_CACHE) == 1
+
+
+def test_fullgraph_with_dynamic_shapes():
+    """math.isfinite on a symbolic float used to break dynamic tracing."""
+    torch._dynamo.reset()
+    compiled = torch.compile(rmsnorm, fullgraph=True, dynamic=True)
+    weight = torch.randn(512, device="cuda", dtype=torch.float32, requires_grad=True)
+    for rows in (8, 16, 32):
+        x = torch.randn((rows, 512), device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        out = compiled(x, weight, eps=1e-5)
+        out.sum().backward()
+        _assert_close(out, _reference(x, weight, 1e-5))
+        assert x.grad is not None
 
 
 def test_non_default_stream_forward_backward():
@@ -712,11 +739,10 @@ def test_software_bf16_rounding_matches_the_hardware_convert():
             n,
             "bf16",
             store_rstd=False,
-            eps=1e-6,
             weight_dtype_str="f32",
             arch=arch,
         )
-        run_compiled(launcher, x, weight, out, x.shape[0], stream)
+        run_compiled(launcher, x, weight, out, x.shape[0], 1e-6, stream)
         torch.cuda.synchronize()
         rounded[arch] = out
 
