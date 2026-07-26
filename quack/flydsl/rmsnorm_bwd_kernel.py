@@ -24,6 +24,7 @@ from .rmsnorm_common import (
     BLOCK_THREADS,
     WARP_SIZE,
     assert_arch_matches_reductions,
+    buffer_copy_atom,
     load_scalar,
     load_vec,
     load_weight_vec,
@@ -33,9 +34,9 @@ from .rmsnorm_common import (
     store_scalar,
     store_vec,
     to_elem_vec,
-    weight_vec_width,
+    weight_access_plan,
 )
-from .rmsnorm_tiling import select_row_tiling
+from .rmsnorm_config import RmsNormRowConfig
 
 
 DWEIGHT_REDUCE_COLS = 64
@@ -44,21 +45,21 @@ DWEIGHT_REDUCE_THREADS = DWEIGHT_REDUCE_COLS * DWEIGHT_REDUCE_ROW_LANES
 
 # The staged backward accepts a wider block than the forward: it is persistent,
 # so a block also has to keep the machine busy across rows, not just cover one.
-TWO_STAGE_MAX_BLOCK_THREADS = 512
+TWO_STAGE_MAX_NUM_THREADS = 512
 
 
-def rmsnorm_bwd_two_stage_tiling(n: int, dtype_str: str):
+def rmsnorm_bwd_two_stage_config(n: int, dtype_str: str) -> RmsNormRowConfig:
     """How the staged backward splits one row's columns across its block."""
-    return select_row_tiling(
+    return RmsNormRowConfig.from_analytical_heuristic(
         n,
         dtype_to_elem_bits(dtype_str),
-        max_block_threads=TWO_STAGE_MAX_BLOCK_THREADS,
+        TWO_STAGE_MAX_NUM_THREADS,
     )
 
 
 def is_rmsnorm_bwd_two_stage_vec_config(n: int, dtype_str: str) -> bool:
     """Return whether the staged kernel can use 128-bit column I/O."""
-    return rmsnorm_bwd_two_stage_tiling(n, dtype_str).vectorized
+    return rmsnorm_bwd_two_stage_config(n, dtype_str).vectorized
 
 
 def build_rmsnorm_bwd_module(
@@ -139,15 +140,9 @@ def build_rmsnorm_bwd_module(
             fx.make_layout(1, 1),
         )
 
-        copy_atom = fx.make_copy_atom(
-            fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
-            elem_bits,
-        )
-        gamma_copy_atom = fx.make_copy_atom(
-            (fx.rocdl.BufferCopy16b() if weight_elem_bits <= 16 else fx.rocdl.BufferCopy32b()),
-            weight_elem_bits,
-        )
-        f32_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
+        copy_atom = buffer_copy_atom(elem_bits, elem_bits)
+        gamma_copy_atom = buffer_copy_atom(weight_elem_bits, weight_elem_bits)
+        f32_copy_atom = buffer_copy_atom(32, 32)
         rstd = load_scalar(f32_copy_atom, fx.Float32, rstd_div, row)
 
         thread_acc = zero
@@ -243,16 +238,16 @@ def build_rmsnorm_bwd_two_stage_module(
     weight_dtype_str = resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
     arch = get_rocm_arch() if arch is None else arch
     assert_arch_matches_reductions(arch)
-    tiling = rmsnorm_bwd_two_stage_tiling(n, dtype_str)
-    partial_threads = tiling.block_threads
+    config = rmsnorm_bwd_two_stage_config(n, dtype_str)
+    partial_threads = config.num_threads
     red_slots = max(1, (partial_threads + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = dtype_to_elem_bits(dtype_str)
     weight_elem_bits = dtype_to_elem_bits(weight_dtype_str)
-    io_width = tiling.vec_width
-    use_vec = tiling.vectorized
-    weight_io_width = weight_vec_width(weight_elem_bits) if use_vec else 1
-    num_io_tiles = tiling.num_vecs
-    num_io_iters = tiling.num_tiles
+    io_width = config.vecsize
+    use_vec = config.vectorized
+    weight_accesses, weight_io_width = weight_access_plan(io_width, weight_elem_bits)
+    num_io_tiles = config.num_vecs
+    num_io_iters = config.num_tiles
     partial_acc_size = num_io_iters * io_width
     use_hw_cvt_bf16 = has_hw_bf16_convert(arch) if use_vec else False
     shared_storage = make_single_reduction_storage(red_slots)
@@ -311,25 +306,9 @@ def build_rmsnorm_bwd_two_stage_module(
         rstd_div = fx.logical_divide(rstd_buffer, fx.make_layout(1, 1))
         partial_div = fx.logical_divide(partial_buffer, fx.make_layout(1, 1))
 
-        copy_atom = fx.make_copy_atom(
-            (
-                fx.rocdl.BufferCopy128b()
-                if use_vec
-                else (fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b())
-            ),
-            elem_bits,
-        )
-        gamma_copy_atom = fx.make_copy_atom(
-            (
-                fx.rocdl.BufferCopy128b()
-                if use_vec
-                else (
-                    fx.rocdl.BufferCopy16b() if weight_elem_bits <= 16 else fx.rocdl.BufferCopy32b()
-                )
-            ),
-            weight_elem_bits,
-        )
-        f32_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
+        copy_atom = buffer_copy_atom(config.access_bits, elem_bits)
+        gamma_copy_atom = buffer_copy_atom(weight_io_width * weight_elem_bits, weight_elem_bits)
+        f32_copy_atom = buffer_copy_atom(32, 32)
         gamma_div = fx.logical_divide(
             gamma_buffer,
             fx.make_layout(weight_io_width, 1),
@@ -542,11 +521,8 @@ def build_rmsnorm_bwd_two_stage_module(
         dweight_buffer = fx.rocdl.make_buffer_tensor(dweight)
         partial_div = fx.logical_divide(partial_buffer, fx.make_layout(1, 1))
         dweight_div = fx.logical_divide(dweight_buffer, fx.make_layout(1, 1))
-        f32_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
-        weight_copy_atom = fx.make_copy_atom(
-            (fx.rocdl.BufferCopy16b() if weight_elem_bits <= 16 else fx.rocdl.BufferCopy32b()),
-            weight_elem_bits,
-        )
+        f32_copy_atom = buffer_copy_atom(32, 32)
+        weight_copy_atom = buffer_copy_atom(weight_elem_bits, weight_elem_bits)
 
         storage = fx.SharedAllocator().allocate(dweight_reduce_storage).peek()
         shared_partial = storage.s_red.view(fx.make_layout(DWEIGHT_REDUCE_THREADS, 1))
