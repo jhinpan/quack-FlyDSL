@@ -84,7 +84,6 @@ def build_rmsnorm_module(
 
         storage = fx.SharedAllocator().allocate(shared_storage).peek()
         s_red = storage.s_red.view(fx.make_layout(red_slots, 1))
-        s_red2 = storage.s_red2.view(fx.make_layout(red_slots, 1))
 
         if const_expr(store_rstd):
             rstd_buffer = fx.rocdl.make_buffer_tensor(rstd_tensor)
@@ -99,35 +98,27 @@ def build_rmsnorm_module(
                 result = result.addf(peer, fastmath=fast_math)
             return result
 
+        # Inline rather than shared: FlyDSL rewrites the AST of the decorated
+        # kernel only, so a helper holding `if lane == 0` would be traced as a
+        # plain Python conditional and fail.
         def block_reduce_add(value):
-            reduced, _ = block_reduce_add2(value, fx.Float32(0.0))
-            return reduced
-
-        def block_reduce_add2(value0, value1):
             if const_expr(red_slots == 1):
-                return wave_reduce_add(value0), wave_reduce_add(value1)
-
+                return wave_reduce_add(value)
             lane = tid % WARP_SIZE
             wave = tid // WARP_SIZE
-            wave0 = wave_reduce_add(value0)
-            wave1 = wave_reduce_add(value1)
+            reduced = wave_reduce_add(value)
             if lane == 0:
-                fx.memref_store(wave0, s_red, wave)
-                fx.memref_store(wave1, s_red2, wave)
+                fx.memref_store(reduced, s_red, wave)
             gpu.barrier()
-
             if wave == 0:
                 in_range = lane < red_slots
-                lane_safe = in_range.select(lane, 0)
-                reduced0 = in_range.select(fx.memref_load(s_red, lane_safe), 0.0)
-                reduced1 = in_range.select(fx.memref_load(s_red2, lane_safe), 0.0)
-                reduced0 = wave_reduce_add(reduced0)
-                reduced1 = wave_reduce_add(reduced1)
+                safe_lane = in_range.select(lane, 0)
+                partial = in_range.select(fx.memref_load(s_red, safe_lane), fx.Float32(0.0))
+                partial = wave_reduce_add(partial)
                 if lane == 0:
-                    fx.memref_store(reduced0, s_red, 0)
-                    fx.memref_store(reduced1, s_red2, 0)
+                    fx.memref_store(partial, s_red, 0)
             gpu.barrier()
-            return fx.memref_load(s_red, 0), fx.memref_load(s_red2, 0)
+            return fx.memref_load(s_red, 0)
 
         row_input = row_buffer(input_tensor, row, elem_bits, n)
         row_output = row_buffer(output, row, elem_bits, n)
@@ -167,7 +158,7 @@ def build_rmsnorm_module(
                     contribution = in_row.select(contribution, fx.Float32(0.0))
                 thread_sumsq = thread_sumsq + contribution
 
-            _, sum_sq = block_reduce_add2(fx.Float32(0.0), thread_sumsq)
+            sum_sq = block_reduce_add(thread_sumsq)
             rrms = fmath.rsqrt(sum_sq / float(n) + eps, fastmath=fast_math)
 
             if const_expr(store_rstd):

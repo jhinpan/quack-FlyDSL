@@ -81,15 +81,13 @@ def row_buffer(tensor, row, elem_bits: int, n: int):
 
 
 def make_reduction_storage(red_slots: int):
-    @fx.struct
-    class SharedStorage:
-        s_red: fx.Array[fx.Float32, red_slots, 16]
-        s_red2: fx.Array[fx.Float32, red_slots, 16]
+    """One fp32 slot per wave, for the block half of the reduction.
 
-    return SharedStorage
+    The reduction itself stays inline in each kernel: FlyDSL rewrites the AST
+    of the decorated function only, so a shared helper containing
+    ``if lane == 0`` would be traced as a plain Python conditional and raise.
+    """
 
-
-def make_single_reduction_storage(red_slots: int):
     @fx.struct
     class SharedStorage:
         s_red: fx.Array[fx.Float32, red_slots, 16]
