@@ -19,6 +19,10 @@ SUPPORTED_ELEM_BITS = (16, 32)
 # giving each row a block of its own.
 SMALL_ROW_THRESHOLD = 2048
 
+# Smallest fraction of a fixed-size block that must have a column before a
+# wide access beats a scalar one. Expressed as a denominator: 2 means half.
+MIN_VECTORIZED_BLOCK_SHARE = 2
+
 
 @dataclass(frozen=True, slots=True)
 class RowTiling:
@@ -82,6 +86,22 @@ def select_row_tiling(
     )
 
 
+def select_column_io_width(n: int, elem_bits: int, block_threads: int) -> int:
+    """Vector width for a persistent kernel whose block size is fixed.
+
+    The one-block-per-row forward shrinks its block to fit a short row, but a
+    persistent kernel cannot: a wide vector there simply leaves most of the
+    block without a column to work on. Measured on gfx950, half a block of
+    columns still pays for the wider access and a quarter does not, so step
+    back to scalar below that.
+    """
+    vec_width = select_row_tiling(n, elem_bits).vec_width
+    if vec_width == 1:
+        return 1
+    columns = n // vec_width
+    return vec_width if columns * MIN_VECTORIZED_BLOCK_SHARE >= block_threads else 1
+
+
 def use_multi_row_kernel(
     n: int,
     elem_bits: int,
@@ -104,10 +124,12 @@ def use_multi_row_kernel(
 __all__ = [
     "MAX_BLOCK_THREADS",
     "MIN_BLOCK_THREADS",
+    "MIN_VECTORIZED_BLOCK_SHARE",
     "SMALL_ROW_THRESHOLD",
     "SUPPORTED_ELEM_BITS",
     "VECTOR_BITS",
     "RowTiling",
+    "select_column_io_width",
     "select_row_tiling",
     "use_multi_row_kernel",
 ]

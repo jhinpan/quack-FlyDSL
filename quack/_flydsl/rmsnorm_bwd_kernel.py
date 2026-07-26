@@ -32,7 +32,7 @@ from .rmsnorm_common import (
     to_elem_vec,
     weight_vec_width,
 )
-from .rmsnorm_tiling import select_row_tiling
+from .rmsnorm_tiling import select_column_io_width
 
 
 DWEIGHT_REDUCE_COLS = 64
@@ -42,12 +42,12 @@ TWO_STAGE_PARTIAL_THREADS = 512
 
 
 def rmsnorm_bwd_two_stage_io_width(n: int, dtype_str: str) -> int:
-    """Elements per staged-backward column access; 1 means scalar I/O.
-
-    The staged kernel owns its own 512-thread persistent block, so only the
-    vector width is shared with the forward tiling rule.
-    """
-    return select_row_tiling(n, dtype_to_elem_bits(dtype_str)).vec_width
+    """Elements per staged-backward column access; 1 means scalar I/O."""
+    return select_column_io_width(
+        n,
+        dtype_to_elem_bits(dtype_str),
+        TWO_STAGE_PARTIAL_THREADS,
+    )
 
 
 def is_rmsnorm_bwd_two_stage_vec_config(n: int, dtype_str: str) -> bool:
