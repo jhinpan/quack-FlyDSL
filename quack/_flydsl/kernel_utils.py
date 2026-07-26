@@ -50,6 +50,16 @@ def get_warp_size(arch=None) -> int:
     return 32 if is_rdna_arch(arch) else 64
 
 
+def has_hw_bf16_convert(arch=None) -> bool:
+    """Whether the target converts fp32 to bf16 in hardware.
+
+    gfx95x has the packed convert; earlier parts round to nearest even in
+    software instead.
+    """
+    arch = get_rocm_arch() if arch is None else arch
+    return str(arch).startswith("gfx95")
+
+
 def atomic_add(
     destination,
     offset,

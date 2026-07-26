@@ -13,9 +13,8 @@ import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import ReductionOp
-from flydsl.runtime.device import get_rocm_arch
 
-from .kernel_utils import dtype_to_elem_bits, dtype_to_elem_type
+from .kernel_utils import dtype_to_elem_bits, dtype_to_elem_type, has_hw_bf16_convert
 from .rmsnorm_common import (
     EPS,
     WARP_SIZE,
@@ -39,8 +38,13 @@ def build_rmsnorm_module(
     store_rstd: bool = False,
     eps: float = EPS,
     weight_dtype_str: str | None = None,
+    use_hw_cvt_bf16: bool | None = None,
 ):
-    """Build a plain RMSNorm launcher specialized by hidden size and dtypes."""
+    """Build a plain RMSNorm launcher specialized by hidden size and dtypes.
+
+    ``use_hw_cvt_bf16`` defaults to the running architecture; tests override it
+    to exercise the software rounding path that only pre-gfx95x parts take.
+    """
     weight_dtype_str = resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
     elem_bits = dtype_to_elem_bits(dtype_str)
     if use_multi_row_kernel(n, elem_bits):
@@ -52,8 +56,8 @@ def build_rmsnorm_module(
             weight_dtype_str,
         )
 
-    arch = get_rocm_arch()
-    use_hw_cvt_bf16 = arch == "gfx950" or str(arch).startswith("gfx95")
+    if use_hw_cvt_bf16 is None:
+        use_hw_cvt_bf16 = has_hw_bf16_convert()
     tiling = select_row_tiling(n, elem_bits)
     block_threads = tiling.block_threads
     red_slots = max(1, (block_threads + WARP_SIZE - 1) // WARP_SIZE)

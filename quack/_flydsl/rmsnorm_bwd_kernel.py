@@ -12,9 +12,13 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr.typing import ReductionOp
-from flydsl.runtime.device import get_rocm_arch
 
-from .kernel_utils import atomic_add, dtype_to_elem_bits, dtype_to_elem_type
+from .kernel_utils import (
+    atomic_add,
+    dtype_to_elem_bits,
+    dtype_to_elem_type,
+    has_hw_bf16_convert,
+)
 from .rmsnorm_common import (
     BLOCK_THREADS,
     WARP_SIZE,
@@ -243,8 +247,7 @@ def build_rmsnorm_bwd_two_stage_module(
     num_io_tiles = (n + io_width - 1) // io_width
     num_io_iters = (num_io_tiles + TWO_STAGE_PARTIAL_THREADS - 1) // TWO_STAGE_PARTIAL_THREADS
     partial_acc_size = num_io_iters * io_width
-    arch = get_rocm_arch() if use_vec else ""
-    use_hw_cvt_bf16 = arch == "gfx950" or str(arch).startswith("gfx95")
+    use_hw_cvt_bf16 = has_hw_bf16_convert() if use_vec else False
     shared_storage = make_single_reduction_storage(red_slots)
     dweight_reduce_storage = make_single_reduction_storage(DWEIGHT_REDUCE_THREADS)
 
