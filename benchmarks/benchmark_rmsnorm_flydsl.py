@@ -41,7 +41,7 @@ DTYPE_WEIGHT_MODES = (
     ("float32", "same"),
 )
 OPERATIONS = ("fwd", "bwd")
-PROVIDERS = ("flydsl", "torch")
+PROVIDERS = ("flydsl", "quack", "torch")
 RESULT_FIELDS = (
     "schema_version",
     "provider",
@@ -573,6 +573,87 @@ class _TorchProvider:
         )
 
 
+class _QuackProvider:
+    """Quack's own CuTe RMSNorm, so a CUDA box can be measured the same way.
+
+    Calls the same low-level ``rmsnorm_fwd`` / ``rmsnorm_bwd`` entry points
+    that ``benchmarks/benchmark_rmsnorm.py`` times, which is also the level
+    the FlyDSL provider measures.
+    """
+
+    def __init__(self, torch: Any):
+        self.torch = torch
+        module = importlib.import_module("quack.rmsnorm")
+        self._fwd = module.rmsnorm_fwd
+        self._bwd = module.rmsnorm_bwd
+
+    def prepare(
+        self,
+        cell: MatrixCell,
+        inputs: dict[str, Any],
+        reference: tuple,
+        *,
+        eps: float,
+        rotation_buffers: int,
+    ) -> PreparedCase:
+        torch = self.torch
+        tensor_sets = []
+        calls = []
+        if cell.operation == "fwd":
+            for _ in range(rotation_buffers):
+                x = inputs["x"].clone()
+                weight = inputs["weight"].clone()
+                slot = [None]
+                tensor_sets.append(slot)
+
+                def call(x=x, weight=weight, slot=slot):
+                    slot[0] = self._fwd(x, weight, eps=eps)[0]
+
+                calls.append(call)
+            cold_start = time.perf_counter()
+            calls[0]()
+            torch.cuda.synchronize()
+            cold_compile_ms = (time.perf_counter() - cold_start) * 1000.0
+            _assert_correct(torch, cell, (tensor_sets[0][0],), reference)
+            return PreparedCase(
+                calls=calls,
+                reset=lambda: None,
+                outputs=lambda: (tensor_sets[0][0],),
+                provider_detail="quack.rmsnorm.rmsnorm_fwd (CuTe)",
+                cold_compile_ms=cold_compile_ms,
+                cold_compile_reused=False,
+            )
+
+        for _ in range(rotation_buffers):
+            x = inputs["x"].clone()
+            weight = inputs["weight"].clone()
+            dout = inputs["dout"].clone()
+            # rmsnorm_fwd returns (out, residual_out, rstd).
+            rstd = self._fwd(x, weight, eps=eps, store_rstd=True)[2]
+            slot = [None]
+            tensor_sets.append(slot)
+
+            def call(x=x, weight=weight, dout=dout, rstd=rstd, slot=slot):
+                dx, dweight, _, _ = self._bwd(x, weight, dout, rstd)
+                slot[0] = (dx, dweight)
+
+            calls.append(call)
+        torch.cuda.synchronize()
+        cold_start = time.perf_counter()
+        calls[0]()
+        torch.cuda.synchronize()
+        cold_compile_ms = (time.perf_counter() - cold_start) * 1000.0
+        _assert_correct(torch, cell, tensor_sets[0][0], reference[:2])
+        return PreparedCase(
+            calls=calls,
+            reset=lambda: None,
+            outputs=lambda: tensor_sets[0][0],
+            provider_detail="quack.rmsnorm.rmsnorm_bwd (CuTe)",
+            cold_compile_ms=cold_compile_ms,
+            cold_compile_reused=False,
+        )
+
+
 def _parse_shape(value: str) -> tuple[int, int]:
     try:
         m_text, n_text = value.lower().split("x", 1)
@@ -608,14 +689,30 @@ def _git_commit() -> str | None:
         return None
 
 
+def _device_arch(torch: Any) -> str:
+    """Architecture string for the visible device, on either vendor.
+
+    A CUDA build also exposes ``gcnArchName``, where it holds the marketing
+    name, so the build is the discriminator rather than the attribute.
+    """
+    properties = torch.cuda.get_device_properties(0)
+    if torch.version.hip is not None:
+        return properties.gcnArchName.split(":", 1)[0]
+    return f"sm_{properties.major}{properties.minor}"
+
+
 def _environment(torch: Any, args: argparse.Namespace, output_dir: Path) -> dict[str, Any]:
     properties = torch.cuda.get_device_properties(0)
     return {
         "schema_version": 1,
         "status": "running",
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-        "runtime_scope": "MI355X/gfx950 only; no gfx942 runtime claim",
-        "comparison_scope": "same-device providers; no cross-vendor speedup claim",
+        "runtime_scope": f"{properties.name} / {_device_arch(torch)}",
+        "comparison_scope": (
+            "same-device providers. RMSNorm is memory bound, so a cross-vendor "
+            "comparison of microseconds mostly reports the HBM bandwidth ratio; "
+            "compare copy_roofline_pct instead"
+        ),
         "command": [sys.executable, *sys.argv],
         "working_directory": str(Path.cwd()),
         "git_commit": _git_commit(),
@@ -624,13 +721,15 @@ def _environment(torch: Any, args: argparse.Namespace, output_dir: Path) -> dict
             "python": platform.python_version(),
             "torch": torch.__version__,
             "hip": torch.version.hip,
+            "cuda": torch.version.cuda,
             "flydsl": _package_version("flydsl"),
+            "quack": _package_version("quack-kernels") or _package_version("quack"),
         },
         "gpu": {
             "visible_index": 0,
             "visible_count": torch.cuda.device_count(),
             "name": properties.name,
-            "arch": properties.gcnArchName,
+            "arch": _device_arch(torch),
             "compute_units": properties.multi_processor_count,
             "total_memory_bytes": properties.total_memory,
             "l2_cache_bytes_reported": properties.L2_cache_size,
@@ -678,7 +777,13 @@ def _environment(torch: Any, args: argparse.Namespace, output_dir: Path) -> dict
 
 def _make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--providers", nargs="+", choices=PROVIDERS, default=list(PROVIDERS))
+    parser.add_argument(
+        "--providers",
+        nargs="+",
+        choices=PROVIDERS,
+        default=None,
+        help="Default: the vendor's own kernels plus torch (flydsl on ROCm, quack on CUDA)",
+    )
     parser.add_argument("--operations", nargs="+", choices=OPERATIONS, default=list(OPERATIONS))
     parser.add_argument(
         "--activation-dtypes",
@@ -720,11 +825,15 @@ def _validate_runtime(torch: Any, args: argparse.Namespace) -> None:
         raise RuntimeError(
             "benchmark requires exactly one visible GPU; isolate it with HIP/ROCR visibility"
         )
-    actual_arch = torch.cuda.get_device_properties(0).gcnArchName.split(":", 1)[0]
+    if args.providers is None:
+        args.providers = ["flydsl" if torch.version.hip is not None else "quack", "torch"]
+    actual_arch = _device_arch(torch)
     if actual_arch != args.expected_arch:
         raise RuntimeError(f"expected {args.expected_arch}, found {actual_arch}")
     if "flydsl" in args.providers and torch.version.hip is None:
         raise RuntimeError("the FlyDSL provider requires a ROCm PyTorch build")
+    if "quack" in args.providers and torch.version.hip is not None:
+        raise RuntimeError("the Quack CuTe provider requires a CUDA PyTorch build")
     if not math.isfinite(args.eps) or args.eps <= 0:
         raise ValueError("--eps must be finite and positive")
     positive_values = {
@@ -769,7 +878,12 @@ def _run(
 
     providers = {}
     for name in args.providers:
-        providers[name] = _FlyDSLProvider(torch) if name == "flydsl" else _TorchProvider(torch)
+        factory = {
+            "flydsl": _FlyDSLProvider,
+            "quack": _QuackProvider,
+            "torch": _TorchProvider,
+        }[name]
+        providers[name] = factory(torch)
 
     cells = build_matrix(
         args.shapes,
