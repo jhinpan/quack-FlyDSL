@@ -6,6 +6,8 @@
 
 """Minimal FlyDSL helpers required by the vendored RMSNorm kernels."""
 
+import threading
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
@@ -14,6 +16,12 @@ from flydsl._mlir.dialects import llvm as _llvm
 from flydsl.expr import arith, const_expr
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch, is_rdna_arch
+
+
+# Serializes every FlyDSL trace and codegen in the process. Compilation is
+# rare and already tens of milliseconds, so one lock costs nothing and keeps
+# concurrent first calls out of the compiler's global state.
+FLYDSL_BUILD_LOCK = threading.RLock()
 
 
 def dtype_to_elem_type(dtype_str: str):
@@ -76,8 +84,12 @@ def atomic_add(
 def run_compiled(executable, *args) -> None:
     """Compile-and-run once, then dispatch through the cached callable."""
     compiled = getattr(executable, "_cf", None)
-    if compiled is None:
-        compiled = flyc.compile(executable, *args)
-        executable._cf = compiled
-    else:
+    if compiled is not None:
         compiled(*args)
+        return
+    with FLYDSL_BUILD_LOCK:
+        if getattr(executable, "_cf", None) is None:
+            # flyc.compile performs the first launch as well as the codegen.
+            executable._cf = flyc.compile(executable, *args)
+            return
+    executable._cf(*args)
