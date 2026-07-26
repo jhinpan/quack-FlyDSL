@@ -35,27 +35,30 @@ from .rmsnorm_common import (
     to_elem_vec,
     weight_vec_width,
 )
-from .rmsnorm_tiling import select_column_io_width
+from .rmsnorm_tiling import select_row_tiling
 
 
 DWEIGHT_REDUCE_COLS = 64
 DWEIGHT_REDUCE_ROW_LANES = 4
 DWEIGHT_REDUCE_THREADS = DWEIGHT_REDUCE_COLS * DWEIGHT_REDUCE_ROW_LANES
-TWO_STAGE_PARTIAL_THREADS = 512
+
+# The staged backward accepts a wider block than the forward: it is persistent,
+# so a block also has to keep the machine busy across rows, not just cover one.
+TWO_STAGE_MAX_BLOCK_THREADS = 512
 
 
-def rmsnorm_bwd_two_stage_io_width(n: int, dtype_str: str) -> int:
-    """Elements per staged-backward column access; 1 means scalar I/O."""
-    return select_column_io_width(
+def rmsnorm_bwd_two_stage_tiling(n: int, dtype_str: str):
+    """How the staged backward splits one row's columns across its block."""
+    return select_row_tiling(
         n,
         dtype_to_elem_bits(dtype_str),
-        TWO_STAGE_PARTIAL_THREADS,
+        max_block_threads=TWO_STAGE_MAX_BLOCK_THREADS,
     )
 
 
 def is_rmsnorm_bwd_two_stage_vec_config(n: int, dtype_str: str) -> bool:
     """Return whether the staged kernel can use 128-bit column I/O."""
-    return rmsnorm_bwd_two_stage_io_width(n, dtype_str) > 1
+    return rmsnorm_bwd_two_stage_tiling(n, dtype_str).vectorized
 
 
 def build_rmsnorm_bwd_module(
@@ -240,23 +243,22 @@ def build_rmsnorm_bwd_two_stage_module(
     weight_dtype_str = resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
     arch = get_rocm_arch() if arch is None else arch
     assert_arch_matches_reductions(arch)
-    red_slots = max(
-        1,
-        (TWO_STAGE_PARTIAL_THREADS + WARP_SIZE - 1) // WARP_SIZE,
-    )
+    tiling = rmsnorm_bwd_two_stage_tiling(n, dtype_str)
+    partial_threads = tiling.block_threads
+    red_slots = max(1, (partial_threads + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = dtype_to_elem_bits(dtype_str)
     weight_elem_bits = dtype_to_elem_bits(weight_dtype_str)
-    io_width = rmsnorm_bwd_two_stage_io_width(n, dtype_str)
-    use_vec = io_width > 1
+    io_width = tiling.vec_width
+    use_vec = tiling.vectorized
     weight_io_width = weight_vec_width(weight_elem_bits) if use_vec else 1
-    num_io_tiles = (n + io_width - 1) // io_width
-    num_io_iters = (num_io_tiles + TWO_STAGE_PARTIAL_THREADS - 1) // TWO_STAGE_PARTIAL_THREADS
+    num_io_tiles = tiling.num_vecs
+    num_io_iters = tiling.num_tiles
     partial_acc_size = num_io_iters * io_width
     use_hw_cvt_bf16 = has_hw_bf16_convert(arch) if use_vec else False
     shared_storage = make_single_reduction_storage(red_slots)
     dweight_reduce_storage = make_single_reduction_storage(DWEIGHT_REDUCE_THREADS)
 
-    @flyc.kernel(known_block_size=[TWO_STAGE_PARTIAL_THREADS, 1, 1])
+    @flyc.kernel(known_block_size=[partial_threads, 1, 1])
     def rmsnorm_bwd_partial_kernel(
         input_tensor: fx.Tensor,
         gamma: fx.Tensor,
@@ -336,7 +338,7 @@ def build_rmsnorm_bwd_two_stage_module(
         gamma_local = []
         if const_expr(use_vec):
             for tile_i in range_constexpr(num_io_iters):
-                io_index = tid + tile_i * TWO_STAGE_PARTIAL_THREADS
+                io_index = tid + tile_i * partial_threads
                 is_valid = io_index < num_io_tiles
                 safe_index = is_valid.select(io_index, 0)
                 gamma_local.append(
@@ -374,7 +376,7 @@ def build_rmsnorm_bwd_two_stage_module(
             input_local = []
             dy_local = []
             for tile_i in range_constexpr(num_io_iters):
-                io_index = tid + tile_i * TWO_STAGE_PARTIAL_THREADS
+                io_index = tid + tile_i * partial_threads
                 is_valid = io_index < num_io_tiles
                 safe_index = is_valid.select(io_index, 0)
                 if const_expr(use_vec):
@@ -430,7 +432,7 @@ def build_rmsnorm_bwd_two_stage_module(
             correction = block_reduce_add(thread_acc) / float(n)
             row_dweight = []
             for tile_i in range_constexpr(num_io_iters):
-                io_index = tid + tile_i * TWO_STAGE_PARTIAL_THREADS
+                io_index = tid + tile_i * partial_threads
                 is_valid = io_index < num_io_tiles
                 safe_index = is_valid.select(io_index, 0)
                 if const_expr(use_vec):
@@ -508,7 +510,7 @@ def build_rmsnorm_bwd_two_stage_module(
             gpu.barrier()
 
         for tile_i in range_constexpr(num_io_iters):
-            io_index = tid + tile_i * TWO_STAGE_PARTIAL_THREADS
+            io_index = tid + tile_i * partial_threads
             if io_index < num_io_tiles:
                 for lane in range_constexpr(io_width):
                     column = io_index * io_width + lane
@@ -615,7 +617,7 @@ def build_rmsnorm_bwd_two_stage_module(
         )
         partial_launcher.launch(
             grid=(num_programs, 1, 1),
-            block=(TWO_STAGE_PARTIAL_THREADS, 1, 1),
+            block=(partial_threads, 1, 1),
             stream=stream,
         )
         reduce_launcher = rmsnorm_bwd_dweight_reduce_kernel(

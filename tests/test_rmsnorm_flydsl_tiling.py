@@ -13,7 +13,6 @@ from quack._flydsl.rmsnorm_tiling import (
     MAX_BLOCK_THREADS,
     MIN_BLOCK_THREADS,
     VECTOR_BITS,
-    select_column_io_width,
     select_row_tiling,
     use_multi_row_kernel,
 )
@@ -166,35 +165,36 @@ def test_the_vectorized_crossover_is_one_minimum_block_of_vectors():
     assert not use_multi_row_kernel(256, 32)
 
 
-# A persistent kernel cannot shrink its block to fit the row, so the column
-# width has its own rule.
-PERSISTENT_BLOCK = 512
+# The persistent backward gets a wider ceiling than the one-block-per-row
+# forward because it also has to keep the machine busy across rows.
+STAGED_MAX_BLOCK = 512
 
 
 @pytest.mark.parametrize(
-    ("n", "elem_bits", "expected"),
+    ("n", "elem_bits", "vec_width", "block_threads"),
     [
-        (8192, 16, 8),
-        (4096, 16, 8),
-        (3000, 16, 8),
-        (2048, 16, 8),
-        (1024, 16, 1),
-        (512, 16, 1),
-        (8192, 32, 4),
-        (2048, 32, 4),
-        (1024, 32, 4),
-        (512, 32, 1),
-        (3001, 16, 1),
+        (1024, 16, 8, 128),
+        (2048, 16, 8, 256),
+        (4096, 16, 8, 512),
+        (8192, 16, 8, 512),
+        (1024, 32, 4, 256),
+        (2048, 32, 4, 512),
+        (8192, 32, 4, 512),
     ],
 )
-def test_column_io_width_keeps_the_persistent_block_busy(n, elem_bits, expected):
-    """Below half a block of columns the wider access costs more than it saves."""
-    assert select_column_io_width(n, elem_bits, PERSISTENT_BLOCK) == expected
+def test_the_staged_block_shrinks_to_the_row(n, elem_bits, vec_width, block_threads):
+    """Regression: a fixed 512-thread block forced short rows back to scalar."""
+    tiling = select_row_tiling(n, elem_bits, max_block_threads=STAGED_MAX_BLOCK)
+    assert tiling.vec_width == vec_width
+    assert tiling.block_threads == block_threads
+    assert tiling.vectorized
+    assert not tiling.needs_predicate
 
 
 @pytest.mark.parametrize("elem_bits", ELEM_BITS)
 @pytest.mark.parametrize("n", HIDDEN_SIZES)
-def test_column_io_width_never_exceeds_the_row_vector_width(n, elem_bits):
-    width = select_column_io_width(n, elem_bits, PERSISTENT_BLOCK)
-    assert width in (1, select_row_tiling(n, elem_bits).vec_width)
-    assert n % width == 0
+def test_the_staged_block_stays_within_its_ceiling(n, elem_bits):
+    tiling = select_row_tiling(n, elem_bits, max_block_threads=STAGED_MAX_BLOCK)
+    assert MIN_BLOCK_THREADS <= tiling.block_threads <= STAGED_MAX_BLOCK
+    assert tiling.block_threads & (tiling.block_threads - 1) == 0
+    assert tiling.num_tiles * tiling.block_threads * tiling.vec_width >= n
