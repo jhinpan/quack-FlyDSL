@@ -28,7 +28,7 @@ from .rmsnorm_common import (
     load_scalar,
     load_vec,
     load_weight_vec,
-    make_single_reduction_storage,
+    make_reduction_storage,
     resolve_rmsnorm_weight_dtype,
     row_buffer,
     store_scalar,
@@ -74,7 +74,7 @@ def build_rmsnorm_bwd_module(
     red_slots = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = dtype_to_elem_bits(dtype_str)
     weight_elem_bits = dtype_to_elem_bits(weight_dtype_str)
-    shared_storage = make_single_reduction_storage(red_slots)
+    shared_storage = make_reduction_storage(red_slots)
 
     @flyc.kernel
     def rmsnorm_bwd_kernel(
@@ -103,6 +103,9 @@ def build_rmsnorm_bwd_module(
                 result = result.addf(peer, fastmath=fast_math)
             return result
 
+        # Inline rather than shared: FlyDSL rewrites the AST of the decorated
+        # kernel only, so a helper holding `if lane == 0` would be traced as a
+        # plain Python conditional and fail.
         def block_reduce_add(value):
             if const_expr(red_slots == 1):
                 return wave_reduce_add(value)
@@ -115,10 +118,10 @@ def build_rmsnorm_bwd_module(
             if wave == 0:
                 in_range = lane < red_slots
                 safe_lane = in_range.select(lane, 0)
-                wave_value = in_range.select(fx.memref_load(s_red, safe_lane), zero)
-                wave_value = wave_reduce_add(wave_value)
+                partial = in_range.select(fx.memref_load(s_red, safe_lane), fx.Float32(0.0))
+                partial = wave_reduce_add(partial)
                 if lane == 0:
-                    fx.memref_store(wave_value, s_red, 0)
+                    fx.memref_store(partial, s_red, 0)
             gpu.barrier()
             return fx.memref_load(s_red, 0)
 
@@ -250,8 +253,8 @@ def build_rmsnorm_bwd_two_stage_module(
     num_io_iters = config.num_tiles
     partial_acc_size = num_io_iters * io_width
     use_hw_cvt_bf16 = has_hw_bf16_convert(arch) if use_vec else False
-    shared_storage = make_single_reduction_storage(red_slots)
-    dweight_reduce_storage = make_single_reduction_storage(DWEIGHT_REDUCE_THREADS)
+    shared_storage = make_reduction_storage(red_slots)
+    dweight_reduce_storage = make_reduction_storage(DWEIGHT_REDUCE_THREADS)
 
     @flyc.kernel(known_block_size=[partial_threads, 1, 1])
     def rmsnorm_bwd_partial_kernel(
@@ -281,6 +284,9 @@ def build_rmsnorm_bwd_two_stage_module(
                 result = result.addf(peer, fastmath=fast_math)
             return result
 
+        # Inline rather than shared: FlyDSL rewrites the AST of the decorated
+        # kernel only, so a helper holding `if lane == 0` would be traced as a
+        # plain Python conditional and fail.
         def block_reduce_add(value):
             if const_expr(red_slots == 1):
                 return wave_reduce_add(value)
@@ -293,10 +299,10 @@ def build_rmsnorm_bwd_two_stage_module(
             if wave == 0:
                 in_range = lane < red_slots
                 safe_lane = in_range.select(lane, 0)
-                wave_value = in_range.select(fx.memref_load(s_red, safe_lane), zero)
-                wave_value = wave_reduce_add(wave_value)
+                partial = in_range.select(fx.memref_load(s_red, safe_lane), fx.Float32(0.0))
+                partial = wave_reduce_add(partial)
                 if lane == 0:
-                    fx.memref_store(wave_value, s_red, 0)
+                    fx.memref_store(partial, s_red, 0)
             gpu.barrier()
             return fx.memref_load(s_red, 0)
 
