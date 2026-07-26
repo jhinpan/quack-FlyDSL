@@ -44,7 +44,7 @@ def test_result_contract_and_artifact_writers(tmp_path):
         field: index if field not in {"provider", "operation"} else field
         for index, field in enumerate(benchmark.RESULT_FIELDS)
     }
-    environment = {"schema_version": 1, "correctness_gate": "required"}
+    environment = {"schema_version": 2, "correctness_gate": "required"}
 
     csv_path, environment_path = benchmark.write_artifacts(tmp_path, [row], environment)
 

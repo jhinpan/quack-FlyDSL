@@ -61,8 +61,8 @@ RESULT_FIELDS = (
     "p90_us",
     "logical_bytes",
     "logical_gbps",
-    "copy_roofline_gbps",
-    "copy_roofline_pct",
+    "peak_bw_gbps",
+    "peak_bw_pct",
     "rotation_buffers",
     "rotation_working_set_bytes",
     "l2_target_bytes",
@@ -237,39 +237,58 @@ def _time_rotating_calls(
     return samples_us
 
 
-def _measure_device_copy_roofline(
+def _measure_achievable_bandwidth(
     torch: Any,
     *,
-    copy_bytes: int,
+    probe_bytes: int,
     warmup_rounds: int,
     sample_rounds: int,
 ) -> dict[str, Any]:
-    source = torch.empty(copy_bytes, device="cuda", dtype=torch.uint8)
-    destination = torch.empty_like(source)
-    source.fill_(1)
-    destination.zero_()
-    for _ in range(warmup_rounds):
-        destination.copy_(source)
-    torch.cuda.synchronize()
+    """Best sustained bandwidth over several access patterns.
 
+    A same-device copy alone understates the memory system badly enough that
+    the RMSNorm forward exceeds it, which makes the resulting percentage
+    useless as a ceiling. Probe a copy, a two-read one-write elementwise, and
+    a pure write, and report the best; the elementwise probe is the closest
+    match to what a normalization kernel actually does.
+    """
+    elements = probe_bytes // 2
+    left = torch.empty(elements, device="cuda", dtype=torch.bfloat16).fill_(1)
+    right = torch.empty_like(left).fill_(2)
+    out = torch.empty_like(left)
+
+    probes = {
+        "copy": (lambda: out.copy_(left), 2 * probe_bytes),
+        "two_read_one_write": (lambda: torch.add(left, right, out=out), 3 * probe_bytes),
+        "write": (lambda: out.zero_(), probe_bytes),
+    }
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
-    samples_us = []
-    for _ in range(sample_rounds):
-        start.record()
-        destination.copy_(source)
-        end.record()
-        end.synchronize()
-        samples_us.append(start.elapsed_time(end) * 1000.0)
-    stats = _summarize_us(samples_us)
-    logical_copy_bytes = 2 * copy_bytes
-    median_gbps = logical_copy_bytes / stats["median_us"] / 1000.0
+    results = {}
+    for name, (call, logical) in probes.items():
+        for _ in range(warmup_rounds):
+            call()
+        torch.cuda.synchronize()
+        samples_us = []
+        for _ in range(sample_rounds):
+            start.record()
+            call()
+            end.record()
+            end.synchronize()
+            samples_us.append(start.elapsed_time(end) * 1000.0)
+        median_us = _percentile(samples_us, 0.5)
+        results[name] = {
+            "median_us": round(median_us, 6),
+            "gbps": round(logical / (median_us * 1e-6) / 1e9, 6),
+        }
+    best = max(results, key=lambda name: results[name]["gbps"])
     return {
-        "allocation_bytes": copy_bytes,
-        "logical_bytes": logical_copy_bytes,
-        "median_gbps": median_gbps,
-        **stats,
-        "samples": len(samples_us),
+        "probe_bytes": probe_bytes,
+        "probes": results,
+        "best_probe": best,
+        "median_gbps": results[best]["gbps"],
+        "median_us": results[best]["median_us"],
+        "samples": sample_rounds,
     }
 
 
@@ -704,14 +723,14 @@ def _device_arch(torch: Any) -> str:
 def _environment(torch: Any, args: argparse.Namespace, output_dir: Path) -> dict[str, Any]:
     properties = torch.cuda.get_device_properties(0)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "running",
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "runtime_scope": f"{properties.name} / {_device_arch(torch)}",
         "comparison_scope": (
             "same-device providers. RMSNorm is memory bound, so a cross-vendor "
             "comparison of microseconds mostly reports the HBM bandwidth ratio; "
-            "compare copy_roofline_pct instead"
+            "compare peak_bw_pct instead"
         ),
         "command": [sys.executable, *sys.argv],
         "working_directory": str(Path.cwd()),
@@ -765,7 +784,10 @@ def _environment(torch: Any, args: argparse.Namespace, output_dir: Path) -> dict
                 "fwd": "read x + weight; write y",
                 "bwd": "read x + dout + weight + fp32 rstd; write dx + dweight",
             },
-            "copy_roofline": "same-device copy; logical bytes count one read plus one write",
+            "peak_bandwidth": (
+                "best of a same-device copy, a two-read one-write elementwise, and "
+                "a pure write; a copy alone understates the memory system"
+            ),
             "warmup_rounds": args.warmup_rounds,
             "sample_rounds": args.sample_rounds,
             "max_rotation_buffers": args.max_rotation_buffers,
@@ -863,16 +885,13 @@ def _run(
 ) -> list[dict[str, Any]]:
     properties = torch.cuda.get_device_properties(0)
     l2_target_bytes = properties.L2_cache_size * args.l2_target_ratio
-    copy_roofline = _measure_device_copy_roofline(
+    peak_bw = _measure_achievable_bandwidth(
         torch,
-        copy_bytes=args.copy_mib * 1024**2,
+        probe_bytes=args.copy_mib * 1024**2,
         warmup_rounds=args.warmup_rounds,
         sample_rounds=args.copy_samples,
     )
-    environment["device_copy_roofline"] = {
-        key: _round(value) if isinstance(value, float) else value
-        for key, value in copy_roofline.items()
-    }
+    environment["achievable_bandwidth"] = peak_bw
     torch.cuda.empty_cache()
     evictor = _L2Evictor(torch, l2_target_bytes)
 
@@ -928,9 +947,9 @@ def _run(
             )
             stats = _summarize_us(samples_us)
             logical_gbps = byte_count / stats["median_us"] / 1000.0
-            roofline_pct = logical_gbps / copy_roofline["median_gbps"] * 100.0
+            peak_bw_pct = logical_gbps / peak_bw["median_gbps"] * 100.0
             row = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "provider": provider_name,
                 "provider_detail": prepared.provider_detail,
                 "operation": cell.operation,
@@ -948,8 +967,8 @@ def _run(
                 "p90_us": _round(stats["p90_us"]),
                 "logical_bytes": byte_count,
                 "logical_gbps": _round(logical_gbps),
-                "copy_roofline_gbps": _round(copy_roofline["median_gbps"]),
-                "copy_roofline_pct": _round(roofline_pct),
+                "peak_bw_gbps": _round(peak_bw["median_gbps"]),
+                "peak_bw_pct": _round(peak_bw_pct),
                 "rotation_buffers": rotation_buffers,
                 "rotation_working_set_bytes": rotation_working_set_bytes,
                 "l2_target_bytes": l2_target_bytes,
@@ -962,7 +981,7 @@ def _run(
                 f"M={cell.m:<5d} N={cell.n:<4d} "
                 f"{cell.activation_dtype}/{cell.weight_dtype}: "
                 f"{stats['median_us']:.3f} us, {logical_gbps:.1f} GB/s, "
-                f"{roofline_pct:.1f}% copy roofline",
+                f"{peak_bw_pct:.1f}% of peak BW",
                 flush=True,
             )
             del prepared
