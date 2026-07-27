@@ -29,6 +29,34 @@ def _reference(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tenso
     return (x_f32 * rstd * weight.float()).to(x.dtype)
 
 
+def _full_reference(
+    x,
+    weight=None,
+    bias=None,
+    residual=None,
+    *,
+    eps=1e-6,
+    weight_offset=0.0,
+    out_dtype=None,
+    residual_dtype=None,
+):
+    value = x.float()
+    if residual is not None:
+        value = value + residual.float()
+    normalized = value * torch.rsqrt(value.square().mean(dim=-1, keepdim=True) + eps)
+    if weight is not None:
+        normalized = normalized * (weight.float() + weight_offset)
+    if bias is not None:
+        normalized = normalized + bias.float()
+    output = normalized.to(x.dtype if out_dtype is None else out_dtype)
+    residual_out = value.to(
+        residual_dtype
+        if residual_dtype is not None
+        else (residual.dtype if residual is not None else x.dtype)
+    )
+    return output, residual_out
+
+
 def _assert_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
     if actual.dtype == torch.float32:
         torch.testing.assert_close(actual, expected, rtol=2e-4, atol=2e-5)
@@ -53,6 +81,12 @@ def _assert_grad_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
         torch.testing.assert_close(actual, expected, rtol=5e-3, atol=5e-3)
     else:
         torch.testing.assert_close(actual, expected, rtol=3e-2, atol=3e-2)
+
+
+def _assert_feature_grad_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
+    # Fused residual backward saves the rounded residual_out, matching Quack's
+    # kernel path rather than the full-precision eager expression graph.
+    torch.testing.assert_close(actual, expected, rtol=3e-2, atol=3e-2)
 
 
 @pytest.mark.parametrize(
@@ -117,11 +151,9 @@ def test_forward_empty_m_returns_empty_without_launching():
     ("x", "weight", "error", "message"),
     [
         ("not-a-tensor", torch.ones(8), TypeError, "x must be a torch.Tensor"),
-        (torch.ones(8), None, NotImplementedError, "requires an explicit weight"),
-        (torch.ones(8), 5.0, TypeError, "weight must be a torch.Tensor"),
+        (torch.ones(8), 5.0, TypeError, "weight must be a torch.Tensor or None"),
         (torch.tensor(1.0), torch.ones(1), ValueError, "at least one dimension"),
-        (torch.ones(2, 8), torch.ones(2, 8), NotImplementedError, "per-head"),
-        (torch.ones(2, 8), torch.ones(7), ValueError, "last dimension"),
+        (torch.ones(2, 8), torch.ones(7), ValueError, "weight shape"),
         (torch.empty(2, 0), torch.empty(0), ValueError, "between 1 and 8192"),
         (torch.ones(1, 8193), torch.ones(8193), ValueError, "between 1 and 8192"),
         (
@@ -129,18 +161,6 @@ def test_forward_empty_m_returns_empty_without_launching():
             torch.ones(8, dtype=torch.float64),
             TypeError,
             "x dtype",
-        ),
-        (
-            torch.ones(2, 8, dtype=torch.float32),
-            torch.ones(8, dtype=torch.float16),
-            TypeError,
-            "weight dtype",
-        ),
-        (
-            torch.ones(2, 8, dtype=torch.float16),
-            torch.ones(8, dtype=torch.bfloat16),
-            TypeError,
-            "weight dtype",
         ),
         (torch.ones(2, 8), torch.ones(8), ValueError, "ROCm device"),
     ],
@@ -279,6 +299,430 @@ def test_empty_m_autograd_returns_empty_and_zero_weight_grad():
     torch.testing.assert_close(weight.grad, torch.zeros_like(weight))
 
 
+@pytest.mark.parametrize("use_compile", [False, True])
+@pytest.mark.parametrize(
+    ("has_weight", "has_bias", "weight_offset", "out_dtype"),
+    [
+        (False, False, 0.0, None),
+        (True, True, 0.0, None),
+        (True, False, 1.0, None),
+        (True, True, 0.0, torch.float32),
+    ],
+)
+def test_optional_affine_features_match_reference(
+    use_compile,
+    has_weight,
+    has_bias,
+    weight_offset,
+    out_dtype,
+):
+    torch.manual_seed(11)
+    x = torch.randn(
+        (4, 257),
+        device="cuda",
+        dtype=torch.float16,
+        requires_grad=True,
+    )
+    weight = (
+        torch.randn(257, device="cuda", dtype=torch.float32, requires_grad=True)
+        if has_weight
+        else None
+    )
+    bias = (
+        torch.randn(257, device="cuda", dtype=torch.float32, requires_grad=True)
+        if has_bias
+        else None
+    )
+    x_ref = x.detach().clone().requires_grad_(True)
+    weight_ref = weight.detach().clone().requires_grad_(True) if weight is not None else None
+    bias_ref = bias.detach().clone().requires_grad_(True) if bias is not None else None
+    function = torch.compile(rmsnorm, fullgraph=True) if use_compile else rmsnorm
+
+    actual = function(
+        x,
+        weight,
+        bias=bias,
+        weight_offset=weight_offset,
+        out_dtype=out_dtype,
+    )
+    expected, _ = _full_reference(
+        x_ref,
+        weight_ref,
+        bias_ref,
+        weight_offset=weight_offset,
+        out_dtype=out_dtype,
+    )
+    dout = torch.randn_like(actual)
+    actual.backward(dout)
+    expected.backward(dout)
+
+    _assert_close(actual, expected)
+    _assert_feature_grad_close(x.grad, x_ref.grad)
+    if weight is not None:
+        _assert_feature_grad_close(weight.grad, weight_ref.grad)
+    if bias is not None:
+        _assert_feature_grad_close(bias.grad, bias_ref.grad)
+
+
+@pytest.mark.parametrize("use_compile", [False, True])
+@pytest.mark.parametrize("prenorm", [False, True])
+def test_residual_and_prenorm_match_reference(use_compile, prenorm):
+    torch.manual_seed(12)
+    x = torch.randn(
+        (4, 257),
+        device="cuda",
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+    residual = torch.randn_like(x, requires_grad=True)
+    weight = torch.randn(257, device="cuda", dtype=torch.float32, requires_grad=True)
+    x_ref = x.detach().clone().requires_grad_(True)
+    residual_ref = residual.detach().clone().requires_grad_(True)
+    weight_ref = weight.detach().clone().requires_grad_(True)
+    function = torch.compile(rmsnorm, fullgraph=True) if use_compile else rmsnorm
+
+    result = function(
+        x,
+        weight,
+        residual=residual,
+        prenorm=prenorm,
+    )
+    actual, residual_out = result if prenorm else (result, None)
+    expected, residual_out_ref = _full_reference(
+        x_ref,
+        weight_ref,
+        residual=residual_ref,
+    )
+    dout = torch.randn_like(actual)
+    if prenorm:
+        dresidual_out = torch.randn_like(residual_out)
+        torch.autograd.backward((actual, residual_out), (dout, dresidual_out))
+        torch.autograd.backward(
+            (expected, residual_out_ref),
+            (dout, dresidual_out),
+        )
+        _assert_close(residual_out, residual_out_ref)
+    else:
+        actual.backward(dout)
+        expected.backward(dout)
+
+    _assert_close(actual, expected)
+    _assert_feature_grad_close(x.grad, x_ref.grad)
+    _assert_feature_grad_close(residual.grad, residual_ref.grad)
+    _assert_feature_grad_close(weight.grad, weight_ref.grad)
+
+
+@pytest.mark.parametrize("use_compile", [False, True])
+def test_residual_dtype_override_preserves_fp32_sum(use_compile):
+    torch.manual_seed(13)
+    x = torch.randn((3, 257), device="cuda", dtype=torch.bfloat16)
+    residual = torch.randn_like(x)
+    weight = torch.randn(257, device="cuda", dtype=torch.float32)
+    function = torch.compile(rmsnorm, fullgraph=True) if use_compile else rmsnorm
+
+    actual, residual_out = function(
+        x,
+        weight,
+        residual=residual,
+        residual_dtype=torch.float32,
+        prenorm=True,
+    )
+    expected, residual_out_ref = _full_reference(
+        x,
+        weight,
+        residual=residual,
+        residual_dtype=torch.float32,
+    )
+
+    _assert_close(actual, expected)
+    torch.testing.assert_close(residual_out, residual_out_ref, rtol=0.0, atol=0.0)
+
+
+def test_prenorm_without_residual_propagates_second_output_gradient():
+    x = torch.randn(
+        (4, 257),
+        device="cuda",
+        dtype=torch.float16,
+        requires_grad=True,
+    )
+    weight = torch.randn(257, device="cuda", dtype=torch.float32, requires_grad=True)
+
+    _, residual_out = rmsnorm(x, weight, prenorm=True)
+    residual_out.sum().backward()
+
+    torch.testing.assert_close(x.grad, torch.ones_like(x), rtol=0.0, atol=0.0)
+
+
+def test_mixed_input_and_weight_dtypes_use_generic_path():
+    x = torch.randn(
+        (4, 257),
+        device="cuda",
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    weight = torch.randn(
+        257,
+        device="cuda",
+        dtype=torch.float16,
+        requires_grad=True,
+    )
+    x_ref = x.detach().clone().requires_grad_(True)
+    weight_ref = weight.detach().clone().requires_grad_(True)
+
+    actual = rmsnorm(x, weight)
+    expected, _ = _full_reference(x_ref, weight_ref)
+    dout = torch.randn_like(actual)
+    actual.backward(dout)
+    expected.backward(dout)
+
+    _assert_close(actual, expected)
+    _assert_feature_grad_close(x.grad, x_ref.grad)
+    _assert_feature_grad_close(weight.grad, weight_ref.grad)
+
+
+def test_feature_path_respects_selective_gradients():
+    x = torch.randn((4, 257), device="cuda", dtype=torch.float16)
+    weight = torch.randn(257, device="cuda", dtype=torch.float32)
+    bias = torch.randn(
+        257,
+        device="cuda",
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    residual = torch.randn_like(x, requires_grad=True)
+
+    rmsnorm(x, weight, bias=bias, residual=residual).sum().backward()
+
+    assert x.grad is None
+    assert weight.grad is None
+    assert bias.grad is not None
+    assert residual.grad is not None
+
+
+def test_feature_rich_empty_batch_preserves_autograd_contract():
+    x = torch.empty(
+        (0, 4, 64),
+        device="cuda",
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+    weight = torch.randn(
+        (4, 64),
+        device="cuda",
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    bias = torch.randn(
+        (4, 64),
+        device="cuda",
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    residual = torch.empty_like(x, requires_grad=True)
+
+    out, residual_out = rmsnorm(
+        x,
+        weight,
+        bias=bias,
+        residual=residual,
+        prenorm=True,
+    )
+    (out.sum() + residual_out.sum()).backward()
+
+    assert out.shape == x.shape
+    assert residual_out.shape == x.shape
+    assert x.grad is not None and x.grad.numel() == 0
+    assert residual.grad is not None and residual.grad.numel() == 0
+    torch.testing.assert_close(weight.grad, torch.zeros_like(weight))
+    torch.testing.assert_close(bias.grad, torch.zeros_like(bias))
+
+
+@pytest.mark.parametrize("use_compile", [False, True])
+def test_per_head_affine_residual_matches_reference(use_compile):
+    torch.manual_seed(14)
+    x = torch.randn(
+        (2, 3, 4, 64),
+        device="cuda",
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+    weight = torch.randn((4, 64), device="cuda", dtype=torch.float32, requires_grad=True)
+    bias = torch.randn((4, 64), device="cuda", dtype=torch.float32, requires_grad=True)
+    residual = torch.randn_like(x, requires_grad=True)
+    x_ref = x.detach().clone().requires_grad_(True)
+    weight_ref = weight.detach().clone().requires_grad_(True)
+    bias_ref = bias.detach().clone().requires_grad_(True)
+    residual_ref = residual.detach().clone().requires_grad_(True)
+    function = torch.compile(rmsnorm, fullgraph=True) if use_compile else rmsnorm
+
+    actual = function(x, weight, bias=bias, residual=residual)
+    expected, _ = _full_reference(
+        x_ref,
+        weight_ref,
+        bias_ref,
+        residual_ref,
+    )
+    dout = torch.randn_like(actual)
+    actual.backward(dout)
+    expected.backward(dout)
+
+    _assert_close(actual, expected)
+    _assert_feature_grad_close(x.grad, x_ref.grad)
+    _assert_feature_grad_close(weight.grad, weight_ref.grad)
+    _assert_feature_grad_close(bias.grad, bias_ref.grad)
+    _assert_feature_grad_close(residual.grad, residual_ref.grad)
+
+
+def test_compiled_rmsnorm_switches_from_plain_to_per_head():
+    torch._dynamo.reset()
+    compiled = torch.compile(rmsnorm, fullgraph=True)
+
+    x = torch.randn(
+        (4, 256),
+        device="cuda",
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+    weight = torch.randn(256, device="cuda", dtype=torch.float32, requires_grad=True)
+    compiled(x, weight).sum().backward()
+    assert x.grad is not None and weight.grad is not None
+
+    x_head = torch.randn(
+        (2, 3, 4, 64),
+        device="cuda",
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+    weight_head = torch.randn(
+        (4, 64),
+        device="cuda",
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    bias_head = torch.randn(
+        (4, 64),
+        device="cuda",
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    residual_head = torch.randn_like(x_head, requires_grad=True)
+    compiled(
+        x_head,
+        weight_head,
+        bias=bias_head,
+        residual=residual_head,
+    ).sum().backward()
+    for tensor in (x_head, weight_head, bias_head, residual_head):
+        assert tensor.grad is not None
+
+
+def test_dynamic_compiled_feature_backward_selects_at_runtime():
+    @torch.compile(fullgraph=True, dynamic=True)
+    def compiled(x, weight, bias):
+        return rmsnorm(x, weight, bias=bias)
+
+    x = torch.randn(
+        (512, 257),
+        device="cuda",
+        dtype=torch.float16,
+        requires_grad=True,
+    )
+    weight = torch.randn(257, device="cuda", dtype=torch.float32, requires_grad=True)
+    bias = torch.randn(257, device="cuda", dtype=torch.float32, requires_grad=True)
+
+    compiled(x, weight, bias).sum().backward()
+
+    assert x.grad is not None
+    assert weight.grad is not None
+    assert bias.grad is not None
+
+
+def test_large_feature_backward_uses_two_stage_reduction():
+    torch.manual_seed(15)
+    shape = (512, 257)
+    x = torch.randn(shape, device="cuda", dtype=torch.float16, requires_grad=True)
+    weight = torch.randn(257, device="cuda", dtype=torch.float32, requires_grad=True)
+    bias = torch.randn(257, device="cuda", dtype=torch.float32, requires_grad=True)
+    dout = torch.randn_like(x)
+    path, _ = rmsnorm_flydsl_impl._select_rmsnorm_bwd_config(
+        shape[0],
+        shape[1],
+        "f16",
+        x.device,
+    )
+    assert path == "two_stage"
+
+    actual = rmsnorm(x, weight, bias=bias)
+    actual.backward(dout)
+    x_ref = x.detach().clone().requires_grad_(True)
+    weight_ref = weight.detach().clone().requires_grad_(True)
+    bias_ref = bias.detach().clone().requires_grad_(True)
+    expected, _ = _full_reference(x_ref, weight_ref, bias_ref)
+    expected.backward(dout)
+
+    _assert_close(actual, expected)
+    _assert_feature_grad_close(x.grad, x_ref.grad)
+    _assert_feature_grad_close(weight.grad, weight_ref.grad)
+    _assert_feature_grad_close(bias.grad, bias_ref.grad)
+
+
+@pytest.mark.parametrize("requested", ["weight", "bias"])
+def test_staged_per_head_backward_supports_selective_parameter_grads(requested):
+    x = torch.randn(
+        (512, 2, 65),
+        device="cuda",
+        dtype=torch.float16,
+        requires_grad=True,
+    )
+    weight = torch.randn(
+        (2, 65),
+        device="cuda",
+        dtype=torch.float32,
+        requires_grad=requested == "weight",
+    )
+    bias = torch.randn(
+        (2, 65),
+        device="cuda",
+        dtype=torch.float32,
+        requires_grad=requested == "bias",
+    )
+
+    rmsnorm(x, weight, bias=bias).sum().backward()
+
+    assert x.grad is not None
+    assert (weight.grad is not None) == (requested == "weight")
+    assert (bias.grad is not None) == (requested == "bias")
+
+
+def test_feature_workspace_descriptors_are_row_scoped():
+    source = inspect.getsource(rmsnorm_flydsl_impl.build_rmsnorm_feature_bwd_two_stage_module)
+    assert "make_buffer_tensor(workspace_tensor)" not in source
+    assert source.count("row_buffer(") >= 4
+
+
+def test_deterministic_feature_backward_is_reproducible():
+    torch.manual_seed(16)
+    x = torch.randn((64, 257), device="cuda", dtype=torch.float16)
+    weight = torch.randn(257, device="cuda", dtype=torch.float32)
+    bias = torch.randn(257, device="cuda", dtype=torch.float32)
+    dout = torch.randn_like(x)
+    results = []
+
+    torch.use_deterministic_algorithms(True)
+    try:
+        for _ in range(2):
+            x_i = x.detach().clone().requires_grad_(True)
+            weight_i = weight.detach().clone().requires_grad_(True)
+            bias_i = bias.detach().clone().requires_grad_(True)
+            rmsnorm(x_i, weight_i, bias=bias_i).backward(dout)
+            results.append((x_i.grad, weight_i.grad, bias_i.grad))
+    finally:
+        torch.use_deterministic_algorithms(False)
+
+    for first, second in zip(results[0], results[1]):
+        torch.testing.assert_close(first, second, rtol=0.0, atol=0.0)
+
+
 class _FlyDSLOpCounter(torch.utils._python_dispatch.TorchDispatchMode):
     def __init__(self):
         self.count = 0
@@ -299,13 +743,18 @@ def _clear_caches():
 def test_custom_ops_are_unique_mutation_only_and_fake_safe():
     fwd = torch.ops.quack._rmsnorm_flydsl_fwd.default
     bwd = torch.ops.quack._rmsnorm_flydsl_bwd.default
-    assert str(fwd._schema).endswith("-> ()")
-    assert str(bwd._schema).endswith("-> ()")
+    feature_fwd = torch.ops.quack._rmsnorm_flydsl_feature_fwd.default
+    feature_bwd = torch.ops.quack._rmsnorm_flydsl_feature_bwd.default
+    for op in (fwd, bwd, feature_fwd, feature_bwd):
+        assert str(op._schema).endswith("-> ()")
     assert "Tensor(a2!) out" in str(fwd._schema)
     assert "Tensor(a3!) rstd" in str(fwd._schema)
     assert "Tensor(a4!) dx" in str(bwd._schema)
     assert "Tensor(a5!) dweight" in str(bwd._schema)
     assert "Tensor(a6!) partial" in str(bwd._schema)
+    assert "Tensor(a4!) out" in str(feature_fwd._schema)
+    assert "Tensor(a5!) residual_out" in str(feature_fwd._schema)
+    assert "Tensor(a8!) dbias" in str(feature_bwd._schema)
 
     from torch._subclasses.fake_tensor import FakeTensorMode
 
@@ -321,6 +770,50 @@ def test_custom_ops_are_unique_mutation_only_and_fake_safe():
         dweight = torch.empty_like(weight)
         partial = torch.empty(0, device="cuda", dtype=torch.float32)
         bwd(x, weight, dout, rstd, dx, dweight, partial, 0)
+
+        bias = torch.empty_like(weight)
+        residual = torch.empty_like(x)
+        residual_out = torch.empty_like(x)
+        feature_fwd(
+            x,
+            weight,
+            bias,
+            residual,
+            out,
+            residual_out,
+            rstd,
+            1e-6,
+            0.0,
+            True,
+            True,
+            True,
+            True,
+            True,
+            False,
+            1,
+        )
+        dresidual = torch.empty_like(x)
+        dbias = torch.empty_like(weight, dtype=torch.float32)
+        feature_bwd(
+            x,
+            weight,
+            dout,
+            residual,
+            rstd,
+            dx,
+            dresidual,
+            dweight,
+            dbias,
+            0.0,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            False,
+            1,
+        )
 
 
 def test_eager_fast_path_bypasses_custom_op_dispatch():
@@ -688,39 +1181,10 @@ def test_public_signature_matches_upstream_rmsnorm():
         assert repr(ours[name].default) == default, name
 
 
-@pytest.mark.parametrize(
-    ("kwargs", "feature"),
-    [
-        ({"bias": "tensor"}, "bias"),
-        ({"residual": "tensor"}, "residual"),
-        ({"out_dtype": torch.float32}, "out_dtype"),
-        ({"residual_dtype": torch.float32}, "residual_dtype"),
-        ({"prenorm": True}, "prenorm"),
-        ({"weight_offset": 1.0}, "weight_offset"),
-    ],
-)
-def test_unsupported_upstream_features_name_themselves(kwargs, feature):
+def test_weight_offset_requires_weight():
     x = torch.randn((2, 128), device="cuda", dtype=torch.bfloat16)
-    weight = torch.randn(128, device="cuda", dtype=torch.bfloat16)
-    if kwargs.get("bias") == "tensor":
-        kwargs["bias"] = weight
-    if kwargs.get("residual") == "tensor":
-        kwargs["residual"] = x
-    with pytest.raises(NotImplementedError, match=feature):
-        rmsnorm(x, weight, **kwargs)
-
-
-def test_omitting_the_weight_is_rejected():
-    x = torch.randn((2, 128), device="cuda", dtype=torch.bfloat16)
-    with pytest.raises(NotImplementedError, match="weight"):
-        rmsnorm(x)
-
-
-def test_per_head_weight_is_rejected():
-    x = torch.randn((2, 4, 32), device="cuda", dtype=torch.bfloat16)
-    weight = torch.randn((4, 32), device="cuda", dtype=torch.bfloat16)
-    with pytest.raises(NotImplementedError, match="per-head"):
-        rmsnorm(x, weight)
+    with pytest.raises(ValueError, match="weight_offset requires"):
+        rmsnorm(x, weight_offset=1.0)
 
 
 def test_upstream_defaults_still_run():

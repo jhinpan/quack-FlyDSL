@@ -80,6 +80,14 @@ def row_buffer(tensor, row, elem_bits: int, n: int):
     )
 
 
+def row_head_buffer(tensor, row, head, elem_bits: int, n: int):
+    """Wrap one ``(row, head)`` slice of a per-head tensor."""
+    return fx.rocdl.make_buffer_tensor(
+        fx.slice(tensor, (row, head, None)),
+        num_records_bytes=n * (elem_bits // 8),
+    )
+
+
 def make_reduction_storage(red_slots: int):
     """One fp32 slot per wave, for the block half of the reduction.
 

@@ -4,6 +4,20 @@ Findings from building the opt-in ROCm RMSNorm backend (`quack/flydsl/`,
 `quack/rmsnorm_flydsl.py`). Measured on MI355X / gfx950 with FlyDSL 0.2.4 and
 torch 2.9.1+rocm7.2.0 unless stated otherwise.
 
+## Quack RMSNorm API coverage
+
+The FlyDSL entry point implements the upstream `quack.rmsnorm` signature,
+including optional weight and bias, `weight_offset`, independent output dtype,
+residual/prenorm output, residual dtype override, and per-head parameters.
+The original plain weighted path keeps its vectorized/small-N kernels; feature
+combinations use a scalar, descriptor-safe kernel specialized by compile-time
+feature flags.
+
+Backward keeps the small-row atomic path and uses a deterministic persistent
+partial plus final reduction for large row counts or deterministic mode.
+Per-head workspaces and final parameter-gradient stores use row-scoped buffer
+descriptors so neither temporary nor output addressing silently wraps at 4 GiB.
+
 ## A buffer descriptor addresses at most 4 GiB
 
 `fx.rocdl.make_buffer_tensor` defaults to `max_size=True`, which sets
