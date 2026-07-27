@@ -83,9 +83,16 @@ def _assert_grad_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
         torch.testing.assert_close(actual, expected, rtol=3e-2, atol=3e-2)
 
 
-def _assert_feature_grad_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
-    # Fused residual backward saves the rounded residual_out, matching Quack's
-    # kernel path rather than the full-precision eager expression graph.
+def _assert_fused_residual_grad_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
+    """Compare gradients that were recomputed from a rounded residual sum.
+
+    A fused residual forward normalizes from the fp32 sum but saves that sum
+    rounded to ``residual_dtype``, and backward recomputes ``x_hat`` from the
+    rounded copy. Quack's own kernels do the same. The slack here absorbs that
+    one rounding, so it applies whatever the gradient's own dtype is -- and it
+    is why the non-residual feature tests use the tighter _assert_grad_close
+    instead of borrowing this tolerance.
+    """
     torch.testing.assert_close(actual, expected, rtol=3e-2, atol=3e-2)
 
 
@@ -357,11 +364,11 @@ def test_optional_affine_features_match_reference(
     expected.backward(dout)
 
     _assert_close(actual, expected)
-    _assert_feature_grad_close(x.grad, x_ref.grad)
+    _assert_grad_close(x.grad, x_ref.grad)
     if weight is not None:
-        _assert_feature_grad_close(weight.grad, weight_ref.grad)
+        _assert_grad_close(weight.grad, weight_ref.grad)
     if bias is not None:
-        _assert_feature_grad_close(bias.grad, bias_ref.grad)
+        _assert_grad_close(bias.grad, bias_ref.grad)
 
 
 @pytest.mark.parametrize("use_compile", [False, True])
@@ -407,9 +414,9 @@ def test_residual_and_prenorm_match_reference(use_compile, prenorm):
         expected.backward(dout)
 
     _assert_close(actual, expected)
-    _assert_feature_grad_close(x.grad, x_ref.grad)
-    _assert_feature_grad_close(residual.grad, residual_ref.grad)
-    _assert_feature_grad_close(weight.grad, weight_ref.grad)
+    _assert_fused_residual_grad_close(x.grad, x_ref.grad)
+    _assert_fused_residual_grad_close(residual.grad, residual_ref.grad)
+    _assert_fused_residual_grad_close(weight.grad, weight_ref.grad)
 
 
 @pytest.mark.parametrize("use_compile", [False, True])
@@ -476,8 +483,8 @@ def test_mixed_input_and_weight_dtypes_use_generic_path():
     expected.backward(dout)
 
     _assert_close(actual, expected)
-    _assert_feature_grad_close(x.grad, x_ref.grad)
-    _assert_feature_grad_close(weight.grad, weight_ref.grad)
+    _assert_grad_close(x.grad, x_ref.grad)
+    _assert_grad_close(weight.grad, weight_ref.grad)
 
 
 def test_feature_path_respects_selective_gradients():
@@ -567,10 +574,10 @@ def test_per_head_affine_residual_matches_reference(use_compile):
     expected.backward(dout)
 
     _assert_close(actual, expected)
-    _assert_feature_grad_close(x.grad, x_ref.grad)
-    _assert_feature_grad_close(weight.grad, weight_ref.grad)
-    _assert_feature_grad_close(bias.grad, bias_ref.grad)
-    _assert_feature_grad_close(residual.grad, residual_ref.grad)
+    _assert_fused_residual_grad_close(x.grad, x_ref.grad)
+    _assert_fused_residual_grad_close(weight.grad, weight_ref.grad)
+    _assert_fused_residual_grad_close(bias.grad, bias_ref.grad)
+    _assert_fused_residual_grad_close(residual.grad, residual_ref.grad)
 
 
 def test_compiled_rmsnorm_switches_from_plain_to_per_head():
@@ -661,9 +668,9 @@ def test_large_feature_backward_uses_two_stage_reduction():
     expected.backward(dout)
 
     _assert_close(actual, expected)
-    _assert_feature_grad_close(x.grad, x_ref.grad)
-    _assert_feature_grad_close(weight.grad, weight_ref.grad)
-    _assert_feature_grad_close(bias.grad, bias_ref.grad)
+    _assert_grad_close(x.grad, x_ref.grad)
+    _assert_grad_close(weight.grad, weight_ref.grad)
+    _assert_grad_close(bias.grad, bias_ref.grad)
 
 
 @pytest.mark.parametrize("requested", ["weight", "bias"])
