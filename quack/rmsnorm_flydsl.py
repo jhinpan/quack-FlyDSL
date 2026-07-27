@@ -1006,7 +1006,10 @@ class _RMSNormFeatureFunction(torch.autograd.Function):
     ):
         programs = x.shape[0] * num_heads
         needs_grad = any(ctx.needs_input_grad[:4])
-        store_residual = has_residual or prenorm or residual_out_dtype != x.dtype
+        # residual_out is only ever read by the caller under prenorm, or by
+        # backward as the saved source of a fused residual. Materializing it
+        # otherwise costs a full extra tensor write for nothing.
+        store_residual = prenorm or (needs_grad and has_residual)
         out = torch.empty_like(x, dtype=out_dtype)
         residual_out = (
             torch.empty_like(x, dtype=residual_out_dtype)
@@ -1041,7 +1044,6 @@ class _RMSNormFeatureFunction(torch.autograd.Function):
             ctx.save_for_backward(source, weight, bias, rstd)
             ctx.x_dtype = x.dtype
             ctx.residual_dtype = residual.dtype
-            ctx.residual_out_dtype = residual_out.dtype
             ctx.has_weight = has_weight
             ctx.has_bias = has_bias
             ctx.has_residual = has_residual
@@ -1196,16 +1198,12 @@ def rmsnorm(
         )
         return out_flat.reshape(x.shape)
 
-    weight_arg = (
-        weight.contiguous()
-        if weight is not None
-        else torch.empty(parameter_shape, device=x.device, dtype=x.dtype)
-    )
-    bias_arg = (
-        bias.contiguous()
-        if bias is not None
-        else torch.empty(parameter_shape, device=x.device, dtype=x.dtype)
-    )
+    # An absent weight or bias still has to be passed, because the custom op
+    # schema is fixed. The kernels build no descriptor for it, so an empty
+    # tensor is enough and keeps the allocation off every call.
+    absent = torch.empty(0, device=x.device, dtype=x.dtype)
+    weight_arg = weight.contiguous() if weight is not None else absent
+    bias_arg = bias.contiguous() if bias is not None else absent
     residual_arg = (
         residual.reshape(-1, *last_shape).contiguous() if residual is not None else x_flat
     )
