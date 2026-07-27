@@ -1,6 +1,6 @@
 # Copyright (c) 2026, Tri Dao.
 
-"""Explicit ROCm/FlyDSL plain RMSNorm backend.
+"""Explicit ROCm/FlyDSL RMSNorm backend.
 
 This module is intentionally opt-in. Importing ``quack`` does not import
 FlyDSL, and this backend does not alter Quack's existing CUDA/CuTe dispatch.
@@ -13,13 +13,15 @@ import torch
 
 from quack.flydsl.kernel_utils import FLYDSL_BUILD_LOCK, run_compiled
 from quack.flydsl.rmsnorm_bwd_kernel import (
+    build_rmsnorm_feature_bwd_atomic_module,
+    build_rmsnorm_feature_bwd_two_stage_module,
     build_rmsnorm_bwd_module,
     build_rmsnorm_bwd_two_stage_module,
     TWO_STAGE_MAX_NUM_THREADS,
     rmsnorm_bwd_two_stage_config,
 )
 from quack.flydsl.rmsnorm_common import EPS
-from quack.flydsl.rmsnorm_kernel import build_rmsnorm_module
+from quack.flydsl.rmsnorm_kernel import build_rmsnorm_feature_module, build_rmsnorm_module
 
 
 __all__ = ["rmsnorm"]
@@ -95,79 +97,86 @@ def _validate_arch(device: torch.device) -> str:
     return actual
 
 
-def _reject_unsupported_features(**kwargs) -> None:
-    """Reject the parts of the upstream RMSNorm contract this backend lacks.
-
-    Keeping the list in one place means an unsupported call names the missing
-    feature instead of failing somewhere deeper with a shape or dtype error.
-    """
-    unsupported = (
-        ("bias", None, "a bias"),
-        ("residual", None, "residual fusion"),
-        ("out_dtype", None, "out_dtype"),
-        ("residual_dtype", None, "residual_dtype"),
-        ("prenorm", False, "prenorm outputs"),
-        ("weight_offset", 0.0, "weight_offset"),
-    )
-    for name, default, description in unsupported:
-        if kwargs[name] is not default and kwargs[name] != default:
-            raise NotImplementedError(
-                f"the FlyDSL RMSNorm backend does not support {description} ({name})"
-            )
-    if kwargs["weight"] is None:
-        raise NotImplementedError("the FlyDSL RMSNorm backend requires an explicit weight")
-
-
-def _validate_inputs(
+def _validate_feature_inputs(
     x: torch.Tensor,
-    weight: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    residual: torch.Tensor | None,
+    out_dtype: torch.dtype | None,
+    residual_dtype: torch.dtype | None,
     eps: float,
-) -> tuple[int, int, float]:
+    prenorm: bool,
+    weight_offset: float,
+) -> tuple[int, int, int, bool, float, float]:
     if not isinstance(x, torch.Tensor):
         raise TypeError(f"x must be a torch.Tensor, got {type(x).__name__}")
-    if not isinstance(weight, torch.Tensor):
-        raise TypeError(f"weight must be a torch.Tensor, got {type(weight).__name__}")
     if x.ndim < 1:
         raise ValueError("x must have at least one dimension")
-    if weight.ndim != 1:
-        raise NotImplementedError(
-            "the FlyDSL RMSNorm backend does not support per-head weights; "
-            f"weight must be 1-D, got shape {tuple(weight.shape)}"
-        )
+    for name, tensor in (("weight", weight), ("bias", bias), ("residual", residual)):
+        if tensor is not None and not isinstance(tensor, torch.Tensor):
+            raise TypeError(f"{name} must be a torch.Tensor or None, got {type(tensor).__name__}")
 
-    n = x.shape[-1]
-    if weight.shape[0] != n:
-        raise ValueError(f"x last dimension ({n}) must equal weight length ({weight.shape[0]})")
+    parameter_ranks = {tensor.ndim for tensor in (weight, bias) if tensor is not None}
+    if not parameter_ranks.issubset({1, 2}):
+        raise ValueError("weight and bias must be 1-D or 2-D")
+    if len(parameter_ranks) > 1:
+        raise ValueError("weight and bias must use the same rank")
+    per_head = parameter_ranks == {2}
+    if per_head:
+        if x.ndim < 2:
+            raise ValueError("per-head RMSNorm requires an input with at least two dimensions")
+        num_heads, n = x.shape[-2:]
+        parameter_shape = (num_heads, n)
+    else:
+        num_heads, n = 1, x.shape[-1]
+        parameter_shape = (n,)
+
     if not 1 <= n <= 8192:
-        raise ValueError(f"x last dimension must be between 1 and 8192, got {n}")
+        raise ValueError(f"x normalized dimension must be between 1 and 8192, got {n}")
+    for name, tensor in (("weight", weight), ("bias", bias)):
+        if tensor is not None and tuple(tensor.shape) != parameter_shape:
+            raise ValueError(f"{name} shape must be {parameter_shape}, got {tuple(tensor.shape)}")
+    if residual is not None and residual.shape != x.shape:
+        raise ValueError(
+            f"residual shape must match x, got {tuple(residual.shape)}/{tuple(x.shape)}"
+        )
 
     if x.dtype not in _SUPPORTED_DTYPES:
         raise TypeError(f"x dtype must be float16, bfloat16, or float32, got {x.dtype}")
-    valid_weight_dtype = weight.dtype == x.dtype or (
-        x.dtype in (torch.float16, torch.bfloat16) and weight.dtype == torch.float32
-    )
-    if not valid_weight_dtype:
-        raise TypeError(
-            "weight dtype must match x dtype, except float16/bfloat16 x may use "
-            f"float32 weight; got {x.dtype}/{weight.dtype}"
-        )
+    for name, tensor in (("weight", weight), ("bias", bias), ("residual", residual)):
+        if tensor is not None and tensor.dtype not in _SUPPORTED_DTYPES:
+            raise TypeError(
+                f"{name} dtype must be float16, bfloat16, or float32, got {tensor.dtype}"
+            )
+    for name, dtype in (("out_dtype", out_dtype), ("residual_dtype", residual_dtype)):
+        if dtype is not None and dtype not in _SUPPORTED_DTYPES:
+            raise TypeError(f"{name} must be float16, bfloat16, or float32, got {dtype}")
 
     if torch.version.hip is None or x.device.type != "cuda":
         raise ValueError(f"x must be on a ROCm device, got {x.device}")
-    if weight.device != x.device:
-        raise ValueError(f"x and weight must be on the same device, got {x.device}/{weight.device}")
+    for name, tensor in (("weight", weight), ("bias", bias), ("residual", residual)):
+        if tensor is not None and tensor.device != x.device:
+            raise ValueError(
+                f"x and {name} must be on the same device, got {x.device}/{tensor.device}"
+            )
 
     if isinstance(eps, bool) or not isinstance(eps, numbers.Real):
         raise TypeError(f"eps must be a real number, got {type(eps).__name__}")
     eps = float(eps)
-    # Spelled as a comparison chain rather than math.isfinite so it still
-    # traces when Dynamo hands us a symbolic float under dynamic=True. It
-    # rejects NaN, both infinities and non-positive values just the same.
     if not 0.0 < eps < math.inf:
         raise ValueError(f"eps must be finite and positive, got {eps}")
+    if not isinstance(prenorm, bool):
+        raise TypeError(f"prenorm must be a bool, got {type(prenorm).__name__}")
+    if isinstance(weight_offset, bool) or not isinstance(weight_offset, numbers.Real):
+        raise TypeError(f"weight_offset must be a real number, got {type(weight_offset).__name__}")
+    weight_offset = float(weight_offset)
+    if not -math.inf < weight_offset < math.inf:
+        raise ValueError(f"weight_offset must be finite, got {weight_offset}")
+    if weight is None and weight_offset != 0.0:
+        raise ValueError("weight_offset requires an explicit weight")
 
-    m = x.numel() // n
-    return m, n, eps
+    m = x.numel() // (num_heads * n)
+    return m, n, num_heads, per_head, eps, weight_offset
 
 
 def _current_raw_stream(device: torch.device) -> int:
@@ -345,6 +354,171 @@ def _rmsnorm_fwd(
         store_rstd,
     )
     return out, rstd if store_rstd else None
+
+
+def _launch_rmsnorm_feature_fwd(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    residual: torch.Tensor,
+    out: torch.Tensor,
+    residual_out: torch.Tensor,
+    rstd: torch.Tensor,
+    eps: float,
+    weight_offset: float,
+    *,
+    has_weight: bool,
+    has_bias: bool,
+    has_residual: bool,
+    store_residual: bool,
+    store_rstd: bool,
+    per_head: bool,
+    num_heads: int,
+) -> None:
+    m, n = x.shape[0], x.shape[-1]
+    dtype_str = _dtype_to_str(x.dtype)
+    output_dtype_str = _dtype_to_str(out.dtype)
+    weight_dtype_str = _dtype_to_str(weight.dtype)
+    bias_dtype_str = _dtype_to_str(bias.dtype)
+    residual_dtype_str = _dtype_to_str(residual.dtype)
+    residual_out_dtype_str = _dtype_to_str(residual_out.dtype)
+
+    with torch.cuda.device(x.device):
+        key = (
+            "feature",
+            x.device.index,
+            n,
+            dtype_str,
+            output_dtype_str,
+            weight_dtype_str,
+            bias_dtype_str,
+            residual_dtype_str,
+            residual_out_dtype_str,
+            has_weight,
+            has_bias,
+            has_residual,
+            store_residual,
+            store_rstd,
+            per_head,
+            num_heads,
+        )
+        launcher = _FWD_CACHE.get(key)
+        if launcher is None:
+            launcher = _build_cached(
+                _FWD_CACHE,
+                key,
+                x.device,
+                lambda arch: build_rmsnorm_feature_module(
+                    n,
+                    dtype_str,
+                    output_dtype_str,
+                    weight_dtype_str=weight_dtype_str,
+                    bias_dtype_str=bias_dtype_str,
+                    residual_dtype_str=residual_dtype_str,
+                    residual_out_dtype_str=residual_out_dtype_str,
+                    has_weight=has_weight,
+                    has_bias=has_bias,
+                    has_residual=has_residual,
+                    store_residual=store_residual,
+                    store_rstd=store_rstd,
+                    per_head=per_head,
+                    num_heads=num_heads,
+                    arch=arch,
+                ),
+            )
+        run_compiled(
+            launcher,
+            x,
+            weight,
+            bias,
+            residual,
+            out,
+            residual_out,
+            rstd,
+            m,
+            eps,
+            weight_offset,
+            _current_raw_stream(x.device),
+        )
+
+
+@torch.library.custom_op(
+    "quack::_rmsnorm_flydsl_feature_fwd",
+    mutates_args=("out", "residual_out", "rstd"),
+    device_types="cuda",
+    schema=(
+        "(Tensor x, Tensor weight, Tensor bias, Tensor residual, "
+        "Tensor(a4!) out, Tensor(a5!) residual_out, Tensor(a6!) rstd, "
+        "float eps, float weight_offset, bool has_weight, bool has_bias, "
+        "bool has_residual, bool store_residual, bool store_rstd, "
+        "bool per_head, int num_heads) -> ()"
+    ),
+)
+def _rmsnorm_flydsl_feature_fwd_op(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    residual: torch.Tensor,
+    out: torch.Tensor,
+    residual_out: torch.Tensor,
+    rstd: torch.Tensor,
+    eps: float,
+    weight_offset: float,
+    has_weight: bool,
+    has_bias: bool,
+    has_residual: bool,
+    store_residual: bool,
+    store_rstd: bool,
+    per_head: bool,
+    num_heads: int,
+) -> None:
+    _launch_rmsnorm_feature_fwd(
+        x,
+        weight,
+        bias,
+        residual,
+        out,
+        residual_out,
+        rstd,
+        eps,
+        weight_offset,
+        has_weight=has_weight,
+        has_bias=has_bias,
+        has_residual=has_residual,
+        store_residual=store_residual,
+        store_rstd=store_rstd,
+        per_head=per_head,
+        num_heads=num_heads,
+    )
+
+
+@_rmsnorm_flydsl_feature_fwd_op.register_fake
+def _rmsnorm_flydsl_feature_fwd_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    residual: torch.Tensor,
+    out: torch.Tensor,
+    residual_out: torch.Tensor,
+    rstd: torch.Tensor,
+    eps: float,
+    weight_offset: float,
+    has_weight: bool,
+    has_bias: bool,
+    has_residual: bool,
+    store_residual: bool,
+    store_rstd: bool,
+    per_head: bool,
+    num_heads: int,
+) -> None:
+    return None
+
+
+def _dispatch_rmsnorm_feature_fwd(*args, **kwargs) -> None:
+    if torch.compiler.is_compiling():
+        _rmsnorm_flydsl_feature_fwd_op(*args, **kwargs)
+    else:
+        _launch_rmsnorm_feature_fwd(*args, **kwargs)
 
 
 def _launch_rmsnorm_bwd(
@@ -545,6 +719,240 @@ def _rmsnorm_bwd(
     return dx, dweight.to(weight.dtype)
 
 
+def _launch_rmsnorm_feature_bwd(
+    source: torch.Tensor,
+    weight: torch.Tensor,
+    dout: torch.Tensor,
+    dresidual_out: torch.Tensor,
+    rstd: torch.Tensor,
+    dx: torch.Tensor,
+    dresidual: torch.Tensor,
+    dweight: torch.Tensor,
+    dbias: torch.Tensor,
+    weight_offset: float,
+    *,
+    has_weight: bool,
+    has_bias: bool,
+    compute_dweight: bool,
+    compute_dbias: bool,
+    has_residual: bool,
+    has_dresidual_out: bool,
+    per_head: bool,
+    num_heads: int,
+) -> None:
+    m, n = source.shape[0], source.shape[-1]
+    source_dtype_str = _dtype_to_str(source.dtype)
+    dy_dtype_str = _dtype_to_str(dout.dtype)
+    dx_dtype_str = _dtype_to_str(dx.dtype)
+    dresidual_dtype_str = _dtype_to_str(dresidual.dtype)
+    dresidual_out_dtype_str = _dtype_to_str(dresidual_out.dtype)
+    weight_dtype_str = _dtype_to_str(weight.dtype)
+
+    path, selected_programs = _select_rmsnorm_bwd_config(
+        m,
+        n,
+        source_dtype_str,
+        source.device,
+    )
+    has_parameter_grads = compute_dweight or compute_dbias
+    num_programs = selected_programs if path == "two_stage" and has_parameter_grads else 0
+    path = "two_stage" if num_programs else "atomic"
+    workspace_rows = num_programs * num_heads * (int(compute_dweight) + int(compute_dbias))
+    workspace = torch.empty(
+        (workspace_rows, n) if workspace_rows else (1, n),
+        device=source.device,
+        dtype=torch.float32,
+    )
+    with torch.cuda.device(source.device):
+        key = (
+            f"feature-{path}",
+            source.device.index,
+            n,
+            source_dtype_str,
+            dy_dtype_str,
+            dx_dtype_str,
+            dresidual_dtype_str,
+            dresidual_out_dtype_str,
+            weight_dtype_str,
+            has_weight,
+            has_bias,
+            compute_dweight,
+            compute_dbias,
+            has_residual,
+            has_dresidual_out,
+            per_head,
+            num_heads,
+            num_programs,
+        )
+        launcher = _BWD_CACHE.get(key)
+        if launcher is None:
+            launcher = _build_cached(
+                _BWD_CACHE,
+                key,
+                source.device,
+                lambda arch: (
+                    build_rmsnorm_feature_bwd_two_stage_module(
+                        n,
+                        source_dtype_str,
+                        dy_dtype_str,
+                        dx_dtype_str,
+                        dresidual_dtype_str,
+                        dresidual_out_dtype_str,
+                        num_programs,
+                        weight_dtype_str=weight_dtype_str,
+                        has_weight=has_weight,
+                        has_bias=has_bias,
+                        compute_dweight=compute_dweight,
+                        compute_dbias=compute_dbias,
+                        has_residual=has_residual,
+                        has_dresidual_out=has_dresidual_out,
+                        per_head=per_head,
+                        num_heads=num_heads,
+                        arch=arch,
+                    )
+                    if path == "two_stage"
+                    else build_rmsnorm_feature_bwd_atomic_module(
+                        n,
+                        source_dtype_str,
+                        dy_dtype_str,
+                        dx_dtype_str,
+                        dresidual_dtype_str,
+                        dresidual_out_dtype_str,
+                        weight_dtype_str=weight_dtype_str,
+                        has_weight=has_weight,
+                        has_bias=has_bias,
+                        compute_dweight=compute_dweight,
+                        compute_dbias=compute_dbias,
+                        has_residual=has_residual,
+                        has_dresidual_out=has_dresidual_out,
+                        per_head=per_head,
+                        num_heads=num_heads,
+                        arch=arch,
+                    )
+                ),
+            )
+        stream = _current_raw_stream(source.device)
+        if path == "two_stage":
+            run_compiled(
+                launcher,
+                source,
+                weight,
+                dout,
+                dresidual_out,
+                rstd,
+                dx,
+                dresidual,
+                dweight,
+                dbias,
+                workspace,
+                m,
+                weight_offset,
+                stream,
+            )
+        else:
+            run_compiled(
+                launcher,
+                source,
+                weight,
+                dout,
+                dresidual_out,
+                rstd,
+                dx,
+                dresidual,
+                dweight,
+                dbias,
+                m,
+                weight_offset,
+                stream,
+            )
+
+
+@torch.library.custom_op(
+    "quack::_rmsnorm_flydsl_feature_bwd",
+    mutates_args=("dx", "dresidual", "dweight", "dbias"),
+    device_types="cuda",
+    schema=(
+        "(Tensor source, Tensor weight, Tensor dout, Tensor dresidual_out, "
+        "Tensor rstd, Tensor(a5!) dx, Tensor(a6!) dresidual, "
+        "Tensor(a7!) dweight, Tensor(a8!) dbias, float weight_offset, "
+        "bool has_weight, bool has_bias, bool compute_dweight, "
+        "bool compute_dbias, bool has_residual, "
+        "bool has_dresidual_out, bool per_head, int num_heads) -> ()"
+    ),
+)
+def _rmsnorm_flydsl_feature_bwd_op(
+    source: torch.Tensor,
+    weight: torch.Tensor,
+    dout: torch.Tensor,
+    dresidual_out: torch.Tensor,
+    rstd: torch.Tensor,
+    dx: torch.Tensor,
+    dresidual: torch.Tensor,
+    dweight: torch.Tensor,
+    dbias: torch.Tensor,
+    weight_offset: float,
+    has_weight: bool,
+    has_bias: bool,
+    compute_dweight: bool,
+    compute_dbias: bool,
+    has_residual: bool,
+    has_dresidual_out: bool,
+    per_head: bool,
+    num_heads: int,
+) -> None:
+    _launch_rmsnorm_feature_bwd(
+        source,
+        weight,
+        dout,
+        dresidual_out,
+        rstd,
+        dx,
+        dresidual,
+        dweight,
+        dbias,
+        weight_offset,
+        has_weight=has_weight,
+        has_bias=has_bias,
+        compute_dweight=compute_dweight,
+        compute_dbias=compute_dbias,
+        has_residual=has_residual,
+        has_dresidual_out=has_dresidual_out,
+        per_head=per_head,
+        num_heads=num_heads,
+    )
+
+
+@_rmsnorm_flydsl_feature_bwd_op.register_fake
+def _rmsnorm_flydsl_feature_bwd_fake(
+    source: torch.Tensor,
+    weight: torch.Tensor,
+    dout: torch.Tensor,
+    dresidual_out: torch.Tensor,
+    rstd: torch.Tensor,
+    dx: torch.Tensor,
+    dresidual: torch.Tensor,
+    dweight: torch.Tensor,
+    dbias: torch.Tensor,
+    weight_offset: float,
+    has_weight: bool,
+    has_bias: bool,
+    compute_dweight: bool,
+    compute_dbias: bool,
+    has_residual: bool,
+    has_dresidual_out: bool,
+    per_head: bool,
+    num_heads: int,
+) -> None:
+    return None
+
+
+def _dispatch_rmsnorm_feature_bwd(*args, **kwargs) -> None:
+    if torch.compiler.is_compiling():
+        _rmsnorm_flydsl_feature_bwd_op(*args, **kwargs)
+    else:
+        _launch_rmsnorm_feature_bwd(*args, **kwargs)
+
+
 class _RMSNormFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: torch.Tensor, weight: torch.Tensor, eps: float):
@@ -577,6 +985,148 @@ class _RMSNormFunction(torch.autograd.Function):
         )
 
 
+class _RMSNormFeatureFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor,
+        residual: torch.Tensor,
+        eps: float,
+        out_dtype: torch.dtype,
+        residual_out_dtype: torch.dtype,
+        prenorm: bool,
+        weight_offset: float,
+        has_weight: bool,
+        has_bias: bool,
+        has_residual: bool,
+        per_head: bool,
+        num_heads: int,
+    ):
+        programs = x.shape[0] * num_heads
+        needs_grad = any(ctx.needs_input_grad[:4])
+        store_residual = has_residual or prenorm or residual_out_dtype != x.dtype
+        out = torch.empty_like(x, dtype=out_dtype)
+        residual_out = (
+            torch.empty_like(x, dtype=residual_out_dtype)
+            if store_residual
+            else torch.empty(0, device=x.device, dtype=residual_out_dtype)
+        )
+        rstd = torch.empty(
+            programs if needs_grad else 0,
+            device=x.device,
+            dtype=torch.float32,
+        )
+        _dispatch_rmsnorm_feature_fwd(
+            x,
+            weight,
+            bias,
+            residual,
+            out,
+            residual_out,
+            rstd,
+            eps,
+            weight_offset,
+            has_weight=has_weight,
+            has_bias=has_bias,
+            has_residual=has_residual,
+            store_residual=store_residual,
+            store_rstd=needs_grad,
+            per_head=per_head,
+            num_heads=num_heads,
+        )
+        if needs_grad:
+            source = residual_out if has_residual else x
+            ctx.save_for_backward(source, weight, bias, rstd)
+            ctx.x_dtype = x.dtype
+            ctx.residual_dtype = residual.dtype
+            ctx.residual_out_dtype = residual_out.dtype
+            ctx.has_weight = has_weight
+            ctx.has_bias = has_bias
+            ctx.has_residual = has_residual
+            ctx.per_head = per_head
+            ctx.num_heads = num_heads
+            ctx.prenorm = prenorm
+            ctx.weight_offset = weight_offset
+            ctx.x_needs_grad = ctx.needs_input_grad[0]
+            ctx.weight_needs_grad = has_weight and ctx.needs_input_grad[1]
+            ctx.bias_needs_grad = has_bias and ctx.needs_input_grad[2]
+            ctx.residual_needs_grad = has_residual and ctx.needs_input_grad[3]
+        if prenorm:
+            return out, residual_out
+        return out
+
+    @staticmethod
+    def backward(ctx, dout: torch.Tensor, *args):
+        source, weight, bias, rstd = ctx.saved_tensors
+        dout = dout.contiguous()
+        has_dresidual_out = ctx.prenorm
+        if has_dresidual_out:
+            dresidual_out = args[0].contiguous()
+        else:
+            dresidual_out = source
+
+        dx = torch.empty_like(source, dtype=ctx.x_dtype)
+        dresidual = (
+            torch.empty_like(source, dtype=ctx.residual_dtype)
+            if ctx.has_residual
+            else torch.empty(0, device=source.device, dtype=ctx.residual_dtype)
+        )
+        parameter_shape = (ctx.num_heads, source.shape[-1]) if ctx.per_head else (source.shape[-1],)
+        dweight_f32 = torch.zeros(
+            parameter_shape if ctx.weight_needs_grad else (1,),
+            device=source.device,
+            dtype=torch.float32,
+        )
+        dbias_f32 = torch.zeros(
+            parameter_shape if ctx.bias_needs_grad else (1,),
+            device=source.device,
+            dtype=torch.float32,
+        )
+        _dispatch_rmsnorm_feature_bwd(
+            source,
+            weight,
+            dout,
+            dresidual_out,
+            rstd,
+            dx,
+            dresidual,
+            dweight_f32,
+            dbias_f32,
+            ctx.weight_offset,
+            has_weight=ctx.has_weight,
+            has_bias=ctx.has_bias,
+            compute_dweight=ctx.weight_needs_grad,
+            compute_dbias=ctx.bias_needs_grad,
+            has_residual=ctx.has_residual,
+            has_dresidual_out=has_dresidual_out,
+            per_head=ctx.per_head,
+            num_heads=ctx.num_heads,
+        )
+
+        dweight = (
+            dweight_f32.reshape(parameter_shape).to(weight.dtype) if ctx.weight_needs_grad else None
+        )
+        dbias = dbias_f32.reshape(parameter_shape).to(bias.dtype) if ctx.bias_needs_grad else None
+        return (
+            dx if ctx.x_needs_grad else None,
+            dweight if ctx.weight_needs_grad else None,
+            dbias if ctx.bias_needs_grad else None,
+            dresidual if ctx.residual_needs_grad else None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+
 def rmsnorm(
     x: torch.Tensor,
     weight: torch.Tensor | None = None,
@@ -588,30 +1138,93 @@ def rmsnorm(
     prenorm: bool = False,
     weight_offset: float = 0.0,
 ) -> torch.Tensor:
-    """Apply plain RMSNorm over the last dimension using the FlyDSL backend.
-
-    The signature mirrors :func:`quack.rmsnorm` so this backend can stand in
-    for it. Everything beyond plain weighted RMSNorm is rejected by name
-    rather than silently ignored.
-    """
-    _reject_unsupported_features(
-        weight=weight,
-        bias=bias,
-        residual=residual,
-        out_dtype=out_dtype,
-        residual_dtype=residual_dtype,
-        prenorm=prenorm,
-        weight_offset=weight_offset,
-    )
-    m, n, eps = _validate_inputs(x, weight, eps)
-    if m == 0:
-        return x * weight.to(x.dtype)
-
-    x_flat = x.reshape(-1, n).contiguous()
-    weight_contiguous = weight.contiguous()
-    out_flat = _RMSNormFunction.apply(
-        x_flat,
-        weight_contiguous,
+    """Apply RMSNorm over the last dimension using the FlyDSL backend."""
+    m, n, num_heads, per_head, eps, weight_offset = _validate_feature_inputs(
+        x,
+        weight,
+        bias,
+        residual,
+        out_dtype,
+        residual_dtype,
         eps,
+        prenorm,
+        weight_offset,
     )
-    return out_flat.reshape(x.shape)
+    output_dtype = x.dtype if out_dtype is None else out_dtype
+    residual_out_dtype = (
+        residual_dtype
+        if residual_dtype is not None
+        else (residual.dtype if residual is not None else x.dtype)
+    )
+    if m == 0:
+        added = x.float()
+        if residual is not None:
+            added = added + residual.float()
+        normalized = added * torch.rsqrt(added.square().mean(dim=-1, keepdim=True) + eps)
+        if weight is not None:
+            normalized = normalized * (weight.float() + weight_offset)
+        if bias is not None:
+            normalized = normalized + bias.float()
+        out = normalized.to(output_dtype)
+        if prenorm:
+            return out, added.to(residual_out_dtype)
+        return out
+
+    last_shape = (num_heads, n) if per_head else (n,)
+    parameter_shape = (num_heads, n) if per_head else (n,)
+    x_flat = x.reshape(-1, *last_shape).contiguous()
+
+    plain_optimized = (
+        weight is not None
+        and bias is None
+        and residual is None
+        and not per_head
+        and output_dtype == x.dtype
+        and residual_dtype is None
+        and not prenorm
+        and weight_offset == 0.0
+        and (
+            weight.dtype == x.dtype
+            or (x.dtype in (torch.float16, torch.bfloat16) and weight.dtype == torch.float32)
+        )
+    )
+    if plain_optimized:
+        out_flat = _RMSNormFunction.apply(
+            x_flat,
+            weight.contiguous(),
+            eps,
+        )
+        return out_flat.reshape(x.shape)
+
+    weight_arg = (
+        weight.contiguous()
+        if weight is not None
+        else torch.empty(parameter_shape, device=x.device, dtype=x.dtype)
+    )
+    bias_arg = (
+        bias.contiguous()
+        if bias is not None
+        else torch.empty(parameter_shape, device=x.device, dtype=x.dtype)
+    )
+    residual_arg = (
+        residual.reshape(-1, *last_shape).contiguous() if residual is not None else x_flat
+    )
+    result = _RMSNormFeatureFunction.apply(
+        x_flat,
+        weight_arg,
+        bias_arg,
+        residual_arg,
+        eps,
+        output_dtype,
+        residual_out_dtype,
+        prenorm,
+        weight_offset,
+        weight is not None,
+        bias is not None,
+        residual is not None,
+        per_head,
+        num_heads,
+    )
+    if isinstance(result, tuple):
+        return tuple(tensor.reshape(x.shape) for tensor in result)
+    return result.reshape(x.shape)
