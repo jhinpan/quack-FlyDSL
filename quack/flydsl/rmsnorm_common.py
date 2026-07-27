@@ -71,26 +71,38 @@ def assert_arch_matches_reductions(arch: str) -> None:
         )
 
 
-def row_buffer(tensor, row, elem_bits: int, n: int):
+def row_buffer(tensor, row, elem_bits: int, n: int, valid=None):
     """Wrap a single row of ``tensor`` in its own buffer descriptor.
 
     A buffer descriptor addresses at most 4 GiB, so wrapping the whole tensor
     and then slicing a row would silently wrap around on any operand larger
     than that. Slicing first keeps every descriptor one row wide, which also
     turns the hardware bounds check into a real per-row guard.
+
+    ``valid`` says whether ``row`` is a real row. A block that batches several
+    rows can run past the last one, and sizing that group's descriptor to zero
+    bytes makes the hardware drop its loads and stores, which is cheaper than
+    predicating each of them.
     """
     return fx.rocdl.make_buffer_tensor(
         fx.slice(tensor, (row, None)),
-        num_records_bytes=n * (elem_bits // 8),
+        num_records_bytes=_row_records(elem_bits, n, valid),
     )
 
 
-def row_head_buffer(tensor, row, head, elem_bits: int, n: int):
+def row_head_buffer(tensor, row, head, elem_bits: int, n: int, valid=None):
     """Wrap one ``(row, head)`` slice of a per-head tensor."""
     return fx.rocdl.make_buffer_tensor(
         fx.slice(tensor, (row, head, None)),
-        num_records_bytes=n * (elem_bits // 8),
+        num_records_bytes=_row_records(elem_bits, n, valid),
     )
+
+
+def _row_records(elem_bits: int, n: int, valid):
+    records = n * (elem_bits // 8)
+    if valid is None:
+        return records
+    return valid.select(fx.Int32(records), fx.Int32(0))
 
 
 def make_reduction_storage(red_slots: int):

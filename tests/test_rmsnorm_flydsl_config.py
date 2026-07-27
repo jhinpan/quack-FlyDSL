@@ -17,6 +17,7 @@ from quack.flydsl.rmsnorm_config import (
     MIN_NUM_THREADS,
     WAVE_SIZE,
     RmsNormRowConfig,
+    batch_feature_rows,
     multi_row_block_rows,
     use_multi_row_kernel,
 )
@@ -311,3 +312,39 @@ def test_lane_group_selection_is_deterministic(N, dtype_width):
 def test_the_wavefront_constant_is_the_block_width_floor():
     """One authority for 64: a partial wave would idle lanes all kernel long."""
     assert MIN_NUM_THREADS == WAVE_SIZE
+
+
+@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
+@pytest.mark.parametrize("N", HIDDEN_SIZES)
+def test_the_feature_path_only_batches_rows_a_group_covers_in_one_pass(N, dtype_width):
+    """Measured: batching the feature kernel stops paying once the group loops."""
+    if batch_feature_rows(N, dtype_width):
+        assert lane_group(N, dtype_width).num_tiles == 1
+
+
+@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
+@pytest.mark.parametrize("N", HIDDEN_SIZES)
+def test_the_feature_path_never_batches_more_than_the_plain_path(N, dtype_width):
+    if batch_feature_rows(N, dtype_width):
+        assert use_multi_row_kernel(N, dtype_width)
+
+
+@pytest.mark.parametrize(
+    ("N", "dtype_width", "batched"),
+    [
+        # Vectorizable short rows: the group covers them outright.
+        (128, 16, True),
+        (256, 16, True),
+        (8, 16, True),
+        (128, 32, True),
+        # gcd(N, 8) == 1 leaves nothing to widen, so a group of 64 lanes has to
+        # loop and the row is better off with a block of its own.
+        (255, 16, False),
+        (127, 16, False),
+        # Long enough that neither path batches.
+        (512, 16, False),
+        (4096, 16, False),
+    ],
+)
+def test_the_feature_batching_crossover(N, dtype_width, batched):
+    assert batch_feature_rows(N, dtype_width) is batched

@@ -149,6 +149,72 @@ kernel fell back to scalar I/O, landing at 29% of the copy roofline. Sizing
 the block to the row and launching proportionally more blocks took
 32768x1024 fp16 from 137.5 us to 62.4 us (2.20x, 29% -> 62% of roofline).
 
+## A row too short for a block still needs its geometry in vectors
+
+Rows shorter than a block share one, a group of lanes each. That kernel had
+never been vectorized: it sized the group in elements, so a 128-element BF16
+row was four scalar 16-bit loads per lane across 32 lanes, and it read the row
+from memory twice. It was the slowest path in the backend, and slower than
+routing the same row to the one-block-per-row kernel, which is at least
+vectorized.
+
+The fix is that the vector width is a property of the row, not of who covers
+it, so `RmsNormRowConfig` answers for both. `for_lane_group` drops the
+block-width floor -- that floor exists so a block is never a partial wave,
+which says nothing about a group sharing a block -- and caps at a wavefront,
+which is what keeps the row reduction a bare shuffle with no LDS and no
+barrier. A 128-element BF16 row is then one 128-bit access per lane across 16
+lanes, with 16 rows to a block.
+
+Forward, BF16, against `torch.compile`:
+
+| shape | scalar group | vectorized group | `torch.compile` |
+| --- | --- | --- | --- |
+| 262144 x 128 | 1.44 TB/s | 3.72 TB/s | 3.78 TB/s |
+| 262144 x 256 | 1.47 TB/s | 4.29 TB/s | 3.96 TB/s |
+
+The feature path had no batching at all, which cost it more: one block per
+128-element row leaves 48 of its 64 lanes with nothing to load. Sharing the
+block took `weight_offset` at 262144x128 from 1.86 to 3.78 TB/s, which is
+parity with inductor, and 131072x256 from 3.03 to 3.78. That is the QK-norm
+shape, so it is worth having.
+
+The two paths stop batching at different points, and that is measured rather
+than assumed. The feature kernel only gains while a lane group covers the row
+in a single pass; once the group has to loop, a block of its own is faster,
+by 1.4x at 33554432/1021 rows and 1.9x at 2047. The plain kernel does not
+behave that way and keeps batching further out. Why the feature kernel loses
+its deep tile loop is still open: at 16384x2047 both kernels compile to 28
+VGPRs with no scratch and no LDS, launch the same grid with the same block,
+and still differ by 1.4x. Predication, the tail guard, the fp32 register
+cache and `weight_offset` were each measured out. Both rules agree everywhere
+a row shares a factor with a 128-bit access, so the disagreement only shows on
+coprime lengths, where neither path is close to the compiler anyway
+(131072x257: plain 2.31, feature 0.98, inductor 3.13).
+
+Rows of 64 remain at 0.77x of inductor, but the plain path sits at the same
+2.93 TB/s there, so that gap is older than the batching and shared.
+
+## The tail block wants the descriptor, not a predicate
+
+Batching rounds the grid up, so the last block holds groups with no row. The
+cheap guard is not a branch or a store predicate but the descriptor itself:
+sizing that group's `num_records` to zero bytes makes the hardware discard its
+loads and stores, and leaves every lane free to keep taking part in the
+reduction shuffle. Predicating the stores instead cost 8% on a single-tile row
+and up to 1.5x on a deep tile loop, because it turns one exec-mask update into
+one per tile. `rstd` is covered the same way, by sizing its descriptor to the
+real program count instead of leaving it wide open.
+
+## Compile the kernel before timing it
+
+`triton.testing.do_bench` picks its repeat count from a first call, so a first
+call that also runs the FlyDSL build skews the whole sample -- and only the
+first shape measured in a process, which makes it look like a property of that
+shape. It read as a 0.59x regression at 262144x128 that vanished when the
+shape was measured second. Call the function once and synchronize before
+handing it to `do_bench`.
+
 ## A same-device copy is not the bandwidth ceiling
 
 The harness originally normalized against a `torch.copy_`, which sustains only
