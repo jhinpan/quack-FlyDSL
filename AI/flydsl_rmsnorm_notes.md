@@ -10,13 +10,60 @@ The FlyDSL entry point implements the upstream `quack.rmsnorm` signature,
 including optional weight and bias, `weight_offset`, independent output dtype,
 residual/prenorm output, residual dtype override, and per-head parameters.
 The original plain weighted path keeps its vectorized/small-N kernels; feature
-combinations use a scalar, descriptor-safe kernel specialized by compile-time
-feature flags.
+combinations use a descriptor-safe kernel specialized by compile-time feature
+flags.
 
 Backward keeps the small-row atomic path and uses a deterministic persistent
 partial plus final reduction for large row counts or deterministic mode.
 Per-head workspaces and final parameter-gradient stores use row-scoped buffer
 descriptors so neither temporary nor output addressing silently wraps at 4 GiB.
+
+## The baseline for a feature kernel is the compiler, not the plain path
+
+The plain path cannot express bias, residual, prenorm, per-head or dtype
+overrides at all, so it is not what a caller gives up by using them. What they
+give up is `torch.compile`, which fuses this shape of work close to the
+roofline. That is the number to beat, and it is a demanding one: inductor
+reaches 4.8 TB/s on fused residual + prenorm, above anything this backend
+achieves on any other shape.
+
+A first cut of the feature path was scalar and re-read the row from global
+memory after the reduction, which put it well under that bar. Measured at
+32768x2048 bf16, forward, against `torch.compile`:
+
+| case | scalar first cut | vectorized | `torch.compile` |
+| --- | --- | --- | --- |
+| `+bias` | 2.89 TB/s (0.72x) | 4.36 TB/s (1.08x) | 4.02 TB/s |
+| `weight_offset=1` | 3.04 TB/s (0.77x) | 4.36 TB/s (1.11x) | 3.93 TB/s |
+| `+residual+prenorm` | 2.71 TB/s (0.57x) | 4.75 TB/s (1.00x) | 4.77 TB/s |
+
+Three things closed that gap, and all three are visible in the plain path
+already:
+
+1. **Take the vector width from the activation dtype and let every other
+   operand cover that same span.** `vector_access_plan` splits an operand into
+   whole accesses of at most 128 bits, so a 32-bit operand under a full 16-bit
+   vector takes two accesses and everything else takes one. A row that is not a
+   whole number of vectors narrows the vector rather than dropping to scalar,
+   and `vecsize == 1` then falls out of the same code as the scalar case
+   instead of needing a second kernel body.
+2. **Hold the row in registers across the reduction.** RMSNorm reads each row
+   twice by construction; only the first read has to touch memory. With a fused
+   residual the cached value is the fp32 sum, which is what the second pass and
+   `residual_out` both want anyway. In the persistent backward the weight is
+   loop-invariant, so it is loaded once per block with `weight_offset` already
+   folded in, not once per row.
+3. **Do not materialize `residual_out` when nobody reads it.** It is only ever
+   read by the caller under `prenorm`, or by backward as the saved source of a
+   fused residual. Gating on that instead of on `residual is not None` takes a
+   full tensor write off inference: 0.114 ms to 0.098 ms at 32768x2048.
+
+Backward lands at 0.98x-1.44x of `torch.compile` on the same shapes. The `dbias`
+case is the closest (0.98x): both implementations sit near 2.3 TB/s there, so
+the second full-row parameter reduction, not the kernel, is what bounds it.
+
+The atomic backward is still scalar. It only runs for fewer than 512 rows
+outside deterministic mode, where launch overhead dominates anyway.
 
 ## A buffer descriptor addresses at most 4 GiB
 
