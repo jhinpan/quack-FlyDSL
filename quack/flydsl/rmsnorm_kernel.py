@@ -34,7 +34,12 @@ from .rmsnorm_common import (
     to_elem_vec,
     vector_access_plan,
 )
-from .rmsnorm_config import RmsNormRowConfig, multi_row_block_rows, use_multi_row_kernel
+from .rmsnorm_config import (
+    RmsNormRowConfig,
+    batch_feature_rows,
+    multi_row_block_rows,
+    use_multi_row_kernel,
+)
 
 
 def build_rmsnorm_module(
@@ -521,6 +526,12 @@ def build_rmsnorm_feature_module(
     accesses of its own width. A row that is not a whole number of vectors
     degrades to a narrower vector rather than to scalar, and ``vecsize == 1``
     falls out of the same code as the scalar case.
+
+    A row is covered by a group of threads, and a block holds one or more such
+    groups. A row long enough to fill a block gets a group that wide and a
+    block to itself; a short row gets a narrower group and shares the block,
+    which is what keeps a 128-element head from launching a block per row with
+    three quarters of its lanes idle.
     """
     arch = get_rocm_arch() if arch is None else arch
     assert_arch_matches_reductions(arch)
@@ -531,12 +542,24 @@ def build_rmsnorm_feature_module(
     bias_bits = dtype_to_elem_bits(bias_dtype_str)
     residual_bits = dtype_to_elem_bits(residual_dtype_str)
     residual_out_bits = dtype_to_elem_bits(residual_out_dtype_str)
-    config = RmsNormRowConfig.from_analytical_heuristic(n, input_bits)
-    block_threads = config.num_threads
+    batched = batch_feature_rows(n, input_bits)
+    config = (
+        RmsNormRowConfig.for_lane_group(n, input_bits)
+        if batched
+        else RmsNormRowConfig.from_analytical_heuristic(n, input_bits)
+    )
+    threads_per_row = config.num_threads
+    rows_per_block = multi_row_block_rows(threads_per_row) if batched else 1
+    block_threads = rows_per_block * threads_per_row
     vecsize = config.vecsize
     num_vecs = config.num_vecs
     last_tile = config.num_tiles - 1
-    red_slots = max(1, (block_threads + WARP_SIZE - 1) // WARP_SIZE)
+    # Lanes the row reduction shuffles over, and how many of those groups it
+    # has to stitch together through LDS. A group wider than a wavefront only
+    # happens when the row has a block to itself.
+    reduce_lanes = min(threads_per_row, WARP_SIZE)
+    reduce_steps = int(math.log2(reduce_lanes))
+    red_slots = max(1, threads_per_row // WARP_SIZE)
     shared_storage = make_reduction_storage(red_slots)
 
     # Elements each access carries, per operand. Only a 32-bit operand under a
@@ -557,11 +580,23 @@ def build_rmsnorm_feature_module(
         output_tensor: fx.Tensor,
         residual_out_tensor: fx.Tensor,
         rstd_tensor: fx.Tensor,
+        num_programs: fx.Int32,
         eps: fx.Float32,
         weight_offset: fx.Float32,
     ):
-        program = fx.block_idx.x
         tid = fx.thread_idx.x
+        if const_expr(rows_per_block > 1):
+            lane = tid % threads_per_row
+            program = fx.block_idx.x * fx.Int32(rows_per_block) + tid // threads_per_row
+            # The grid rounds up to whole blocks, so the last one can hold
+            # groups with no row of their own. Their descriptors are sized to
+            # nothing below, which drops their accesses in hardware and leaves
+            # them free to keep taking part in the reduction shuffle.
+            in_grid = program < num_programs
+        else:
+            lane = tid
+            program = fx.block_idx.x
+            in_grid = None
         row = program // fx.Int32(num_heads) if per_head else program
         head = program % fx.Int32(num_heads) if per_head else fx.Int32(0)
 
@@ -576,32 +611,35 @@ def build_rmsnorm_feature_module(
         storage = fx.SharedAllocator().allocate(shared_storage).peek()
         reduction = storage.s_red.view(fx.make_layout(red_slots, 1))
 
-        def wave_reduce_add(value):
+        def group_reduce_add(value):
+            """Sum across the lanes covering one row, within a wavefront."""
             result = value
-            for shift_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                offset = WARP_SIZE // (2 << shift_exp)
-                peer = result.shuffle_xor(offset, WARP_SIZE)
+            for shift_exp in range_constexpr(reduce_steps):
+                offset = reduce_lanes // (2 << shift_exp)
+                peer = result.shuffle_xor(offset, fx.Int32(reduce_lanes))
                 result = result.addf(peer, fastmath=fast_math)
             return result
 
-        def block_reduce_add(value):
+        def row_reduce_add(value):
             if const_expr(red_slots == 1):
-                return wave_reduce_add(value)
-            lane = tid % WARP_SIZE
+                return group_reduce_add(value)
+            # More than one wavefront per row means the row owns the block, so
+            # the slots are its own waves and the barrier is not shared.
+            wave_lane = tid % WARP_SIZE
             wave = tid // WARP_SIZE
-            reduced = wave_reduce_add(value)
-            if lane == 0:
+            reduced = group_reduce_add(value)
+            if wave_lane == 0:
                 fx.memref_store(reduced, reduction, wave)
             gpu.barrier()
             if wave == 0:
-                in_range = lane < red_slots
-                safe_lane = in_range.select(lane, 0)
+                in_range = wave_lane < red_slots
+                safe_lane = in_range.select(wave_lane, 0)
                 partial = in_range.select(
                     fx.memref_load(reduction, safe_lane),
                     fx.Float32(0.0),
                 )
-                partial = wave_reduce_add(partial)
-                if lane == 0:
+                partial = group_reduce_add(partial)
+                if wave_lane == 0:
                     fx.memref_store(partial, reduction, 0)
             gpu.barrier()
             return fx.memref_load(reduction, 0)
@@ -609,9 +647,9 @@ def build_rmsnorm_feature_module(
         def row_div(tensor, elem_bits, per_access):
             """One row (or one row/head slice) split into whole accesses."""
             buffer = (
-                row_head_buffer(tensor, row, head, elem_bits, n)
+                row_head_buffer(tensor, row, head, elem_bits, n, in_grid)
                 if per_head
-                else row_buffer(tensor, row, elem_bits, n)
+                else row_buffer(tensor, row, elem_bits, n, in_grid)
             )
             return fx.logical_divide(buffer, fx.make_layout(per_access, 1))
 
@@ -658,7 +696,12 @@ def build_rmsnorm_feature_module(
             bias_div = parameter_div(bias_tensor, bias_bits, bias_per_access)
             bias_copy = buffer_copy_atom(bias_per_access * bias_bits, bias_bits)
         if const_expr(store_rstd):
-            rstd_buffer = fx.rocdl.make_buffer_tensor(rstd_tensor)
+            # Sized to the real programs rather than left wide open, so the
+            # tail block's groups have nowhere to write either.
+            rstd_buffer = fx.rocdl.make_buffer_tensor(
+                rstd_tensor,
+                num_records_bytes=num_programs * fx.Int32(4),
+            )
             rstd_div = fx.logical_divide(rstd_buffer, fx.make_layout(1, 1))
             f32_copy = buffer_copy_atom(32, 32)
 
@@ -670,7 +713,7 @@ def build_rmsnorm_feature_module(
         for tile_i in range_constexpr(config.num_tiles):
             # Only the final tile can run off the end of the row.
             partial = config.needs_predicate and tile_i == last_tile
-            index = tid + tile_i * block_threads
+            index = lane + tile_i * threads_per_row
             safe_index = index
             if const_expr(partial):
                 in_row = index < num_vecs
@@ -721,10 +764,10 @@ def build_rmsnorm_feature_module(
                 contribution = in_row.select(contribution, fx.Float32(0.0))
             thread_sumsq = thread_sumsq + contribution
 
-        sum_sq = block_reduce_add(thread_sumsq)
+        sum_sq = row_reduce_add(thread_sumsq)
         rrms = fmath.rsqrt(sum_sq / float(n) + eps, fastmath=fast_math)
         if const_expr(store_rstd):
-            if tid == 0:
+            if lane == 0:
                 store_scalar(
                     f32_copy,
                     fx.Float32,
@@ -736,7 +779,7 @@ def build_rmsnorm_feature_module(
 
         for tile_i in range_constexpr(config.num_tiles):
             partial = config.needs_predicate and tile_i == last_tile
-            index = tid + tile_i * block_threads
+            index = lane + tile_i * threads_per_row
             safe_index = index
             if const_expr(partial):
                 in_row = index < num_vecs
@@ -798,6 +841,7 @@ def build_rmsnorm_feature_module(
         weight_offset: fx.Float32,
         stream: fx.Stream = fx.Stream(None),
     ):
+        num_programs = m * fx.Int32(num_heads)
         rmsnorm_feature_kernel(
             input_tensor,
             weight_tensor,
@@ -806,10 +850,15 @@ def build_rmsnorm_feature_module(
             output_tensor,
             residual_out_tensor,
             rstd_tensor,
+            num_programs,
             eps,
             weight_offset,
         ).launch(
-            grid=(m * fx.Int32(num_heads), 1, 1),
+            grid=(
+                (num_programs + fx.Int32(rows_per_block - 1)) // fx.Int32(rows_per_block),
+                1,
+                1,
+            ),
             block=(block_threads, 1, 1),
             stream=stream,
         )

@@ -143,6 +143,23 @@ def use_multi_row_kernel(
     return N <= small_row_threshold
 
 
+def batch_feature_rows(N: int, dtype_width: int) -> bool:
+    """Whether the feature forward should batch several rows into one block.
+
+    Stricter than :func:`use_multi_row_kernel`, and measured rather than
+    derived: batching pays for the feature kernel only while a lane group
+    covers the row in a single pass. Once the group has to loop, giving the
+    row a whole block is faster, because a wider group makes the same trip
+    count in fewer passes. The plain kernel keeps its own crossover, which
+    sits further out; the two disagree only on rows whose length shares no
+    factor with a 128-bit access, where neither is close to the compiler.
+    """
+    return (
+        use_multi_row_kernel(N, dtype_width)
+        and RmsNormRowConfig.for_lane_group(N, dtype_width).num_tiles == 1
+    )
+
+
 __all__ = [
     "ACCESS_BITS",
     "MAX_NUM_THREADS",
@@ -151,6 +168,7 @@ __all__ = [
     "SUPPORTED_DTYPE_WIDTHS",
     "WAVE_SIZE",
     "RmsNormRowConfig",
+    "batch_feature_rows",
     "multi_row_block_rows",
     "use_multi_row_kernel",
 ]
