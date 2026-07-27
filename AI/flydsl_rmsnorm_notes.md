@@ -175,8 +175,8 @@ Forward, BF16, against `torch.compile`:
 
 The feature path had no batching at all, which cost it more: one block per
 128-element row leaves 48 of its 64 lanes with nothing to load. Sharing the
-block took `weight_offset` at 262144x128 from 1.86 to 3.78 TB/s, which is
-parity with inductor, and 131072x256 from 3.03 to 3.78. That is the QK-norm
+block took `weight_offset` at 262144x128 from 1.86 to 3.79 TB/s, which is
+parity with inductor, and 131072x256 from 3.03 to 3.83. That is the QK-norm
 shape, so it is worth having.
 
 The two paths stop batching at different points, and that is measured rather
@@ -190,10 +190,10 @@ and still differ by 1.4x. Predication, the tail guard, the fp32 register
 cache and `weight_offset` were each measured out. Both rules agree everywhere
 a row shares a factor with a 128-bit access, so the disagreement only shows on
 coprime lengths, where neither path is close to the compiler anyway
-(131072x257: plain 2.31, feature 0.98, inductor 3.13).
+(131072x257: plain 2.33, feature 1.00, inductor 3.12).
 
-Rows of 64 remain at 0.77x of inductor, but the plain path sits at the same
-2.93 TB/s there, so that gap is older than the batching and shared.
+Rows of 64 remain at 0.79x of inductor, but the plain path sits at the same
+2.99 TB/s there, so that gap is older than the batching and shared by both.
 
 ## The tail block wants the descriptor, not a predicate
 
@@ -206,14 +206,56 @@ and up to 1.5x on a deep tile loop, because it turns one exec-mask update into
 one per tile. `rstd` is covered the same way, by sizing its descriptor to the
 real program count instead of leaving it wide open.
 
-## Compile the kernel before timing it
+## Do not converge the plain and feature paths yet
+
+The feature builder is a strict superset of the plain one -- plain is
+`has_weight=True` with every other flag off -- and it is now within 0.93x-1.02x
+of the plain path on every row that vectorizes, so deleting
+`build_rmsnorm_module`, `_RMSNormFunction` and the `plain_optimized` predicate
+looks like free simplification. It is not, yet. On rows whose length shares no
+factor with a 128-bit access the feature path is far behind: 131072x257 runs
+at 2.33 TB/s through the plain path and 1.00 through the feature path.
+Collapsing them costs those shapes 2.3x.
+
+This is worth revisiting, because three sources of truth for what the backend
+supports (`plain_optimized`, `_validate_feature_inputs`,
+`resolve_rmsnorm_weight_dtype`) will drift. But it is blocked on the deep tile
+loop above, not on the refactor itself: the feature kernel has to stop losing
+that case first. Probe the coprime rows before and after any attempt.
+
+## Measuring this backend
+
+`AI/probe_rmsnorm_flydsl_bandwidth.py` backs the throughput numbers here and
+`AI/probe_rmsnorm_flydsl_accuracy.py` backs the error figures. Run both before
+and after a change; between them they cover long rows, the short rows the
+batching is for, and the coprime rows that are still open.
+
+Two traps, both of which produced a confident wrong answer at least once:
 
 `triton.testing.do_bench` picks its repeat count from a first call, so a first
 call that also runs the FlyDSL build skews the whole sample -- and only the
 first shape measured in a process, which makes it look like a property of that
-shape. It read as a 0.59x regression at 262144x128 that vanished when the
-shape was measured second. Call the function once and synchronize before
-handing it to `do_bench`.
+shape. It read as a 0.59x regression at 262144x128 that vanished when the same
+shape was measured second. Call the function once and synchronize first.
+
+Roughly one sample in twenty comes back an order of magnitude slow, on either
+implementation, with no other tenant on the device. Contention can only cost
+time and never save it, so take the minimum of a few samples rather than one.
+A single sample is how 262144x128 once reported 0.75 TB/s against its own
+3.80.
+
+For the tests, run the four files this backend owns rather than `tests/`:
+
+```
+pytest tests/test_rmsnorm_flydsl.py tests/test_rmsnorm_flydsl_config.py \
+       tests/test_import_isolation.py tests/test_benchmark_rmsnorm_flydsl.py
+```
+
+The rest of `tests/` needs CUTLASS and fails at collection on ROCm, which has
+nothing to do with this backend. `test_rmsnorm_flydsl_config.py` is pure
+arithmetic and runs without a GPU; it is the executable form of every geometry
+rule described above, so a change to the launch heuristics should show up
+there first.
 
 ## A same-device copy is not the bandwidth ceiling
 
