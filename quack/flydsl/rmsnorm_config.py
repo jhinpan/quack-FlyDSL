@@ -3,10 +3,11 @@
 """Launch configuration for the FlyDSL RMSNorm kernels.
 
 Mirrors :mod:`quack.rmsnorm_config`: a frozen dataclass capturing the launch
-knobs, plus a factory that owns the heuristic. One block covers one row here,
-so the knobs are the vector size, the block width, and the tile-loop trip
-count. The atomic backward and the multi-row small-N forward are scalar and
-set their own geometry.
+knobs, plus factories that own the heuristic. The knobs are the vector size,
+the width of the thread group covering a row, and the tile-loop trip count.
+One factory hands a row a whole block; the other hands it a lane group so the
+multi-row kernel can batch short rows. The atomic backward is scalar and sets
+its own geometry.
 
 Pure arithmetic: no FlyDSL, no torch.
 """
@@ -16,7 +17,12 @@ from dataclasses import dataclass
 
 
 ACCESS_BITS = 128
-MIN_NUM_THREADS = 64
+# Wavefront width of every architecture this backend supports.
+# ``assert_arch_matches_reductions`` checks the real target against it.
+WAVE_SIZE = 64
+# A block never narrows below a full wavefront: a partial wave idles lanes for
+# the whole kernel.
+MIN_NUM_THREADS = WAVE_SIZE
 MAX_NUM_THREADS = 256
 SUPPORTED_DTYPE_WIDTHS = (16, 32)
 
@@ -60,6 +66,7 @@ class RmsNormRowConfig:
         N: int,
         dtype_width: int,
         max_num_threads: int = MAX_NUM_THREADS,
+        min_num_threads: int = MIN_NUM_THREADS,
     ) -> "RmsNormRowConfig":
         """Pick the widest whole access and the narrowest block that covers ``N``.
 
@@ -75,7 +82,7 @@ class RmsNormRowConfig:
         vecsize = math.gcd(N, ACCESS_BITS // dtype_width)
         num_vecs = N // vecsize
         num_threads = min(
-            max(_next_power_of_two(num_vecs), MIN_NUM_THREADS),
+            max(_next_power_of_two(num_vecs), min_num_threads),
             max_num_threads,
         )
         return cls(
@@ -86,9 +93,36 @@ class RmsNormRowConfig:
             dtype_width=dtype_width,
         )
 
+    @classmethod
+    def for_lane_group(cls, N: int, dtype_width: int) -> "RmsNormRowConfig":
+        """Cover a row with a group of lanes inside one wavefront.
+
+        The multi-row kernel gives a row a slice of a block rather than all of
+        it, so ``num_threads`` is the lane group and the block-width floor does
+        not apply: holding a 128-element BF16 row to 64 lanes would leave 48 of
+        them with nothing to load. Capping at the wavefront is what keeps the
+        row reduction a bare shuffle, with no LDS and no barrier.
+        """
+        return cls.from_analytical_heuristic(
+            N,
+            dtype_width,
+            max_num_threads=WAVE_SIZE,
+            min_num_threads=1,
+        )
+
 
 def _next_power_of_two(value: int) -> int:
     return 1 << (value - 1).bit_length() if value > 1 else 1
+
+
+def multi_row_block_rows(threads_per_row: int) -> int:
+    """How many rows share one block, given the lane group a row occupies.
+
+    Rows are packed until the block reaches the same width the one-block-per-row
+    forward targets, so both kernels present the same block to the scheduler
+    however short the row is.
+    """
+    return max(1, MAX_NUM_THREADS // threads_per_row)
 
 
 def use_multi_row_kernel(
@@ -115,6 +149,8 @@ __all__ = [
     "MIN_NUM_THREADS",
     "SMALL_ROW_THRESHOLD",
     "SUPPORTED_DTYPE_WIDTHS",
+    "WAVE_SIZE",
     "RmsNormRowConfig",
+    "multi_row_block_rows",
     "use_multi_row_kernel",
 ]

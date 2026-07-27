@@ -114,6 +114,19 @@ def _assert_fused_residual_grad_close(actual: torch.Tensor, expected: torch.Tens
         # 128-bit FP32 loads, exact and predicated.
         ((2, 2048), torch.float32, torch.float32, 1e-6),
         ((2, 1020), torch.float32, torch.float32, 1e-6),
+        # Rows short enough to share a block, so a lane group covers the row and
+        # the reduction is a shuffle rather than a trip through LDS. One whole
+        # access per lane: 16 lanes of 8 BF16, and the same row with an FP32
+        # weight, which takes two accesses to cover one activation vector.
+        ((4, 128), torch.bfloat16, torch.bfloat16, 1e-6),
+        ((4, 128), torch.bfloat16, torch.float32, 1e-5),
+        # A lane group narrower than its vectors: 3 vectors rounded up to 4 lanes.
+        ((3, 24), torch.bfloat16, torch.bfloat16, 1e-6),
+        # One vector for the whole row, so the group is a single lane and the
+        # reduction has nothing to shuffle.
+        ((5, 8), torch.bfloat16, torch.bfloat16, 1e-6),
+        # Predicated inside a lane group: 63 FP32 vectors over 64 lanes.
+        ((4, 252), torch.float32, torch.float32, 1e-6),
     ],
 )
 def test_forward_matches_fp32_reference(shape, dtype, weight_dtype, eps):
