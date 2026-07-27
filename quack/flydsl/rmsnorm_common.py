@@ -41,13 +41,14 @@ def buffer_copy_atom(access_bits: int, elem_bits: int):
     return fx.make_copy_atom(copy_op(), elem_bits)
 
 
-def weight_access_plan(vecsize: int, weight_dtype_width: int) -> tuple[int, int]:
-    """Split ``vecsize`` weights into whole accesses of at most 128 bits.
+def vector_access_plan(vecsize: int, dtype_width: int) -> tuple[int, int]:
+    """Split ``vecsize`` elements into whole accesses of at most 128 bits.
 
-    Returns the number of accesses and the elements each one carries. Only an
-    FP32 weight paired with a full 16-bit activation vector needs more than one.
+    Returns the number of accesses and the elements each one carries. The
+    vector width is chosen from the activation dtype, so only an FP32 operand
+    paired with a full 16-bit activation vector needs more than one access.
     """
-    accesses = max(1, (vecsize * weight_dtype_width) // ACCESS_BITS)
+    accesses = max(1, (vecsize * dtype_width) // ACCESS_BITS)
     return accesses, vecsize // accesses
 
 
@@ -124,25 +125,25 @@ def load_vec(copy_atom, vec_width, elem_dtype, divided_tensor, index):
     return fx.memref_load_vec(register)
 
 
-def load_weight_vec(
+def load_dtype_vec(
     copy_atom,
-    weight_elem_dtype,
-    weight_dtype_width,
+    elem_dtype,
+    dtype_width,
     divided_tensor,
     index,
     vecsize,
 ):
-    """Load ``vecsize`` weights as fp32 using whole accesses.
+    """Load ``vecsize`` elements of any supported dtype as fp32.
 
-    An FP32 weight paired with a full 16-bit activation vector needs two
+    An FP32 operand paired with a full 16-bit activation vector needs two
     accesses to cover it; every other combination needs exactly one.
     """
-    accesses, per_access = weight_access_plan(vecsize, weight_dtype_width)
+    accesses, per_access = vector_access_plan(vecsize, dtype_width)
     if const_expr(accesses <= 1):
         return load_vec(
             copy_atom,
             vecsize,
-            weight_elem_dtype,
+            elem_dtype,
             divided_tensor,
             index,
         ).to(fx.Float32)
@@ -151,12 +152,44 @@ def load_weight_vec(
         chunk = load_vec(
             copy_atom,
             per_access,
-            weight_elem_dtype,
+            elem_dtype,
             divided_tensor,
             index * accesses + part,
         )
         elements.extend(chunk[lane] for lane in range(per_access))
     return fx.Vector.from_elements(elements, fx.Float32)
+
+
+def store_dtype_vec(
+    copy_atom,
+    elem_dtype,
+    dtype_width,
+    value,
+    divided_tensor,
+    index,
+    vecsize,
+):
+    """Store a ``vecsize``-wide vector using the same whole-access split.
+
+    Mirrors :func:`load_dtype_vec`. Only a 32-bit destination under a full
+    16-bit activation vector splits; a 16-bit destination is always one
+    access, so the software BF16 packing in :func:`to_elem_vec` never has to
+    survive being sliced here.
+    """
+    accesses, per_access = vector_access_plan(vecsize, dtype_width)
+    if const_expr(accesses <= 1):
+        store_vec(copy_atom, vecsize, elem_dtype, value, divided_tensor, index)
+        return
+    for part in range(accesses):
+        lanes = list(range(part * per_access, (part + 1) * per_access))
+        store_vec(
+            copy_atom,
+            per_access,
+            elem_dtype,
+            value.shuffle(value, lanes),
+            divided_tensor,
+            index * accesses + part,
+        )
 
 
 def store_vec(copy_atom, vec_width, elem_dtype, value, divided_tensor, index):

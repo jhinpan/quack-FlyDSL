@@ -20,18 +20,19 @@ from .rmsnorm_common import (
     WARP_SIZE,
     assert_arch_matches_reductions,
     buffer_copy_atom,
+    load_dtype_vec,
     load_scalar,
     load_vec,
-    load_weight_vec,
     make_reduction_storage,
     resolve_rmsnorm_weight_dtype,
     row_buffer,
     row_head_buffer,
+    store_dtype_vec,
     store_scalar,
     store_vec,
     to_elem_scalar,
     to_elem_vec,
-    weight_access_plan,
+    vector_access_plan,
 )
 from .rmsnorm_config import RmsNormRowConfig, use_multi_row_kernel
 
@@ -129,7 +130,7 @@ def build_rmsnorm_module(
             vecsize = config.vecsize
             num_vecs = config.num_vecs
             last_tile = config.num_tiles - 1
-            weight_accesses, weight_per_access = weight_access_plan(vecsize, weight_elem_bits)
+            weight_accesses, weight_per_access = vector_access_plan(vecsize, weight_elem_bits)
             input_div = fx.logical_divide(row_input, fx.make_layout(vecsize, 1))
             output_div = fx.logical_divide(row_output, fx.make_layout(vecsize, 1))
             gamma_div = fx.logical_divide(gamma_buffer, fx.make_layout(weight_per_access, 1))
@@ -180,7 +181,7 @@ def build_rmsnorm_module(
                 if const_expr(partial):
                     in_row = index < num_vecs
                     safe_index = in_row.select(index, 0)
-                weights = load_weight_vec(
+                weights = load_dtype_vec(
                     gamma_copy_atom,
                     weight_elem_dtype,
                     weight_elem_bits,
@@ -482,14 +483,21 @@ def build_rmsnorm_feature_module(
     num_heads: int,
     arch: str | None = None,
 ):
-    """Build the feature-complete scalar RMSNorm forward path.
+    """Build the feature-complete RMSNorm forward path.
 
     The optimized plain-weighted builders above remain unchanged. This path
     owns optional affine inputs, fused residual addition, independent output
     dtypes, and per-head parameter addressing.
+
+    The vector width comes from the activation dtype, exactly as it does for
+    the plain path, and every other operand covers that same span with whole
+    accesses of its own width. A row that is not a whole number of vectors
+    degrades to a narrower vector rather than to scalar, and ``vecsize == 1``
+    falls out of the same code as the scalar case.
     """
     arch = get_rocm_arch() if arch is None else arch
     assert_arch_matches_reductions(arch)
+    use_hw_cvt_bf16 = has_hw_bf16_convert(arch)
     input_bits = dtype_to_elem_bits(input_dtype_str)
     output_bits = dtype_to_elem_bits(output_dtype_str)
     weight_bits = dtype_to_elem_bits(weight_dtype_str)
@@ -498,8 +506,20 @@ def build_rmsnorm_feature_module(
     residual_out_bits = dtype_to_elem_bits(residual_out_dtype_str)
     config = RmsNormRowConfig.from_analytical_heuristic(n, input_bits)
     block_threads = config.num_threads
+    vecsize = config.vecsize
+    num_vecs = config.num_vecs
+    last_tile = config.num_tiles - 1
     red_slots = max(1, (block_threads + WARP_SIZE - 1) // WARP_SIZE)
     shared_storage = make_reduction_storage(red_slots)
+
+    # Elements each access carries, per operand. Only a 32-bit operand under a
+    # full 16-bit activation vector needs more than one access to cover the span.
+    _, input_per_access = vector_access_plan(vecsize, input_bits)
+    _, output_per_access = vector_access_plan(vecsize, output_bits)
+    _, weight_per_access = vector_access_plan(vecsize, weight_bits)
+    _, bias_per_access = vector_access_plan(vecsize, bias_bits)
+    _, residual_per_access = vector_access_plan(vecsize, residual_bits)
+    _, residual_out_per_access = vector_access_plan(vecsize, residual_out_bits)
 
     @flyc.kernel
     def rmsnorm_feature_kernel(
@@ -559,115 +579,120 @@ def build_rmsnorm_feature_module(
             gpu.barrier()
             return fx.memref_load(reduction, 0)
 
-        input_row = (
-            row_head_buffer(input_tensor, row, head, input_bits, n)
-            if per_head
-            else row_buffer(input_tensor, row, input_bits, n)
-        )
-        output_row = (
-            row_head_buffer(output_tensor, row, head, output_bits, n)
-            if per_head
-            else row_buffer(output_tensor, row, output_bits, n)
-        )
-        input_div = fx.logical_divide(input_row, fx.make_layout(1, 1))
-        output_div = fx.logical_divide(output_row, fx.make_layout(1, 1))
+        def row_div(tensor, elem_bits, per_access):
+            """One row (or one row/head slice) split into whole accesses."""
+            buffer = (
+                row_head_buffer(tensor, row, head, elem_bits, n)
+                if per_head
+                else row_buffer(tensor, row, elem_bits, n)
+            )
+            return fx.logical_divide(buffer, fx.make_layout(per_access, 1))
+
+        def parameter_div(tensor, elem_bits, per_access):
+            """A weight or bias, which is per-head at most, never per-row."""
+            buffer = (
+                row_buffer(tensor, head, elem_bits, n)
+                if per_head
+                else fx.rocdl.make_buffer_tensor(tensor)
+            )
+            return fx.logical_divide(buffer, fx.make_layout(per_access, 1))
+
+        def to_store_dtype(dtype_str, elem_dtype, value):
+            """Narrow an fp32 vector to a store dtype.
+
+            The software BF16 rounding packs pairs of lanes, so it only
+            applies to a real vector; a one-wide vector converts directly.
+            """
+            if const_expr(vecsize > 1):
+                return to_elem_vec(dtype_str, elem_dtype, use_hw_cvt_bf16, value, vecsize)
+            return to_elem_scalar(dtype_str, elem_dtype, value)
+
+        input_div = row_div(input_tensor, input_bits, input_per_access)
+        output_div = row_div(output_tensor, output_bits, output_per_access)
+        input_copy = buffer_copy_atom(input_per_access * input_bits, input_bits)
+        output_copy = buffer_copy_atom(output_per_access * output_bits, output_bits)
         if const_expr(has_residual):
-            residual_row = (
-                row_head_buffer(residual_tensor, row, head, residual_bits, n)
-                if per_head
-                else row_buffer(residual_tensor, row, residual_bits, n)
-            )
-            residual_div = fx.logical_divide(residual_row, fx.make_layout(1, 1))
+            residual_div = row_div(residual_tensor, residual_bits, residual_per_access)
+            residual_copy = buffer_copy_atom(residual_per_access * residual_bits, residual_bits)
         if const_expr(store_residual):
-            residual_out_row = (
-                row_head_buffer(
-                    residual_out_tensor,
-                    row,
-                    head,
-                    residual_out_bits,
-                    n,
-                )
-                if per_head
-                else row_buffer(
-                    residual_out_tensor,
-                    row,
-                    residual_out_bits,
-                    n,
-                )
+            residual_out_div = row_div(
+                residual_out_tensor,
+                residual_out_bits,
+                residual_out_per_access,
             )
-            residual_out_div = fx.logical_divide(
-                residual_out_row,
-                fx.make_layout(1, 1),
+            residual_out_copy = buffer_copy_atom(
+                residual_out_per_access * residual_out_bits,
+                residual_out_bits,
             )
-
-        weight_row = (
-            row_buffer(weight_tensor, head, weight_bits, n)
-            if per_head
-            else fx.rocdl.make_buffer_tensor(weight_tensor)
-        )
-        bias_row = (
-            row_buffer(bias_tensor, head, bias_bits, n)
-            if per_head
-            else fx.rocdl.make_buffer_tensor(bias_tensor)
-        )
-        weight_div = fx.logical_divide(weight_row, fx.make_layout(1, 1))
-        bias_div = fx.logical_divide(bias_row, fx.make_layout(1, 1))
-
+        if const_expr(has_weight):
+            weight_div = parameter_div(weight_tensor, weight_bits, weight_per_access)
+            weight_copy = buffer_copy_atom(weight_per_access * weight_bits, weight_bits)
+        if const_expr(has_bias):
+            bias_div = parameter_div(bias_tensor, bias_bits, bias_per_access)
+            bias_copy = buffer_copy_atom(bias_per_access * bias_bits, bias_bits)
         if const_expr(store_rstd):
             rstd_buffer = fx.rocdl.make_buffer_tensor(rstd_tensor)
             rstd_div = fx.logical_divide(rstd_buffer, fx.make_layout(1, 1))
-
-        input_copy = buffer_copy_atom(input_bits, input_bits)
-        output_copy = buffer_copy_atom(output_bits, output_bits)
-        weight_copy = buffer_copy_atom(weight_bits, weight_bits)
-        bias_copy = buffer_copy_atom(bias_bits, bias_bits)
-        if const_expr(has_residual):
-            residual_copy = buffer_copy_atom(residual_bits, residual_bits)
-        if const_expr(store_residual):
-            residual_out_copy = buffer_copy_atom(
-                residual_out_bits,
-                residual_out_bits,
-            )
-        if const_expr(store_rstd):
             f32_copy = buffer_copy_atom(32, 32)
 
+        # The normalized value is held in registers between the two passes, so
+        # the row is read once. It is the residual sum when one is fused, which
+        # is also what the second pass and residual_out both need.
         thread_sumsq = fx.Float32(0.0)
-        for base in range_constexpr(0, n, block_threads):
-            index = tid + base
-            valid = index < n
-            safe_index = valid.select(index, 0)
-            input_elem = load_scalar(input_copy, input_dtype, input_div, safe_index)
-            value = input_elem if input_dtype_str == "f32" else input_elem.to(fx.Float32)
+        row_values = []
+        for tile_i in range_constexpr(config.num_tiles):
+            # Only the final tile can run off the end of the row.
+            partial = config.needs_predicate and tile_i == last_tile
+            index = tid + tile_i * block_threads
+            safe_index = index
+            if const_expr(partial):
+                in_row = index < num_vecs
+                safe_index = in_row.select(index, 0)
+            value = load_dtype_vec(
+                input_copy,
+                input_dtype,
+                input_bits,
+                input_div,
+                safe_index,
+                vecsize,
+            )
             if const_expr(has_residual):
-                residual_elem = load_scalar(
+                value = value + load_dtype_vec(
                     residual_copy,
                     residual_dtype,
+                    residual_bits,
                     residual_div,
                     safe_index,
+                    vecsize,
                 )
-                residual_value = (
-                    residual_elem if residual_dtype_str == "f32" else residual_elem.to(fx.Float32)
-                )
-                value = value + residual_value
             if const_expr(store_residual):
-                if index < n:
-                    residual_out_value = to_elem_scalar(
-                        residual_out_dtype_str,
-                        residual_out_dtype,
-                        value,
-                    )
-                    store_scalar(
+                stored = to_store_dtype(residual_out_dtype_str, residual_out_dtype, value)
+                if const_expr(partial):
+                    if in_row:
+                        store_dtype_vec(
+                            residual_out_copy,
+                            residual_out_dtype,
+                            residual_out_bits,
+                            stored,
+                            residual_out_div,
+                            index,
+                            vecsize,
+                        )
+                else:
+                    store_dtype_vec(
                         residual_out_copy,
                         residual_out_dtype,
-                        residual_out_dtype,
+                        residual_out_bits,
+                        stored,
                         residual_out_div,
                         index,
-                        residual_out_value,
+                        vecsize,
                     )
-            thread_sumsq = thread_sumsq + valid.select(
-                value * value,
-                fx.Float32(0.0),
-            )
+            row_values.append(value)
+            contribution = (value * value).reduce(ReductionOp.ADD, fastmath=fast_math)
+            if const_expr(partial):
+                contribution = in_row.select(contribution, fx.Float32(0.0))
+            thread_sumsq = thread_sumsq + contribution
 
         sum_sq = block_reduce_add(thread_sumsq)
         rrms = fmath.rsqrt(sum_sq / float(n) + eps, fastmath=fast_math)
@@ -682,57 +707,54 @@ def build_rmsnorm_feature_module(
                     rrms,
                 )
 
-        for base in range_constexpr(0, n, block_threads):
-            index = tid + base
-            if index < n:
-                input_elem = load_scalar(input_copy, input_dtype, input_div, index)
-                value = input_elem if input_dtype_str == "f32" else input_elem.to(fx.Float32)
-                if const_expr(has_residual):
-                    residual_elem = load_scalar(
-                        residual_copy,
-                        residual_dtype,
-                        residual_div,
-                        index,
-                    )
-                    residual_value = (
-                        residual_elem
-                        if residual_dtype_str == "f32"
-                        else residual_elem.to(fx.Float32)
-                    )
-                    value = value + residual_value
-                result = value * rrms
-                if const_expr(has_weight):
-                    weight_elem = load_scalar(
-                        weight_copy,
-                        weight_dtype,
-                        weight_div,
-                        index,
-                    )
-                    weight_value = (
-                        weight_elem if weight_dtype_str == "f32" else weight_elem.to(fx.Float32)
-                    )
-                    result = result * (weight_value + weight_offset)
-                if const_expr(has_bias):
-                    bias_elem = load_scalar(
-                        bias_copy,
-                        bias_dtype,
-                        bias_div,
-                        index,
-                    )
-                    bias_value = bias_elem if bias_dtype_str == "f32" else bias_elem.to(fx.Float32)
-                    result = result + bias_value
-                output_value = to_elem_scalar(
-                    output_dtype_str,
-                    output_dtype,
-                    result,
+        for tile_i in range_constexpr(config.num_tiles):
+            partial = config.needs_predicate and tile_i == last_tile
+            index = tid + tile_i * block_threads
+            safe_index = index
+            if const_expr(partial):
+                in_row = index < num_vecs
+                safe_index = in_row.select(index, 0)
+            result = row_values[tile_i] * rrms
+            if const_expr(has_weight):
+                weights = load_dtype_vec(
+                    weight_copy,
+                    weight_dtype,
+                    weight_bits,
+                    weight_div,
+                    safe_index,
+                    vecsize,
                 )
-                store_scalar(
+                result = result * (weights + weight_offset)
+            if const_expr(has_bias):
+                result = result + load_dtype_vec(
+                    bias_copy,
+                    bias_dtype,
+                    bias_bits,
+                    bias_div,
+                    safe_index,
+                    vecsize,
+                )
+            output_value = to_store_dtype(output_dtype_str, output_dtype, result)
+            if const_expr(partial):
+                if in_row:
+                    store_dtype_vec(
+                        output_copy,
+                        output_dtype,
+                        output_bits,
+                        output_value,
+                        output_div,
+                        index,
+                        vecsize,
+                    )
+            else:
+                store_dtype_vec(
                     output_copy,
                     output_dtype,
-                    output_dtype,
+                    output_bits,
+                    output_value,
                     output_div,
                     index,
-                    output_value,
+                    vecsize,
                 )
 
     @flyc.jit
