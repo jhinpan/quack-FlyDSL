@@ -11,7 +11,7 @@ from flydsl.expr import const_expr
 from flydsl.expr.typing import full
 
 from .kernel_utils import get_warp_size
-from .rmsnorm_config import ACCESS_BITS
+from .rmsnorm_config import ACCESS_BITS, WAVE_SIZE
 
 
 EPS = 1e-6
@@ -55,14 +55,18 @@ def vector_access_plan(vecsize: int, dtype_width: int) -> tuple[int, int]:
 def assert_arch_matches_reductions(arch: str) -> None:
     """Fail loudly if a target's wavefront differs from the baked-in one.
 
-    The block reductions unroll over ``WARP_SIZE``, which is resolved once at
-    import time. Every architecture this backend supports is wave64, so this
-    only fires if the supported set grows without the reductions following.
+    The block reductions unroll over ``WARP_SIZE``, resolved from the device at
+    import time, while the launch geometry sizes a lane group against
+    ``WAVE_SIZE``, a plain constant so the config module stays free of FlyDSL.
+    Both have to agree with the target. Every architecture this backend
+    supports is wave64, so this only fires if the supported set grows without
+    the reductions and the geometry following.
     """
     target_warp_size = get_warp_size(arch)
-    if target_warp_size != WARP_SIZE:
+    if not target_warp_size == WARP_SIZE == WAVE_SIZE:
         raise RuntimeError(
-            f"FlyDSL RMSNorm reductions are built for a wavefront of {WARP_SIZE}, "
+            f"FlyDSL RMSNorm is built for a wavefront of {WARP_SIZE} in its "
+            f"reductions and {WAVE_SIZE} in its launch geometry, "
             f"but {arch} has {target_warp_size}"
         )
 

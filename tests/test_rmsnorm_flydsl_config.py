@@ -15,7 +15,9 @@ from quack.flydsl.rmsnorm_config import (
     ACCESS_BITS,
     MAX_NUM_THREADS,
     MIN_NUM_THREADS,
+    WAVE_SIZE,
     RmsNormRowConfig,
+    multi_row_block_rows,
     use_multi_row_kernel,
 )
 
@@ -205,3 +207,107 @@ def test_the_vectorized_crossover_is_one_minimum_block_of_vectors():
     assert not use_multi_row_kernel(512, 16)
     assert use_multi_row_kernel(252, 32)
     assert not use_multi_row_kernel(256, 32)
+
+
+# The multi-row kernel splits a row across a group of lanes rather than a whole
+# block, so it asks the same factory for a different lane budget.
+
+MULTI_ROW_CASES = [
+    (N, width) for width in DTYPE_WIDTHS for N in HIDDEN_SIZES if use_multi_row_kernel(N, width)
+]
+
+
+def lane_group(N, dtype_width):
+    return RmsNormRowConfig.for_lane_group(N, dtype_width)
+
+
+@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
+@pytest.mark.parametrize("N", HIDDEN_SIZES)
+def test_the_lane_group_vectorizes_exactly_like_one_block_per_row(N, dtype_width):
+    """Vector width is a property of the row, not of who covers it."""
+    c = lane_group(N, dtype_width)
+    assert (c.vecsize, c.num_vecs) == (
+        config(N, dtype_width).vecsize,
+        config(N, dtype_width).num_vecs,
+    )
+
+
+@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
+@pytest.mark.parametrize("N", HIDDEN_SIZES)
+def test_the_lane_group_fits_one_wavefront(N, dtype_width):
+    """Wider than a wave would make the reduction need LDS and a barrier."""
+    c = lane_group(N, dtype_width)
+    assert 1 <= c.num_threads <= WAVE_SIZE
+    assert c.num_threads & (c.num_threads - 1) == 0
+
+
+@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
+@pytest.mark.parametrize("N", HIDDEN_SIZES)
+def test_the_lane_group_is_no_wider_than_the_row_needs(N, dtype_width):
+    """Regression: a 64-lane floor left 128-element bf16 rows three-quarters idle.
+
+    Rounding up to a power of two can still idle lanes, because the reduction
+    shuffles over the group; what it must not do is round up past that.
+    """
+    c = lane_group(N, dtype_width)
+    assert c.num_threads <= max(1, 1 << (c.num_vecs - 1).bit_length())
+
+
+@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
+@pytest.mark.parametrize("N", HIDDEN_SIZES)
+def test_lane_group_tiles_cover_the_row_without_a_dead_pass(N, dtype_width):
+    c = lane_group(N, dtype_width)
+    assert c.num_tiles * c.num_threads * c.vecsize >= N
+    assert (c.num_tiles - 1) * c.num_threads * c.vecsize < N
+
+
+@pytest.mark.parametrize(("N", "dtype_width"), MULTI_ROW_CASES)
+def test_a_multi_row_block_fills_up_but_never_overflows(N, dtype_width):
+    c = lane_group(N, dtype_width)
+    rows = multi_row_block_rows(c.num_threads)
+    assert rows >= 1
+    assert rows * c.num_threads <= MAX_NUM_THREADS
+    assert (rows + 1) * c.num_threads > MAX_NUM_THREADS
+
+
+@pytest.mark.parametrize(("N", "dtype_width"), MULTI_ROW_CASES)
+def test_a_multi_row_thread_caches_a_bounded_slice_of_its_row(N, dtype_width):
+    """The vectorized multi-row forward also holds the row between its passes."""
+    assert lane_group(N, dtype_width).elems_per_thread <= 32
+
+
+@pytest.mark.parametrize(
+    ("N", "dtype_width", "vecsize", "threads_per_row", "block_rows"),
+    [
+        # One 128-bit access per lane, so the group shrinks with the row.
+        (128, 16, 8, 16, 16),
+        (256, 16, 8, 32, 8),
+        (64, 16, 8, 8, 32),
+        (8, 16, 8, 1, 256),
+        (128, 32, 4, 32, 8),
+        # gcd(257, 8) == 1 leaves no vector to widen, so the group saturates a
+        # wave and loops instead.
+        (257, 16, 1, 64, 4),
+    ],
+)
+def test_the_lane_group_shrinks_to_the_row(N, dtype_width, vecsize, threads_per_row, block_rows):
+    c = lane_group(N, dtype_width)
+    assert (c.vecsize, c.num_threads) == (vecsize, threads_per_row)
+    assert multi_row_block_rows(c.num_threads) == block_rows
+
+
+def test_a_short_bf16_row_is_one_whole_access_per_lane():
+    """Regression: 128 bf16 was 4 scalar 16-bit loads per lane across 32 lanes."""
+    c = lane_group(128, 16)
+    assert (c.access_bits, c.num_tiles, c.needs_predicate) == (ACCESS_BITS, 1, False)
+
+
+@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
+@pytest.mark.parametrize("N", HIDDEN_SIZES)
+def test_lane_group_selection_is_deterministic(N, dtype_width):
+    assert lane_group(N, dtype_width) == lane_group(N, dtype_width)
+
+
+def test_the_wavefront_constant_is_the_block_width_floor():
+    """One authority for 64: a partial wave would idle lanes all kernel long."""
+    assert MIN_NUM_THREADS == WAVE_SIZE

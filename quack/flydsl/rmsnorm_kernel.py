@@ -34,7 +34,7 @@ from .rmsnorm_common import (
     to_elem_vec,
     vector_access_plan,
 )
-from .rmsnorm_config import RmsNormRowConfig, use_multi_row_kernel
+from .rmsnorm_config import RmsNormRowConfig, multi_row_block_rows, use_multi_row_kernel
 
 
 def build_rmsnorm_module(
@@ -60,6 +60,7 @@ def build_rmsnorm_module(
             dtype_str,
             store_rstd,
             weight_dtype_str,
+            arch,
         )
 
     use_hw_cvt_bf16 = has_hw_bf16_convert(arch)
@@ -308,14 +309,28 @@ def _build_rmsnorm_small_n_module(
     dtype_str: str,
     store_rstd: bool,
     weight_dtype_str: str,
+    arch: str,
 ):
+    """Build the RMSNorm forward for rows too short to fill a block on their own.
+
+    A row gets a group of lanes rather than a whole block, so several rows share
+    a block and the row reduction is a shuffle inside one wavefront. The lane
+    group is sized in vectors, exactly as the one-block-per-row kernel sizes its
+    block, so a short row is one wide access per lane instead of a scalar loop.
+    """
     weight_dtype_str = resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
-    block_n = 1 << (n - 1).bit_length()
-    block_m = max(min(16384 // block_n, 32), 8)
-    threads_per_row = min(WARP_SIZE, 1024 // block_m)
-    block_threads = block_m * threads_per_row
+    use_hw_cvt_bf16 = has_hw_bf16_convert(arch)
     elem_bits = dtype_to_elem_bits(dtype_str)
     weight_elem_bits = dtype_to_elem_bits(weight_dtype_str)
+    config = RmsNormRowConfig.for_lane_group(n, elem_bits)
+    threads_per_row = config.num_threads
+    block_rows = multi_row_block_rows(threads_per_row)
+    block_threads = block_rows * threads_per_row
+    vecsize = config.vecsize
+    num_vecs = config.num_vecs
+    last_tile = config.num_tiles - 1
+    reduce_steps = int(math.log2(threads_per_row))
+    _, weight_per_access = vector_access_plan(vecsize, weight_elem_bits)
 
     @flyc.kernel(known_block_size=[block_threads, 1, 1])
     def rmsnorm_small_n_kernel(
@@ -330,8 +345,9 @@ def _build_rmsnorm_small_n_module(
         tid = fx.thread_idx.x
         lane = tid % threads_per_row
         row_local = tid // threads_per_row
-        row = block * fx.Int32(block_m) + row_local
+        row = block * fx.Int32(block_rows) + row_local
 
+        # Uniform across a lane group, so the shuffles below stay collective.
         if row < m:
             elem_dtype = dtype_to_elem_type(dtype_str)
             weight_elem_dtype = dtype_to_elem_type(weight_dtype_str)
@@ -345,35 +361,51 @@ def _build_rmsnorm_small_n_module(
 
             input_div = fx.logical_divide(
                 row_buffer(input_tensor, row, elem_bits, n),
-                fx.make_layout(1, 1),
+                fx.make_layout(vecsize, 1),
             )
-            gamma_div = fx.logical_divide(gamma_buffer, fx.make_layout(1, 1))
+            gamma_div = fx.logical_divide(gamma_buffer, fx.make_layout(weight_per_access, 1))
             output_div = fx.logical_divide(
                 row_buffer(output, row, elem_bits, n),
-                fx.make_layout(1, 1),
+                fx.make_layout(vecsize, 1),
             )
-            copy_atom = buffer_copy_atom(elem_bits, elem_bits)
-            gamma_copy_atom = buffer_copy_atom(weight_elem_bits, weight_elem_bits)
+            copy_atom = buffer_copy_atom(config.access_bits, elem_bits)
+            gamma_copy_atom = buffer_copy_atom(
+                weight_per_access * weight_elem_bits,
+                weight_elem_bits,
+            )
 
             def group_reduce_add(value):
                 result = value
-                for shift_exp in range_constexpr(int(math.log2(threads_per_row))):
+                for shift_exp in range_constexpr(reduce_steps):
                     offset = threads_per_row // (2 << shift_exp)
                     peer = result.shuffle_xor(offset, fx.Int32(threads_per_row))
                     result = result.addf(peer, fastmath=fast_math)
                 return result
 
+            def to_store_dtype(value):
+                """The software BF16 rounding packs lane pairs, so it needs a vector."""
+                if const_expr(vecsize > 1):
+                    return to_elem_vec(dtype_str, elem_dtype, use_hw_cvt_bf16, value, vecsize)
+                return to_elem_scalar(dtype_str, elem_dtype, value)
+
+            # The row is held in registers between the two passes, so it is read
+            # from memory once.
             thread_sumsq = fx.Float32(0.0)
-            for base in range_constexpr(0, block_n, threads_per_row):
-                index = lane + base
-                is_valid = index < n
-                safe_index = is_valid.select(index, 0)
-                value_elem = load_scalar(copy_atom, elem_dtype, input_div, safe_index)
-                value = value_elem if dtype_str == "f32" else value_elem.to(fx.Float32)
-                thread_sumsq = thread_sumsq + is_valid.select(
-                    value * value,
-                    fx.Float32(0.0),
-                )
+            row_values = []
+            for tile_i in range_constexpr(config.num_tiles):
+                # Only the final tile can run off the end of the row.
+                partial = config.needs_predicate and tile_i == last_tile
+                index = lane + tile_i * threads_per_row
+                if const_expr(partial):
+                    in_row = index < num_vecs
+                    index = in_row.select(index, 0)
+                vector = load_vec(copy_atom, vecsize, elem_dtype, input_div, index)
+                row_values.append(vector)
+                values = vector.to(fx.Float32)
+                contribution = (values * values).reduce(ReductionOp.ADD, fastmath=fast_math)
+                if const_expr(partial):
+                    contribution = in_row.select(contribution, fx.Float32(0.0))
+                thread_sumsq = thread_sumsq + contribution
 
             rrms = fmath.rsqrt(
                 group_reduce_add(thread_sumsq) / float(n) + eps,
@@ -390,33 +422,28 @@ def _build_rmsnorm_small_n_module(
                         rrms,
                     )
 
-            for base in range_constexpr(0, block_n, threads_per_row):
-                index = lane + base
-                if index < n:
-                    value_elem = load_scalar(copy_atom, elem_dtype, input_div, index)
-                    weight_elem = load_scalar(
-                        gamma_copy_atom,
-                        weight_elem_dtype,
-                        gamma_div,
-                        index,
-                    )
-                    value = value_elem if dtype_str == "f32" else value_elem.to(fx.Float32)
-                    weight = (
-                        weight_elem if weight_dtype_str == "f32" else weight_elem.to(fx.Float32)
-                    )
-                    result = to_elem_scalar(
-                        dtype_str,
-                        elem_dtype,
-                        value * rrms * weight,
-                    )
-                    store_scalar(
-                        copy_atom,
-                        elem_dtype,
-                        elem_dtype,
-                        output_div,
-                        index,
-                        result,
-                    )
+            for tile_i in range_constexpr(config.num_tiles):
+                partial = config.needs_predicate and tile_i == last_tile
+                index = lane + tile_i * threads_per_row
+                safe_index = index
+                if const_expr(partial):
+                    in_row = index < num_vecs
+                    safe_index = in_row.select(index, 0)
+                weights = load_dtype_vec(
+                    gamma_copy_atom,
+                    weight_elem_dtype,
+                    weight_elem_bits,
+                    gamma_div,
+                    safe_index,
+                    vecsize,
+                )
+                values = row_values[tile_i].to(fx.Float32)
+                result = to_store_dtype(values * rrms * weights)
+                if const_expr(partial):
+                    if in_row:
+                        store_vec(copy_atom, vecsize, elem_dtype, result, output_div, index)
+                else:
+                    store_vec(copy_atom, vecsize, elem_dtype, result, output_div, index)
 
     if store_rstd:
 
@@ -439,7 +466,7 @@ def _build_rmsnorm_small_n_module(
                 eps,
             )
             launcher.launch(
-                grid=((m + fx.Int32(block_m - 1)) // fx.Int32(block_m), 1, 1),
+                grid=((m + fx.Int32(block_rows - 1)) // fx.Int32(block_rows), 1, 1),
                 block=(block_threads, 1, 1),
                 stream=stream,
             )
@@ -457,7 +484,7 @@ def _build_rmsnorm_small_n_module(
     ):
         launcher = rmsnorm_small_n_kernel(input_tensor, gamma, gamma, output, m, eps)
         launcher.launch(
-            grid=((m + fx.Int32(block_m - 1)) // fx.Int32(block_m), 1, 1),
+            grid=((m + fx.Int32(block_rows - 1)) // fx.Int32(block_rows), 1, 1),
             block=(block_threads, 1, 1),
             stream=stream,
         )
