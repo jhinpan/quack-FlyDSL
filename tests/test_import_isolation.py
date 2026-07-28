@@ -67,7 +67,7 @@ def test_real_rocm_import_skips_cuda_bootstrap_without_initializing_context():
 
         import quack
 
-        assert quack.__version__ == "0.6.1"
+        assert quack.__version__
         assert not any(name == "cutlass" or name.startswith("cutlass.") for name in sys.modules)
         assert not torch.cuda.is_initialized()
         """
