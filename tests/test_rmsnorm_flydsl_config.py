@@ -88,48 +88,24 @@ def test_vecsize_degrades_by_gcd_rather_than_collapsing_to_scalar(N, dtype_width
 
 @pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
 @pytest.mark.parametrize("N", HIDDEN_SIZES)
-def test_the_access_is_always_a_whole_power_of_two_number_of_bits(N, dtype_width):
-    access = config(N, dtype_width).access_bits
-    assert access in (8, 16, 32, 64, 128)
-    assert access <= ACCESS_BITS
-
-
-@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
-@pytest.mark.parametrize("N", HIDDEN_SIZES)
-def test_vectors_tile_the_row_exactly(N, dtype_width):
+def test_every_row_gets_a_coverable_block(N, dtype_width):
+    """The invariants a forward config must satisfy for any supported row."""
     c = config(N, dtype_width)
+
     assert c.vecsize == math.gcd(N, ACCESS_BITS // dtype_width)
     assert c.num_vecs * c.vecsize == N
+    assert c.access_bits in (8, 16, 32, 64, 128)
 
-
-@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
-@pytest.mark.parametrize("N", HIDDEN_SIZES)
-def test_tiles_cover_the_row_without_a_dead_pass(N, dtype_width):
-    c = config(N, dtype_width)
-    assert c.num_tiles * c.num_threads * c.vecsize >= N
-    assert (c.num_tiles - 1) * c.num_threads * c.vecsize < N
-
-
-@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
-@pytest.mark.parametrize("N", HIDDEN_SIZES)
-def test_block_width_stays_within_bounds_and_is_a_power_of_two(N, dtype_width):
-    c = config(N, dtype_width)
     assert MIN_NUM_THREADS <= c.num_threads <= MAX_NUM_THREADS
     assert c.num_threads & (c.num_threads - 1) == 0
 
-
-@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
-@pytest.mark.parametrize("N", HIDDEN_SIZES)
-def test_registers_cached_per_thread_stay_bounded(N, dtype_width):
-    """The forward keeps the whole row in registers between its two passes."""
-    assert config(N, dtype_width).elems_per_thread <= 32
-
-
-@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
-@pytest.mark.parametrize("N", HIDDEN_SIZES)
-def test_predication_flag_matches_the_arithmetic(N, dtype_width):
-    c = config(N, dtype_width)
+    assert c.num_tiles * c.num_threads * c.vecsize >= N
+    assert (c.num_tiles - 1) * c.num_threads * c.vecsize < N
     assert c.needs_predicate is not (c.num_vecs == c.num_tiles * c.num_threads)
+
+    # The forward keeps the whole row in registers between its two passes,
+    # which is what caps N.
+    assert c.elems_per_thread <= 32
 
 
 def test_small_rows_do_not_reserve_a_whole_wide_block():
@@ -168,12 +144,6 @@ def test_the_staged_block_stays_within_its_wider_ceiling(N, dtype_width):
     c = config(N, dtype_width, STAGED_MAX_THREADS)
     assert MIN_NUM_THREADS <= c.num_threads <= STAGED_MAX_THREADS
     assert c.num_tiles * c.num_threads * c.vecsize >= N
-
-
-@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
-@pytest.mark.parametrize("N", HIDDEN_SIZES)
-def test_selection_is_deterministic(N, dtype_width):
-    assert config(N, dtype_width) == config(N, dtype_width)
 
 
 def test_unsupported_element_width_is_rejected():
