@@ -768,6 +768,12 @@ def _launch_rmsnorm_feature_bwd(
     )
     has_parameter_grads = compute_dweight or compute_dbias
     num_programs = selected_programs if path == "two_stage" and has_parameter_grads else 0
+    if num_programs and per_head:
+        # The staged grid is num_programs * num_heads, and the workspace has a
+        # row per block, so the CU-derived count has to be divided by the head
+        # count or a per-head launch oversubscribes and allocates num_heads
+        # times the workspace it needs. Each program just walks more rows.
+        num_programs = max(1, next_power_of_two(num_programs // num_heads))
     path = "two_stage" if num_programs else "atomic"
     workspace_rows = num_programs * num_heads * (int(compute_dweight) + int(compute_dbias))
     workspace = torch.empty(
