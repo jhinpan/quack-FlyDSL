@@ -16,6 +16,7 @@ if torch.version.hip is None:
 pytest.importorskip("flydsl")
 
 import quack.rmsnorm_flydsl as rmsnorm_flydsl_impl  # noqa: E402
+from quack.flydsl.rmsnorm_config import next_power_of_two  # noqa: E402
 from quack.rmsnorm_flydsl import rmsnorm  # noqa: E402
 
 
@@ -1302,6 +1303,30 @@ def test_deterministic_mode_avoids_the_atomic_weight_reduction():
 
     for later in grads[1:]:
         torch.testing.assert_close(later, grads[0], rtol=0, atol=0)
+
+
+def test_the_per_head_staged_grid_stays_cu_derived():
+    """Regression: the staged grid is num_programs * num_heads.
+
+    num_programs is sized to fill the CUs, so a per-head launch used to
+    oversubscribe by the head count and size its workspace to match: 262144
+    blocks and 128 MiB of workspace for a 64 MiB input on a 256-CU part.
+    """
+    device = torch.device("cuda", 0)
+    m, num_heads, n = 2048, 128, 128
+
+    _, selected = rmsnorm_flydsl_impl._select_rmsnorm_bwd_config(m, n, "bf16", device)
+    num_programs = max(1, next_power_of_two(selected // num_heads))
+
+    # selected is already sized to the CU count, so the per-head grid must not
+    # exceed it. Before the fix this was selected * num_heads.
+    assert num_programs * num_heads <= selected, (
+        f"per-head staged launch wants {num_programs * num_heads} blocks "
+        f"where the occupancy heuristic asked for {selected}"
+    )
+    workspace_bytes = num_programs * num_heads * n * 4
+    input_bytes = m * num_heads * n * 2
+    assert workspace_bytes < input_bytes // 8
 
 
 def test_the_staged_backward_does_not_recompile_per_batch_size():
