@@ -206,33 +206,41 @@ def _time_rotating_calls(
     sample_rounds: int,
     evictor: _L2Evictor | None,
 ) -> list[float]:
-    """Time individual calls with device events while rotating tensor sets."""
+    """Time a whole rotation with one event pair, not one pair per call.
+
+    A hipEvent record carries barrier semantics, so bracketing every launch
+    charges two pipeline drains to each kernel. Checked against rocprofv3's
+    hardware timestamps on gfx950: per-call pairs read 178% high on a 6us
+    kernel and 9% high on a 29us one, while one pair around the rotation is
+    within 5% of both.
+
+    The evictor runs outside the window. Keeping the operands out of L2 is the
+    rotation's job -- ``_rotation_count`` sizes it against the L2 target for
+    exactly that reason -- and the evictor only covers the case where memory
+    capped the rotation short of it.
+    """
     for _ in range(warmup_rounds):
         prepared.reset()
+        if evictor is not None:
+            evictor()
         for call in prepared.calls:
-            if evictor is not None:
-                evictor()
             call()
     torch.cuda.synchronize()
 
-    event_pairs = [
-        (
-            torch.cuda.Event(enable_timing=True),
-            torch.cuda.Event(enable_timing=True),
-        )
-        for _ in prepared.calls
-    ]
+    calls_per_round = len(prepared.calls)
     samples_us = []
     for _ in range(sample_rounds):
         prepared.reset()
-        for call, (start, end) in zip(prepared.calls, event_pairs):
-            if evictor is not None:
-                evictor()
-            start.record()
+        if evictor is not None:
+            evictor()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for call in prepared.calls:
             call()
-            end.record()
-        event_pairs[-1][1].synchronize()
-        samples_us.extend(start.elapsed_time(end) * 1000.0 for start, end in event_pairs)
+        end.record()
+        end.synchronize()
+        samples_us.append(start.elapsed_time(end) * 1000.0 / calls_per_round)
     return samples_us
 
 
@@ -832,7 +840,9 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eps", type=float, default=1e-6)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--warmup-rounds", type=int, default=3)
-    parser.add_argument("--sample-rounds", type=int, default=12)
+    # One sample per round now that a round is timed as a whole, so this is
+    # also the sample count the percentiles are drawn from.
+    parser.add_argument("--sample-rounds", type=int, default=40)
     parser.add_argument("--copy-mib", type=int, default=512)
     parser.add_argument("--copy-samples", type=int, default=30)
     parser.add_argument("--min-rotation-buffers", type=int, default=2)
@@ -1022,6 +1032,33 @@ def main(argv: Iterable[str] | None = None) -> int:
         print(f"CSV: {csv_path.resolve()}")
         print(f"Environment: {environment_path.resolve()}")
         raise
+
+    # Contention canary: re-probe the memory system the sweep was normalised
+    # against. A shared node can pick up a co-tenant partway through, and every
+    # peak_bw_pct in the CSV is then measured against a ceiling that no longer
+    # holds. Cheaper to record the drift than to discover it later.
+    closing_bw = _measure_achievable_bandwidth(
+        torch,
+        probe_bytes=args.copy_mib * 1024**2,
+        warmup_rounds=args.warmup_rounds,
+        sample_rounds=args.copy_samples,
+    )
+    opening_gbps = environment["achievable_bandwidth"]["median_gbps"]
+    closing_gbps = closing_bw["median_gbps"]
+    drift = closing_gbps / opening_gbps
+    environment["contention_canary"] = {
+        "opening_gbps": _round(opening_gbps),
+        "closing_gbps": _round(closing_gbps),
+        "closing_over_opening": _round(drift),
+        "quiet": 0.9 <= drift <= 1.1,
+    }
+    if not 0.9 <= drift <= 1.1:
+        print(
+            f"\nWARNING: achievable bandwidth moved {drift:.2f}x during the sweep "
+            f"({opening_gbps:.0f} -> {closing_gbps:.0f} GB/s). "
+            "The node was not quiet; treat these numbers as indicative only.",
+            file=sys.stderr,
+        )
 
     environment["status"] = "passed"
     environment["result_rows"] = len(rows)

@@ -13,6 +13,8 @@ row is the QK-norm case. A row whose length shares no factor with a 128-bit
 access cannot vectorize at all, and is where the two paths disagree.
 """
 
+import statistics
+
 import torch
 import triton
 
@@ -25,20 +27,34 @@ from quack.flydsl.rmsnorm_config import (
 from quack.rmsnorm_flydsl import rmsnorm
 
 
-def bench(fn, samples=3):
-    """Time ``fn``, taking the best of a few samples.
+def bench_pair(left, right, rounds=7):
+    """Time two variants against each other, interleaved, and take medians.
 
     Two things bite here. ``do_bench`` sizes its repeat count from a first
     call, so a first call that also runs the FlyDSL build skews the whole
-    sample -- and only for the first shape measured in a process, which reads
-    as a property of that shape rather than of the harness. Separately, about
-    one sample in twenty on this machine comes back an order of magnitude
-    slow. Whatever that is, it can only cost time and never save it, so the
-    minimum is the honest estimate of what the kernel does.
+    sample -- hence the untimed call before the loop. Separately, about one
+    sample in twenty on this machine comes back an order of magnitude slow.
+
+    Measuring one variant to completion and then the other cannot survive
+    either problem: AGENTS.md records that sequential rounds on a shared node
+    drift 2-3x with clocks and co-tenants, so whichever variant ran second is
+    not comparable to the one that ran first. Alternating them cancels the
+    drift, and a median over the rounds discards the occasional slow sample
+    without taking the luckiest one, which is what a minimum would do.
     """
-    fn()
+    left()
+    right()
     torch.cuda.synchronize()
-    return min(triton.testing.do_bench(fn, warmup=25, rep=100) for _ in range(samples))
+    left_samples, right_samples = [], []
+    for index in range(rounds):
+        order = (
+            ((left, left_samples), (right, right_samples))
+            if index % 2
+            else ((right, right_samples), (left, left_samples))
+        )
+        for fn, samples in order:
+            samples.append(triton.testing.do_bench(fn, warmup=25, rep=100))
+    return statistics.median(left_samples), statistics.median(right_samples)
 
 
 def tbs(nbytes, ms):
@@ -121,8 +137,7 @@ for m, n in SHAPES:
     ]
     for label, fly, args, nbytes in cases:
         reference = compiled[label]
-        flydsl = bench(fly)
-        torch_compile = bench(lambda: reference(*args))
+        flydsl, torch_compile = bench_pair(fly, lambda: reference(*args))
         print(
             f"{label:>19} {flydsl:8.4f}ms {tbs(nbytes, flydsl):5.2f}TB/s "
             f"{torch_compile:8.4f}ms {tbs(nbytes, torch_compile):5.2f}TB/s "
