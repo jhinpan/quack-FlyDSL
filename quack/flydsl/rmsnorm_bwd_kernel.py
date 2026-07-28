@@ -1320,7 +1320,10 @@ def build_rmsnorm_feature_bwd_two_stage_module(
 
         dweight_total = fx.Float32(0.0)
         dbias_total = fx.Float32(0.0)
-        for partial_row in range_constexpr(num_programs):
+        # A device loop, not range_constexpr: num_programs tracks the row count,
+        # so unrolling it made codegen linear in the batch size (32s at 1536
+        # against a flat 0.13s for the plain reduce next door).
+        for partial_row in range(num_programs):
             workspace_row = (
                 fx.Int64(partial_row) * fx.Int64(num_heads) + parameter_head
                 if per_head
