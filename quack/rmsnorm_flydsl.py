@@ -11,7 +11,6 @@ import numbers
 
 import torch
 
-from quack.flydsl.kernel_utils import FLYDSL_BUILD_LOCK, run_compiled
 from quack.flydsl.rmsnorm_bwd_kernel import (
     build_rmsnorm_feature_bwd_atomic_module,
     build_rmsnorm_feature_bwd_two_stage_module,
@@ -20,20 +19,26 @@ from quack.flydsl.rmsnorm_bwd_kernel import (
     TWO_STAGE_MAX_NUM_THREADS,
     rmsnorm_bwd_two_stage_config,
 )
-from quack.flydsl.rmsnorm_common import EPS
+from quack.flydsl.rmsnorm_common import EPS, FLYDSL_BUILD_LOCK, run_compiled
+from quack.flydsl.rmsnorm_config import MAX_N, next_power_of_two
 from quack.flydsl.rmsnorm_kernel import build_rmsnorm_feature_module, build_rmsnorm_module
 
 
 __all__ = ["rmsnorm"]
 
 _SUPPORTED_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
-_SUPPORTED_ARCHES = frozenset({"gfx942", "gfx950"})
+# gfx950 is the only architecture this backend has been built and run on.
+# gfx942 is wave64 and should work, but until it executes on real hardware it
+# is not claimed here.
+_SUPPORTED_ARCHES = frozenset({"gfx950"})
+# Row counts cross the Int32 kernel ABI here; reject before FlyDSL's argument
+# packing raises a struct.error from inside the dispatch.
+_MAX_ROWS = 2**31 - 1
 _FWD_CACHE: dict[tuple, object] = {}
 _BWD_CACHE: dict[tuple, object] = {}
 _BWD_CU_COUNT_CACHE: dict[torch.device, int] = {}
 _DEVICE_ARCH_CACHE: dict[int, str] = {}
 _BWD_TWO_STAGE_MIN_ROWS = 512
-_BWD_TWO_STAGE_MAX_N = 8192
 
 
 def _dtype_to_str(dtype: torch.dtype) -> str:
@@ -131,8 +136,8 @@ def _validate_feature_inputs(
         num_heads, n = 1, x.shape[-1]
         parameter_shape = (n,)
 
-    if not 1 <= n <= 8192:
-        raise ValueError(f"x normalized dimension must be between 1 and 8192, got {n}")
+    if not 1 <= n <= MAX_N:
+        raise ValueError(f"x normalized dimension must be between 1 and {MAX_N}, got {n}")
     for name, tensor in (("weight", weight), ("bias", bias)):
         if tensor is not None and tuple(tensor.shape) != parameter_shape:
             raise ValueError(f"{name} shape must be {parameter_shape}, got {tuple(tensor.shape)}")
@@ -176,6 +181,8 @@ def _validate_feature_inputs(
         raise ValueError("weight_offset requires an explicit weight")
 
     m = x.numel() // (num_heads * n)
+    if m > _MAX_ROWS:
+        raise ValueError(f"x has {m} rows, but the kernels address at most {_MAX_ROWS}")
     return m, n, num_heads, per_head, eps, weight_offset
 
 
@@ -208,26 +215,31 @@ def _select_rmsnorm_bwd_config(
 
     The atomic path accumulates dweight with unordered fp32 atomics, so it is
     not run-to-run reproducible. The staged path uses a fixed reduction tree,
-    and n is capped well below _BWD_TWO_STAGE_MAX_N by the public API, so it
-    is always available when reproducibility is asked for.
+    so it is what deterministic mode gets, at any row count.
     """
     deterministic = torch.are_deterministic_algorithms_enabled()
-    if n <= _BWD_TWO_STAGE_MAX_N and (deterministic or m >= _BWD_TWO_STAGE_MIN_ROWS):
-        num_cus = _BWD_CU_COUNT_CACHE.get(device)
-        if num_cus is None:
-            num_cus = torch.cuda.get_device_properties(device).multi_processor_count
-            if not torch.compiler.is_compiling():
-                _BWD_CU_COUNT_CACHE[device] = num_cus
-        config = rmsnorm_bwd_two_stage_config(n, dtype_str)
-        if config.vectorized:
-            num_programs = num_cus if m < 2048 else (3 * num_cus) // 2
-        else:
-            num_programs = num_cus if m < 1024 else 2 * num_cus
-        # A row narrower than the widest block gets a narrower block, so launch
-        # proportionally more of them to keep the same threads resident.
-        num_programs *= TWO_STAGE_MAX_NUM_THREADS // config.num_threads
-        return "two_stage", min(m, num_programs)
-    return "atomic", None
+    if not (deterministic or m >= _BWD_TWO_STAGE_MIN_ROWS):
+        return "atomic", None
+
+    num_cus = _BWD_CU_COUNT_CACHE.get(device)
+    if num_cus is None:
+        num_cus = torch.cuda.get_device_properties(device).multi_processor_count
+        if not torch.compiler.is_compiling():
+            _BWD_CU_COUNT_CACHE[device] = num_cus
+    config = rmsnorm_bwd_two_stage_config(n, dtype_str)
+    if config.vectorized:
+        num_programs = num_cus if m < 2048 else (3 * num_cus) // 2
+    else:
+        num_programs = num_cus if m < 1024 else 2 * num_cus
+    # A row narrower than the widest block gets a narrower block, so launch
+    # proportionally more of them to keep the same threads resident.
+    num_programs *= TWO_STAGE_MAX_NUM_THREADS // config.num_threads
+    # num_programs is baked into the kernel as the grid size, the row-loop
+    # stride and the reduce bound, so it must not track m: `min(m, ...)` would
+    # compile and retain a separate kernel for every batch size. Rounding to a
+    # power of two bounds that at one entry per octave. A block with no row of
+    # its own just contributes a zeroed partial.
+    return "two_stage", min(next_power_of_two(m), num_programs)
 
 
 def _launch_rmsnorm_fwd(
