@@ -53,7 +53,6 @@ RESULT_FIELDS = (
     "weight_dtype",
     "weight_mode",
     "eps",
-    "correctness_passed",
     "cold_compile_ms",
     "cold_compile_reused",
     "median_us",
@@ -430,7 +429,6 @@ class _FlyDSLProvider:
         num_programs = selected_programs if path == "two_stage" else 0
         tensor_sets = []
         calls = []
-        raw_dweights = []
         for _ in range(rotation_buffers):
             x = inputs["x"].clone()
             weight = inputs["weight"].clone()
@@ -448,7 +446,6 @@ class _FlyDSLProvider:
                 raw_dweight = torch.zeros(cell.n, device=x.device, dtype=torch.float32)
                 partial = torch.empty(0, device=x.device, dtype=torch.float32)
             converted_dweight = [None]
-            raw_dweights.append(raw_dweight)
             tensor_sets.append((dx, converted_dweight))
 
             def call(
@@ -461,6 +458,10 @@ class _FlyDSLProvider:
                 partial=partial,
                 converted_dweight=converted_dweight,
             ):
+                # The atomic path accumulates into dweight, so zeroing it is
+                # part of the operation and has to be inside the timed region.
+                if not num_programs:
+                    raw_dweight.zero_()
                 self.impl._launch_rmsnorm_bwd(
                     x,
                     weight,
@@ -476,9 +477,7 @@ class _FlyDSLProvider:
             calls.append(call)
 
         def reset() -> None:
-            if not num_programs:
-                for raw_dweight in raw_dweights:
-                    raw_dweight.zero_()
+            return
 
         compile_key = (
             "bwd",
@@ -726,6 +725,10 @@ def _environment(torch: Any, args: argparse.Namespace, output_dir: Path) -> dict
         "schema_version": 2,
         "status": "running",
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        # Every provider is checked against the fp32 reference before it is
+        # timed, and a mismatch aborts the sweep. Recorded once here rather
+        # than as a per-row column that could only ever say "passed".
+        "correctness_gate": "required",
         "runtime_scope": f"{properties.name} / {_device_arch(torch)}",
         "comparison_scope": (
             "same-device providers. RMSNorm is memory bound, so a cross-vendor "
@@ -959,7 +962,6 @@ def _run(
                 "weight_dtype": cell.weight_dtype,
                 "weight_mode": cell.weight_mode,
                 "eps": args.eps,
-                "correctness_passed": True,
                 "cold_compile_ms": _round(prepared.cold_compile_ms),
                 "cold_compile_reused": prepared.cold_compile_reused,
                 "median_us": _round(stats["median_us"]),
