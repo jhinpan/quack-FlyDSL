@@ -17,14 +17,21 @@ from dataclasses import dataclass
 
 
 ACCESS_BITS = 128
-# Wavefront width of every architecture this backend supports.
-# ``assert_arch_matches_reductions`` checks the real target against it.
+# Wavefront width of every architecture this backend supports. The single
+# authority: the reductions in rmsnorm_common unroll over it and the launch
+# geometry here sizes lane groups against it, so the two cannot disagree.
+# ``require_wave64`` rejects a build target that would not match.
 WAVE_SIZE = 64
 # A block never narrows below a full wavefront: a partial wave idles lanes for
 # the whole kernel.
 MIN_NUM_THREADS = WAVE_SIZE
 MAX_NUM_THREADS = 256
 SUPPORTED_DTYPE_WIDTHS = (16, 32)
+
+# Widest row a block can hold live between the two forward passes. A thread
+# keeps ``num_tiles * vecsize`` elements in registers, so this is the register
+# budget expressed as a row length. Every other cap on N derives from it.
+MAX_N = 8192
 
 # Longest scalar row still worth batching several-to-a-block rather than
 # giving each row a block of its own.
@@ -82,7 +89,7 @@ class RmsNormRowConfig:
         vecsize = math.gcd(N, ACCESS_BITS // dtype_width)
         num_vecs = N // vecsize
         num_threads = min(
-            max(_next_power_of_two(num_vecs), min_num_threads),
+            max(next_power_of_two(num_vecs), min_num_threads),
             max_num_threads,
         )
         return cls(
@@ -111,7 +118,7 @@ class RmsNormRowConfig:
         )
 
 
-def _next_power_of_two(value: int) -> int:
+def next_power_of_two(value: int) -> int:
     return 1 << (value - 1).bit_length() if value > 1 else 1
 
 
@@ -161,14 +168,11 @@ def batch_feature_rows(N: int, dtype_width: int) -> bool:
 
 
 __all__ = [
-    "ACCESS_BITS",
-    "MAX_NUM_THREADS",
-    "MIN_NUM_THREADS",
-    "SMALL_ROW_THRESHOLD",
-    "SUPPORTED_DTYPE_WIDTHS",
+    "MAX_N",
     "WAVE_SIZE",
     "RmsNormRowConfig",
     "batch_feature_rows",
     "multi_row_block_rows",
+    "next_power_of_two",
     "use_multi_row_kernel",
 ]

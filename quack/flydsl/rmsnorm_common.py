@@ -4,19 +4,104 @@
 # Adapted for Quack from ROCm/FlyDSL commit
 # ddaa507f56aa3fe9c08ebe6161a717b755540248.
 
-"""Shared device-side helpers for the plain RMSNorm kernels."""
+"""Host and device helpers shared by the plain RMSNorm kernels."""
 
+import threading
+
+import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import const_expr
-from flydsl.expr.typing import full
+from flydsl._mlir import ir
+from flydsl._mlir.dialects import fly as _fly
+from flydsl._mlir.dialects import llvm as _llvm
+from flydsl.expr import arith, const_expr
+from flydsl.expr.typing import T, full
+from flydsl.runtime.device import is_rdna_arch
 
-from .kernel_utils import get_warp_size
 from .rmsnorm_config import ACCESS_BITS, WAVE_SIZE
 
 
 EPS = 1e-6
 BLOCK_THREADS = 256
-WARP_SIZE = get_warp_size()
+
+# The block reductions unroll over the wavefront at trace time, and the launch
+# geometry sizes lane groups against the same number. Taken from the config
+# module rather than queried from the environment, so the two cannot disagree
+# and neither can drift from the target a build specializes for.
+WARP_SIZE = WAVE_SIZE
+
+# Serializes every FlyDSL trace and codegen in the process. Compilation is
+# rare and already tens of milliseconds, so one lock costs nothing and keeps
+# concurrent first calls out of the compiler's global state.
+FLYDSL_BUILD_LOCK = threading.RLock()
+
+
+def dtype_to_elem_type(dtype_str: str):
+    """Map a supported RMSNorm dtype string to its FlyDSL type."""
+    if dtype_str == "f32":
+        return fx.Float32
+    if dtype_str == "f16":
+        return fx.Float16
+    if dtype_str == "bf16":
+        return fx.BFloat16
+    raise ValueError(f"unsupported dtype: {dtype_str!r}")
+
+
+def dtype_to_elem_bits(dtype_str: str) -> int:
+    """Storage width of one element, the basis for every vector width."""
+    if dtype_str == "f32":
+        return 32
+    if dtype_str in ("f16", "bf16"):
+        return 16
+    raise ValueError(f"unsupported dtype: {dtype_str!r}")
+
+
+def has_hw_bf16_convert(arch: str) -> bool:
+    """Whether the target converts fp32 to bf16 in hardware.
+
+    gfx95x has the packed convert; earlier parts round to nearest even in
+    software instead.
+    """
+    return str(arch).startswith("gfx95")
+
+
+def atomic_add(destination, offset, value, *, dtype_bytes: int = 4):
+    """Atomically add a scalar into a global-memory tensor element."""
+    pointer_type = ir.Type.parse("!llvm.ptr<1>")
+    base_pointer = _fly.extract_aligned_pointer_as_index(pointer_type, destination)
+    base_pointer = _llvm.PtrToIntOp(T.i64, base_pointer).result
+    byte_offset = arith.index_cast(T.i64, fx.Index(offset) * fx.Index(dtype_bytes))
+    pointer = _llvm.AddOp(
+        base_pointer,
+        byte_offset,
+        _llvm.IntegerOverflowFlags(0),
+    ).result
+    pointer = _llvm.IntToPtrOp(pointer_type, pointer).result
+    pointer = pointer._value if const_expr(hasattr(pointer, "_value")) else pointer
+
+    raw_value = value.ir_value() if const_expr(hasattr(value, "ir_value")) else value
+    return _llvm.AtomicRMWOp(
+        _llvm.AtomicBinOp.fadd,
+        pointer,
+        raw_value,
+        _llvm.AtomicOrdering.monotonic,
+        syncscope="agent",
+        alignment=dtype_bytes,
+    ).result
+
+
+def run_compiled(executable, *args) -> None:
+    """Compile-and-run once, then dispatch through the cached callable."""
+    compiled = getattr(executable, "_cf", None)
+    if compiled is not None:
+        compiled(*args)
+        return
+    with FLYDSL_BUILD_LOCK:
+        if getattr(executable, "_cf", None) is None:
+            # flyc.compile performs the first launch as well as the codegen.
+            executable._cf = flyc.compile(executable, *args)
+            return
+    executable._cf(*args)
+
 
 _BUFFER_COPY_OPS = {
     8: fx.rocdl.BufferCopy8b,
@@ -52,23 +137,10 @@ def vector_access_plan(vecsize: int, dtype_width: int) -> tuple[int, int]:
     return accesses, vecsize // accesses
 
 
-def assert_arch_matches_reductions(arch: str) -> None:
-    """Fail loudly if a target's wavefront differs from the baked-in one.
-
-    The block reductions unroll over ``WARP_SIZE``, resolved from the device at
-    import time, while the launch geometry sizes a lane group against
-    ``WAVE_SIZE``, a plain constant so the config module stays free of FlyDSL.
-    Both have to agree with the target. Every architecture this backend
-    supports is wave64, so this only fires if the supported set grows without
-    the reductions and the geometry following.
-    """
-    target_warp_size = get_warp_size(arch)
-    if not target_warp_size == WARP_SIZE == WAVE_SIZE:
-        raise RuntimeError(
-            f"FlyDSL RMSNorm is built for a wavefront of {WARP_SIZE} in its "
-            f"reductions and {WAVE_SIZE} in its launch geometry, "
-            f"but {arch} has {target_warp_size}"
-        )
+def require_wave64(arch: str) -> None:
+    """Reject a build target the reductions cannot serve."""
+    if is_rdna_arch(arch):
+        raise ValueError(f"FlyDSL RMSNorm reductions require a wave64 target, but {arch} is wave32")
 
 
 def row_buffer(tensor, row, elem_bits: int, n: int, valid=None):

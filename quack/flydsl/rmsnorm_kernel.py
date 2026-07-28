@@ -15,15 +15,17 @@ from flydsl.expr import math as fmath
 from flydsl.expr.typing import ReductionOp
 from flydsl.runtime.device import get_rocm_arch
 
-from .kernel_utils import dtype_to_elem_bits, dtype_to_elem_type, has_hw_bf16_convert
 from .rmsnorm_common import (
     WARP_SIZE,
-    assert_arch_matches_reductions,
     buffer_copy_atom,
+    dtype_to_elem_bits,
+    dtype_to_elem_type,
+    has_hw_bf16_convert,
     load_dtype_vec,
     load_scalar,
     load_vec,
     make_reduction_storage,
+    require_wave64,
     resolve_rmsnorm_weight_dtype,
     row_buffer,
     row_head_buffer,
@@ -57,7 +59,7 @@ def build_rmsnorm_module(
     """
     weight_dtype_str = resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
     arch = get_rocm_arch() if arch is None else arch
-    assert_arch_matches_reductions(arch)
+    require_wave64(arch)
     elem_bits = dtype_to_elem_bits(dtype_str)
     if use_multi_row_kernel(n, elem_bits):
         return _build_rmsnorm_small_n_module(
@@ -136,7 +138,7 @@ def build_rmsnorm_module(
             vecsize = config.vecsize
             num_vecs = config.num_vecs
             last_tile = config.num_tiles - 1
-            weight_accesses, weight_per_access = vector_access_plan(vecsize, weight_elem_bits)
+            _, weight_per_access = vector_access_plan(vecsize, weight_elem_bits)
             input_div = fx.logical_divide(row_input, fx.make_layout(vecsize, 1))
             output_div = fx.logical_divide(row_output, fx.make_layout(vecsize, 1))
             gamma_div = fx.logical_divide(gamma_buffer, fx.make_layout(weight_per_access, 1))
@@ -534,7 +536,7 @@ def build_rmsnorm_feature_module(
     three quarters of its lanes idle.
     """
     arch = get_rocm_arch() if arch is None else arch
-    assert_arch_matches_reductions(arch)
+    require_wave64(arch)
     use_hw_cvt_bf16 = has_hw_bf16_convert(arch)
     input_bits = dtype_to_elem_bits(input_dtype_str)
     output_bits = dtype_to_elem_bits(output_dtype_str)

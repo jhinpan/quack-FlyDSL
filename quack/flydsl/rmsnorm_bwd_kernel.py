@@ -14,21 +14,19 @@ from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr.typing import ReductionOp
 from flydsl.runtime.device import get_rocm_arch
 
-from .kernel_utils import (
-    atomic_add,
-    dtype_to_elem_bits,
-    dtype_to_elem_type,
-    has_hw_bf16_convert,
-)
 from .rmsnorm_common import (
     BLOCK_THREADS,
     WARP_SIZE,
-    assert_arch_matches_reductions,
+    atomic_add,
     buffer_copy_atom,
+    dtype_to_elem_bits,
+    dtype_to_elem_type,
+    has_hw_bf16_convert,
     load_dtype_vec,
     load_scalar,
     load_vec,
     make_reduction_storage,
+    require_wave64,
     resolve_rmsnorm_weight_dtype,
     row_buffer,
     row_head_buffer,
@@ -60,11 +58,6 @@ def rmsnorm_bwd_two_stage_config(n: int, dtype_str: str) -> RmsNormRowConfig:
     )
 
 
-def is_rmsnorm_bwd_two_stage_vec_config(n: int, dtype_str: str) -> bool:
-    """Return whether the staged kernel can use 128-bit column I/O."""
-    return rmsnorm_bwd_two_stage_config(n, dtype_str).vectorized
-
-
 def build_rmsnorm_bwd_module(
     n: int,
     dtype_str: str,
@@ -73,7 +66,7 @@ def build_rmsnorm_bwd_module(
 ):
     """Build the one-block-per-row backward with fp32 weight atomics."""
     weight_dtype_str = resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
-    assert_arch_matches_reductions(get_rocm_arch() if arch is None else arch)
+    require_wave64(get_rocm_arch() if arch is None else arch)
     red_slots = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = dtype_to_elem_bits(dtype_str)
     weight_elem_bits = dtype_to_elem_bits(weight_dtype_str)
@@ -243,7 +236,7 @@ def build_rmsnorm_bwd_two_stage_module(
 
     weight_dtype_str = resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
     arch = get_rocm_arch() if arch is None else arch
-    assert_arch_matches_reductions(arch)
+    require_wave64(arch)
     config = rmsnorm_bwd_two_stage_config(n, dtype_str)
     partial_threads = config.num_threads
     red_slots = max(1, (partial_threads + WARP_SIZE - 1) // WARP_SIZE)
@@ -251,7 +244,7 @@ def build_rmsnorm_bwd_two_stage_module(
     weight_elem_bits = dtype_to_elem_bits(weight_dtype_str)
     io_width = config.vecsize
     use_vec = config.vectorized
-    weight_accesses, weight_io_width = vector_access_plan(io_width, weight_elem_bits)
+    _, weight_io_width = vector_access_plan(io_width, weight_elem_bits)
     num_io_tiles = config.num_vecs
     num_io_iters = config.num_tiles
     partial_acc_size = num_io_iters * io_width
@@ -639,7 +632,7 @@ def build_rmsnorm_feature_bwd_atomic_module(
 ):
     """Build the generic one-block-per-row/head feature backward."""
     arch = get_rocm_arch() if arch is None else arch
-    assert_arch_matches_reductions(arch)
+    require_wave64(arch)
     source_bits = dtype_to_elem_bits(source_dtype_str)
     dy_bits = dtype_to_elem_bits(dy_dtype_str)
     dx_bits = dtype_to_elem_bits(dx_dtype_str)
@@ -966,7 +959,7 @@ def build_rmsnorm_feature_bwd_two_stage_module(
     if num_programs <= 0:
         raise ValueError(f"num_programs must be positive, got {num_programs}")
     arch = get_rocm_arch() if arch is None else arch
-    assert_arch_matches_reductions(arch)
+    require_wave64(arch)
     use_hw_cvt_bf16 = has_hw_bf16_convert(arch)
     source_bits = dtype_to_elem_bits(source_dtype_str)
     dy_bits = dtype_to_elem_bits(dy_dtype_str)

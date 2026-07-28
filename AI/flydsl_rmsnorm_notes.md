@@ -128,6 +128,9 @@ comparing over a full tensor gives an exact match, including NaN, the
 infinities, signed zero and subnormals. That branch is otherwise dead on
 gfx950 and would never be exercised.
 
+This validates the rounding *code path*, not any pre-gfx95x part. Nothing
+here has run on gfx942, which is why the backend claims gfx950 only.
+
 ## Vector size follows `quack/rmsnorm.py`
 
 `vecsize = gcd(N, 128 // dtype_width)`, the same rule the CuTe kernel uses. A

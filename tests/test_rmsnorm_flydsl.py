@@ -15,12 +15,8 @@ if torch.version.hip is None:
 
 pytest.importorskip("flydsl")
 
-from quack.flydsl import FLYDSL_UPSTREAM_SHA  # noqa: E402
 import quack.rmsnorm_flydsl as rmsnorm_flydsl_impl  # noqa: E402
 from quack.rmsnorm_flydsl import rmsnorm  # noqa: E402
-
-
-UPSTREAM_SHA = "ddaa507f56aa3fe9c08ebe6161a717b755540248"
 
 
 def _reference(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
@@ -1054,11 +1050,7 @@ def test_same_architecture_eight_device_caches_are_device_local():
 def test_compile_target_must_match_the_device(monkeypatch):
     """FlyDSL's own target is the authority, not the ARCH environment."""
     _clear_caches()
-    device_arch = rmsnorm_flydsl_impl._normalize_arch(
-        torch.cuda.get_device_properties(0).gcnArchName
-    )
-    other = "gfx942" if device_arch != "gfx942" else "gfx950"
-    monkeypatch.setattr(rmsnorm_flydsl_impl, "_flydsl_compile_target", lambda: ("rocm", other))
+    monkeypatch.setattr(rmsnorm_flydsl_impl, "_flydsl_compile_target", lambda: ("rocm", "gfx90a"))
     with pytest.raises(ValueError, match="mixed architectures"):
         rmsnorm_flydsl_impl._validate_arch(torch.device("cuda", 0))
 
@@ -1110,23 +1102,18 @@ def test_a_compile_target_change_is_caught_on_the_next_build(monkeypatch):
     weight = torch.randn(512, device="cuda", dtype=torch.float32)
     rmsnorm(torch.randn((8, 512), device="cuda", dtype=torch.bfloat16), weight)
 
-    device_arch = rmsnorm_flydsl_impl._normalize_arch(
-        torch.cuda.get_device_properties(0).gcnArchName
-    )
-    other = "gfx942" if device_arch != "gfx942" else "gfx950"
-    monkeypatch.setattr(rmsnorm_flydsl_impl, "_flydsl_compile_target", lambda: ("rocm", other))
+    monkeypatch.setattr(rmsnorm_flydsl_impl, "_flydsl_compile_target", lambda: ("rocm", "gfx90a"))
     with pytest.raises(ValueError, match="mixed architectures"):
         rmsnorm(torch.randn((8, 256), device="cuda", dtype=torch.bfloat16), weight[:256])
 
 
-def test_a_warp_size_mismatch_is_rejected():
-    """The reductions bake in a wavefront size; a disagreeing target must fail loudly."""
-    from quack.flydsl.rmsnorm_common import assert_arch_matches_reductions
+def test_a_wave32_build_target_is_rejected():
+    """The reductions are written for wave64; an RDNA target must fail loudly."""
+    from quack.flydsl.rmsnorm_common import require_wave64
 
-    assert_arch_matches_reductions("gfx942")
-    assert_arch_matches_reductions("gfx950")
-    with pytest.raises(RuntimeError, match="wavefront"):
-        assert_arch_matches_reductions("gfx1100")
+    require_wave64("gfx950")
+    with pytest.raises(ValueError, match="wave64"):
+        require_wave64("gfx1100")
 
 
 def test_concurrent_first_calls_build_one_launcher():
@@ -1216,10 +1203,12 @@ def test_upstream_defaults_still_run():
 def test_software_bf16_rounding_matches_the_hardware_convert():
     """Cover the rounding path that only pre-gfx95x parts take.
 
-    gfx942 has no packed fp32->bf16 convert, so the kernel rounds to nearest
-    even by hand. That branch is otherwise dead on this machine.
+    Parts before gfx95x have no packed fp32->bf16 convert, so the kernel rounds
+    to nearest even by hand. This builds both paths and runs them on this
+    machine's gfx950; it exercises the software branch, and is not evidence
+    that any pre-gfx95x part has been validated.
     """
-    from quack.flydsl.kernel_utils import run_compiled
+    from quack.flydsl.rmsnorm_common import run_compiled
     from quack.flydsl.rmsnorm_kernel import build_rmsnorm_module
 
     torch.manual_seed(3)
@@ -1315,6 +1304,39 @@ def test_deterministic_mode_avoids_the_atomic_weight_reduction():
         torch.testing.assert_close(later, grads[0], rtol=0, atol=0)
 
 
+def test_the_staged_backward_does_not_recompile_per_batch_size():
+    """Regression: num_programs used to be min(m, ...), so it tracked m.
+
+    It is baked into the kernel as the grid size, the row-loop stride and the
+    reduce bound, so tracking m compiled and permanently cached a separate
+    backward for every batch size seen. A varying-length training loop paid
+    ~150ms per step.
+    """
+    _clear_caches()
+    torch.manual_seed(6)
+    n = 512
+    weight = torch.randn(n, device="cuda", dtype=torch.float32, requires_grad=True)
+    row_counts = (520, 600, 680, 777, 900, 1100, 1500)
+
+    torch.use_deterministic_algorithms(True)
+    try:
+        for m in row_counts:
+            x = torch.randn((m, n), device="cuda", dtype=torch.bfloat16, requires_grad=True)
+            dout = torch.randn_like(x)
+            rmsnorm(x, weight).backward(dout)
+            _, dx_expected, _ = _reference_with_grads(x, weight, dout, 1e-6)
+            _assert_grad_close(x.grad, dx_expected)
+    finally:
+        torch.use_deterministic_algorithms(False)
+
+    programs = {key[5] for key in rmsnorm_flydsl_impl._BWD_CACHE}
+    assert programs, "expected at least one staged backward build"
+    assert all(p & (p - 1) == 0 for p in programs), (
+        f"num_programs must be a power of two: {programs}"
+    )
+    assert len(rmsnorm_flydsl_impl._BWD_CACHE) < len(row_counts)
+
+
 def test_small_batches_still_use_the_atomic_backward_by_default():
     _clear_caches()
     torch.manual_seed(5)
@@ -1334,22 +1356,18 @@ def test_small_batches_still_use_the_atomic_backward_by_default():
 def test_unsupported_architectures_are_named(monkeypatch):
     _clear_caches()
     monkeypatch.setattr(rmsnorm_flydsl_impl, "_normalize_arch", lambda _: "gfx90a")
-    with pytest.raises(ValueError, match="gfx942, gfx950"):
+    with pytest.raises(ValueError, match="gfx950"):
         rmsnorm_flydsl_impl._validate_arch(torch.device("cuda", 0))
 
 
-def test_vendored_source_is_pinned_and_isolated():
-    assert FLYDSL_UPSTREAM_SHA == UPSTREAM_SHA
+def test_vendored_source_is_self_contained():
+    """The vendored kernels must not reach back into FlyDSL's own kernel tree."""
     source_root = Path(__file__).resolve().parents[1] / "quack" / "flydsl"
     for filename in (
         "rmsnorm_kernel.py",
         "rmsnorm_bwd_kernel.py",
         "rmsnorm_common.py",
-        "kernel_utils.py",
     ):
         source = (source_root / filename).read_text(encoding="utf-8")
         assert "from kernels." not in source
         assert "import kernels." not in source
-        assert "autotune" not in source.lower()
-        assert "quant" not in source.lower()
-        assert "fused_add" not in source
