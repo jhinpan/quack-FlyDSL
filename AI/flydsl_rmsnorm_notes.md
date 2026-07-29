@@ -312,6 +312,24 @@ that case first. Probe the coprime rows before and after any attempt.
 and after a change; between them they cover long rows, the short rows the
 batching is for, and the coprime rows that are still open.
 
+Backward cleanups also have a component gate, so a faster partial kernel cannot
+hide a slower finalizer or vice versa:
+
+```
+python AI/probe_rmsnorm_flydsl_backward_components.py --output /tmp/before.json
+python AI/probe_rmsnorm_flydsl_backward_components.py \
+       --baseline /tmp/before.json --output /tmp/after.json
+```
+
+The probe takes the median of several ROCm-profiler rounds for the persistent
+partial and FlyDSL reduce kernels independently. By default it rejects a stage
+that loses more than the larger of 2% or 0.5 us. It records synchronized
+full-operation latency too, but does not automatically gate it: the shared
+node's host issue floor drifts by 1-2 us between processes, so full-path
+comparisons use the contention canary and alternating protocol in
+`benchmarks/benchmark_rmsnorm_flydsl.py`. Generate the baseline from an
+immutable worktree on the same machine immediately before the candidate.
+
 Two traps, both of which produced a confident wrong answer at least once:
 
 `triton.testing.do_bench` picks its repeat count from a first call, so a first
