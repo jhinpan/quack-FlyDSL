@@ -13,8 +13,9 @@ The original plain weighted path keeps its vectorized/small-N kernels; feature
 combinations use a descriptor-safe kernel specialized by compile-time feature
 flags.
 
-Backward keeps the small-row atomic path and uses a deterministic persistent
-partial plus final reduction for large row counts or deterministic mode.
+Backward has one weight-gradient reduction at every row count: a persistent
+kernel writing one partial per block, then a final reduce. It is a fixed
+reduction tree, so the backward is bitwise reproducible with no opt-in.
 Per-head workspaces and final parameter-gradient stores use row-scoped buffer
 descriptors so neither temporary nor output addressing silently wraps at 4 GiB.
 
@@ -62,8 +63,86 @@ Backward lands at 0.98x-1.44x of `torch.compile` on the same shapes. The `dbias`
 case is the closest (0.98x): both implementations sit near 2.3 TB/s there, so
 the second full-row parameter reduction, not the kernel, is what bounds it.
 
-The atomic backward is still scalar. It only runs for fewer than 512 rows
-outside deterministic mode, where launch overhead dominates anyway.
+## fp32 atomics cost two launches to save one
+
+A small-row atomic backward used to run below 512 rows, on the argument that it
+avoided a workspace and a second kernel launch where launch overhead dominates.
+Measured against the staged path it was slower at every row count that used it,
+and the reason is the numerics it needs rather than the kernel.
+
+fp32 atomic accumulation forces two things on the caller. The accumulator has to
+start at zero, and it has to be fp32, so the result has to be cast back to the
+weight dtype. In eager torch each of those is a kernel launch of its own:
+`torch.zeros(n, fp32)` costs 4.4us of host time and `fp32.to(bf16)` 5.5us, both
+for ~2.1us of device work, against 3.2us for the second FlyDSL launch the atomic
+path avoids. The staged reduce kernel writes every element in the weight's own
+dtype, so it needs neither. Counting what each path dispatches at m=1, n=2048:
+
+| weight dtype | atomic | staged |
+| --- | --- | --- |
+| bf16 / fp16 | 3 kernels: fill, backward, cast | 2 kernels: partial, reduce |
+| fp32 | 2 kernels: fill, backward | 2 kernels: partial, reduce |
+
+So with a weight in the activation dtype -- the ordinary training case -- the
+path built to save a launch issued one more than the path it replaced. Removing
+it, on the whole backward op, interleaved medians over 21 rounds:
+
+| weight dtype | speedup | absolute |
+| --- | --- | --- |
+| bf16 (n=1024/2048/8192, m=1..256) | 1.29x-1.33x | 24.8us to 18.8us |
+| fp32, same cells | 1.02x-1.05x | 20.0us to 19.2us |
+
+fp32 weight gains too, though less: the cast is already a no-op there, so what
+is left is that a FlyDSL launch is cheaper than a torch memset launch.
+
+The workspace argument did not hold either. `num_programs` is
+`min(next_power_of_two(m), CU-derived)`, so the grid already shrinks with the
+row count and the staged workspace at m=1 is `n * 4` bytes -- 4 to 32 KiB. At
+the top of the old atomic range, m=511, it is 2 to 8 MiB, roughly the size of
+the input, and transient in the caching allocator.
+
+Device time alone says the same thing, so this does not depend on eager launch
+cost: with the launches discounted the atomic path won 1 of 12 cells (fp32
+weight, n=2048, m=1, 5.75us against 7.13us). It was scalar, so its device time
+grew with `m * n` -- at n=8192, m=1 it was already 2.8x behind.
+
+The threshold was also wrong on its own terms. Comparing the two kernels alone,
+the crossover depends on `n`, which a fixed row count cannot express: about
+m=370 at n=512, m=250 at n=2048, and m=8 at n=8192, where the atomic kernel was
+3.1x slower by m=511.
+
+Two things came out with it. The parameter accumulators in the feature backward
+were zeroed on every call on both paths, including the `(1,)` placeholder for a
+gradient nobody asked for, and `torch.zeros((1,))` is still a full kernel
+launch; the reduce writes what it is asked for, so `torch.empty` is enough. The
+effect is inside the noise of the autograd path, but the launches are gone.
+And the raw MLIR `atomic_add` went with the kernel, which leaves nothing in this
+backend importing FlyDSL's private `_mlir` APIs. That was half the reason for
+the `flydsl<0.3` pin; the other half was that only 0.2.4 had been run, and 0.3
+is still a dev build, so the pin stays until a release is tested.
+
+Unlike the rest of this file, the numbers above were taken on flydsl
+0.3.0.dev765, with the suite passing there as well.
+
+## Launch geometry cannot be computed in traced Python
+
+`num_programs` came from the row config, which takes `math.gcd(N, ...)`, and
+Dynamo cannot trace a gcd over a symbolic shape. Resolving it in `_rmsnorm_bwd`
+therefore broke `torch.compile(fullgraph=True, dynamic=True)` outright for every
+row count that reached the staged path -- which the suite missed because it only
+compiled small batches, and those returned from the path selector before they
+touched the config.
+
+The forward never had the problem because it resolves its tiling inside the
+launcher, behind the opaque custom op, and the feature backward already
+allocated its workspace there too. The plain backward passed both in from
+outside only because the atomic path needed a different argument list. It now
+resolves `num_programs` and allocates its partials in the launcher like the
+other two, which is also where the allocation belongs for timing: the benchmark
+had been hoisting it out of the timed region.
+
+The general rule: anything a kernel is specialized on has to be a build-time
+constant, so it must be resolved behind the op, not in the graph.
 
 ## A buffer descriptor addresses at most 4 GiB
 

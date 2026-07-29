@@ -215,24 +215,21 @@ def test_public_contract_rejects_mixed_devices():
 
 
 @pytest.mark.parametrize(
-    ("expected_path", "shape", "dtype", "weight_dtype"),
+    ("shape", "dtype", "weight_dtype"),
     [
-        ("atomic", (17, 513), torch.float16, torch.float16),
-        ("atomic", (5, 257), torch.float32, torch.float32),
-        ("two_stage", (512, 4096), torch.bfloat16, torch.float32),
-        ("two_stage", (512, 3001), torch.float16, torch.float16),
-        # Staged backward with 128-bit FP32 column I/O.
-        ("two_stage", (512, 2048), torch.float32, torch.float32),
-        # Staged backward whose column count is not a whole number of blocks.
-        ("two_stage", (512, 3000), torch.bfloat16, torch.float32),
+        # Fewer rows than the persistent grid would like, so most blocks
+        # contribute a zeroed partial.
+        ((17, 513), torch.float16, torch.float16),
+        ((5, 257), torch.float32, torch.float32),
+        ((512, 4096), torch.bfloat16, torch.float32),
+        ((512, 3001), torch.float16, torch.float16),
+        # 128-bit FP32 column I/O.
+        ((512, 2048), torch.float32, torch.float32),
+        # Column count that is not a whole number of blocks.
+        ((512, 3000), torch.bfloat16, torch.float32),
     ],
 )
-def test_backward_paths_match_fp32_reference(
-    expected_path,
-    shape,
-    dtype,
-    weight_dtype,
-):
+def test_backward_matches_fp32_reference(shape, dtype, weight_dtype):
     torch.manual_seed(2)
     x = (torch.randn(shape, device="cuda", dtype=dtype) * 0.5).requires_grad_()
     weight = (
@@ -240,14 +237,6 @@ def test_backward_paths_match_fp32_reference(
     ).requires_grad_()
     dout = torch.randn(shape, device="cuda", dtype=dtype) * 0.1
     eps = 1e-6
-    dtype_str = rmsnorm_flydsl_impl._dtype_to_str(dtype)
-    path, _ = rmsnorm_flydsl_impl._select_rmsnorm_bwd_config(
-        shape[0],
-        shape[1],
-        dtype_str,
-        x.device,
-    )
-    assert path == expected_path
 
     actual = rmsnorm(x, weight, eps=eps)
     actual.backward(dout)
@@ -654,20 +643,13 @@ def test_dynamic_compiled_feature_backward_selects_at_runtime():
     assert bias.grad is not None
 
 
-def test_large_feature_backward_uses_two_stage_reduction():
+def test_feature_backward_with_bias_matches_reference():
     torch.manual_seed(15)
     shape = (512, 257)
     x = torch.randn(shape, device="cuda", dtype=torch.float16, requires_grad=True)
     weight = torch.randn(257, device="cuda", dtype=torch.float32, requires_grad=True)
     bias = torch.randn(257, device="cuda", dtype=torch.float32, requires_grad=True)
     dout = torch.randn_like(x)
-    path, _ = rmsnorm_flydsl_impl._select_rmsnorm_bwd_config(
-        shape[0],
-        shape[1],
-        "f16",
-        x.device,
-    )
-    assert path == "two_stage"
 
     actual = rmsnorm(x, weight, bias=bias)
     actual.backward(dout)
@@ -711,6 +693,31 @@ def test_staged_per_head_backward_supports_selective_parameter_grads(requested):
     assert (bias.grad is not None) == (requested == "bias")
 
 
+@pytest.mark.parametrize("per_head", [False, True])
+def test_feature_backward_with_no_parameter_grads(per_head):
+    """Frozen parameters used to be the atomic kernel's other job.
+
+    Nothing reduces, so the persistent kernel covers the rows and the parameter
+    reduce is not launched at all.
+    """
+    torch.manual_seed(11)
+    n = 257
+    shape = (64, 2, n) if per_head else (64, n)
+    parameter_shape = (2, n) if per_head else (n,)
+    x = torch.randn(shape, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    weight = torch.randn(parameter_shape, device="cuda", dtype=torch.float32)
+    bias = torch.randn(parameter_shape, device="cuda", dtype=torch.float32)
+    dout = torch.randn_like(x)
+
+    rmsnorm(x, weight, bias=bias).backward(dout)
+
+    assert weight.grad is None and bias.grad is None
+    x_ref = x.detach().clone().requires_grad_(True)
+    expected, _ = _full_reference(x_ref, weight, bias)
+    expected.backward(dout)
+    _assert_grad_close(x.grad, x_ref.grad)
+
+
 def test_feature_workspace_descriptors_are_row_scoped():
     source = inspect.getsource(rmsnorm_flydsl_impl.build_rmsnorm_feature_bwd_two_stage_module)
     assert "make_buffer_tensor(workspace_tensor)" not in source
@@ -750,6 +757,20 @@ class _FlyDSLOpCounter(torch.utils._python_dispatch.TorchDispatchMode):
         return func(*args, **(kwargs or {}))
 
 
+class _AtenOpRecorder(torch.utils._python_dispatch.TorchDispatchMode):
+    """Every aten op a region dispatches, for asserting on what it does not do."""
+
+    def __init__(self):
+        self.ops: list[str] = []
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        self.ops.append(str(func))
+        return func(*args, **(kwargs or {}))
+
+    def matching(self, needle: str) -> list[str]:
+        return [op for op in self.ops if needle in op]
+
+
 def _clear_caches():
     rmsnorm_flydsl_impl._FWD_CACHE.clear()
     rmsnorm_flydsl_impl._BWD_CACHE.clear()
@@ -768,7 +789,9 @@ def test_custom_ops_are_unique_mutation_only_and_fake_safe():
     assert "Tensor(a3!) rstd" in str(fwd._schema)
     assert "Tensor(a4!) dx" in str(bwd._schema)
     assert "Tensor(a5!) dweight" in str(bwd._schema)
-    assert "Tensor(a6!) partial" in str(bwd._schema)
+    # The staged partials are scratch the launcher allocates for itself; nothing
+    # outside the op reads them, so they are not in the schema.
+    assert "partial" not in str(bwd._schema)
     assert "Tensor(a4!) out" in str(feature_fwd._schema)
     assert "Tensor(a5!) residual_out" in str(feature_fwd._schema)
     assert "Tensor(a8!) dbias" in str(feature_bwd._schema)
@@ -785,8 +808,7 @@ def test_custom_ops_are_unique_mutation_only_and_fake_safe():
         dout = torch.empty_like(x)
         dx = torch.empty_like(x)
         dweight = torch.empty_like(weight)
-        partial = torch.empty(0, device="cuda", dtype=torch.float32)
-        bwd(x, weight, dout, rstd, dx, dweight, partial, 0)
+        bwd(x, weight, dout, rstd, dx, dweight)
 
         bias = torch.empty_like(weight)
         residual = torch.empty_like(x)
@@ -931,7 +953,7 @@ def test_fullgraph_two_stage_backward():
     _assert_close(actual, expected)
     _assert_grad_close(x.grad, dx_expected)
     _assert_grad_close(weight.grad, dw_expected)
-    assert {key[0] for key in rmsnorm_flydsl_impl._BWD_CACHE} == {"two_stage"}
+    assert {key[0] for key in rmsnorm_flydsl_impl._BWD_CACHE} == {"plain"}
 
 
 def test_forward_cache_identity_is_shape_and_dtype_only():
@@ -971,11 +993,18 @@ def test_a_runtime_eps_still_reaches_the_kernel():
 
 
 def test_fullgraph_with_dynamic_shapes():
-    """math.isfinite on a symbolic float used to break dynamic tracing."""
+    """math.isfinite on a symbolic float used to break dynamic tracing.
+
+    The row counts past 512 are the second half of this: the backward's
+    num_programs comes from a row config that takes a gcd over n, which Dynamo
+    cannot trace on a symbolic shape. Only small batches were covered here
+    before, and they took an atomic path that returned before reaching it, so
+    every row count that used the staged reduction broke.
+    """
     torch._dynamo.reset()
     compiled = torch.compile(rmsnorm, fullgraph=True, dynamic=True)
     weight = torch.randn(512, device="cuda", dtype=torch.float32, requires_grad=True)
-    for rows in (8, 16, 32):
+    for rows in (8, 16, 32, 512, 1024, 2048):
         x = torch.randn((rows, 512), device="cuda", dtype=torch.bfloat16, requires_grad=True)
         out = compiled(x, weight, eps=1e-5)
         out.sum().backward()
@@ -1277,14 +1306,18 @@ def test_operands_larger_than_one_buffer_descriptor():
     _assert_grad_close(x.grad[tail], x_tail.grad.to(x.dtype))
 
 
-def test_deterministic_mode_avoids_the_atomic_weight_reduction():
-    """Unordered fp32 atomics make dweight vary run to run.
+@pytest.mark.parametrize("m", [1, 64, 512, 1024])
+def test_the_weight_gradient_is_reproducible_without_asking(m):
+    """Reproducibility must not depend on the batch size.
 
-    Without this, whether a backward is reproducible depends on the batch
-    size, because the atomic path is only chosen below 512 rows.
+    An atomic backward used to run below 512 rows, summing dweight with
+    unordered fp32 atomics, so the same input gave a different weight gradient
+    every run and whether a model was reproducible depended on how many rows it
+    fed. The staged reduction is a fixed tree at every row count, so this holds
+    with no deterministic-mode opt-in.
     """
     torch.manual_seed(4)
-    x = torch.randn((64, 512), device="cuda", dtype=torch.bfloat16)
+    x = torch.randn((m, 512), device="cuda", dtype=torch.bfloat16)
     dout = torch.randn_like(x)
 
     def weight_grad():
@@ -1294,13 +1327,7 @@ def test_deterministic_mode_avoids_the_atomic_weight_reduction():
         return weight.grad.clone()
 
     _clear_caches()
-    torch.use_deterministic_algorithms(True)
-    try:
-        grads = [weight_grad() for _ in range(6)]
-        assert {key[0] for key in rmsnorm_flydsl_impl._BWD_CACHE} == {"two_stage"}
-    finally:
-        torch.use_deterministic_algorithms(False)
-
+    grads = [weight_grad() for _ in range(6)]
     for later in grads[1:]:
         torch.testing.assert_close(later, grads[0], rtol=0, atol=0)
 
@@ -1315,7 +1342,7 @@ def test_the_per_head_staged_grid_stays_cu_derived():
     device = torch.device("cuda", 0)
     m, num_heads, n = 2048, 128, 128
 
-    _, selected = rmsnorm_flydsl_impl._select_rmsnorm_bwd_config(m, n, "bf16", device)
+    selected = rmsnorm_flydsl_impl._select_rmsnorm_bwd_programs(m, n, "bf16", device)
     num_programs = max(1, next_power_of_two(selected // num_heads))
 
     # selected is already sized to the CU count, so the per-head grid must not
@@ -1343,16 +1370,12 @@ def test_the_staged_backward_does_not_recompile_per_batch_size():
     weight = torch.randn(n, device="cuda", dtype=torch.float32, requires_grad=True)
     row_counts = (520, 600, 680, 777, 900, 1100, 1500)
 
-    torch.use_deterministic_algorithms(True)
-    try:
-        for m in row_counts:
-            x = torch.randn((m, n), device="cuda", dtype=torch.bfloat16, requires_grad=True)
-            dout = torch.randn_like(x)
-            rmsnorm(x, weight).backward(dout)
-            _, dx_expected, _ = _reference_with_grads(x, weight, dout, 1e-6)
-            _assert_grad_close(x.grad, dx_expected)
-    finally:
-        torch.use_deterministic_algorithms(False)
+    for m in row_counts:
+        x = torch.randn((m, n), device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        dout = torch.randn_like(x)
+        rmsnorm(x, weight).backward(dout)
+        _, dx_expected, _ = _reference_with_grads(x, weight, dout, 1e-6)
+        _assert_grad_close(x.grad, dx_expected)
 
     programs = {key[5] for key in rmsnorm_flydsl_impl._BWD_CACHE}
     assert programs, "expected at least one staged backward build"
@@ -1362,20 +1385,69 @@ def test_the_staged_backward_does_not_recompile_per_batch_size():
     assert len(rmsnorm_flydsl_impl._BWD_CACHE) < len(row_counts)
 
 
-def test_small_batches_still_use_the_atomic_backward_by_default():
+@pytest.mark.parametrize("weight_dtype", [torch.bfloat16, torch.float32])
+def test_the_backward_neither_zeroes_nor_casts_the_weight_gradient(weight_dtype):
+    """Regression: an atomic backward ran below 512 rows and cost more than it saved.
+
+    fp32 atomics need an accumulator that starts at zero and then has to be cast
+    back to the weight dtype, and in eager torch each of those is its own kernel
+    launch. That was two launches to save one, which is a losing trade in the
+    launch-bound regime the path existed for. The staged reduce kernel writes
+    every element in the weight's own dtype, so neither is needed.
+    """
     _clear_caches()
     torch.manual_seed(5)
     x = torch.randn((64, 512), device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    weight = torch.randn(512, device="cuda", dtype=torch.float32, requires_grad=True)
+    weight = torch.randn(512, device="cuda", dtype=weight_dtype, requires_grad=True)
     dout = torch.randn_like(x)
 
     out = rmsnorm(x, weight)
-    out.backward(dout)
+    recorder = _AtenOpRecorder()
+    with recorder:
+        out.backward(dout)
 
-    assert {key[0] for key in rmsnorm_flydsl_impl._BWD_CACHE} == {"atomic"}
+    assert not recorder.matching("zero"), f"backward zeroed a buffer: {recorder.ops}"
+    assert not recorder.matching("_to_copy"), f"backward cast a buffer: {recorder.ops}"
+    assert weight.grad.dtype == weight_dtype
     _, dx_expected, dweight_expected = _reference_with_grads(x, weight, dout, 1e-6)
     _assert_grad_close(x.grad, dx_expected)
     _assert_grad_close(weight.grad, dweight_expected)
+
+
+@pytest.mark.parametrize("with_bias", [False, True])
+def test_the_feature_backward_zeroes_no_parameter_accumulator(with_bias):
+    """The parameter reduce writes what it is asked for, so nothing needs zeroing.
+
+    Both accumulators were zeroed on every call regardless, and so was the
+    placeholder standing in for a gradient nobody requested, which is a memset
+    launch for four bytes.
+    """
+    torch.manual_seed(17)
+    x = torch.randn((64, 257), device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    weight = torch.randn(257, device="cuda", dtype=torch.float32, requires_grad=True)
+    bias = (
+        torch.randn(257, device="cuda", dtype=torch.float32, requires_grad=True)
+        if with_bias
+        else None
+    )
+    dout = torch.randn_like(x)
+
+    out = rmsnorm(x, weight, bias=bias)
+    out.backward(dout, retain_graph=True)  # warm the build outside the recorder
+
+    recorder = _AtenOpRecorder()
+    x.grad, weight.grad = None, None
+    with recorder:
+        out.backward(dout, retain_graph=True)
+    assert not recorder.matching("zero"), f"feature backward zeroed a buffer: {recorder.ops}"
+
+    x_ref = x.detach().clone().requires_grad_(True)
+    weight_ref = weight.detach().clone().requires_grad_(True)
+    bias_ref = bias.detach().clone().requires_grad_(True) if with_bias else None
+    expected, _ = _full_reference(x_ref, weight_ref, bias_ref)
+    expected.backward(dout)
+    _assert_grad_close(x.grad, x_ref.grad)
+    _assert_grad_close(weight.grad, weight_ref.grad)
 
 
 def test_unsupported_architectures_are_named(monkeypatch):

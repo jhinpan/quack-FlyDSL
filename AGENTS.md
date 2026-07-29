@@ -136,6 +136,12 @@ ROCm / FlyDSL (see AI/flydsl_rmsnorm_notes.md):
 - The AST rewriter does not follow calls. A module-level helper containing a
   data-dependent `if` is traced as plain Python and raises; only data movement
   and traced-value math can be shared out of a kernel body.
+- Count launches, not kernels, when a path claims to save one. An eager
+  `torch.zeros` or `.to()` around a kernel is ~4-6us of host time each, so fp32
+  atomics cost two launches (zero the accumulator, cast it back) to save one.
+- Resolve anything a kernel specializes on behind the custom op. Launch geometry
+  computed in traced Python breaks `dynamic=True`: the row config takes a gcd
+  over N and Dynamo cannot trace that on a symbolic shape.
 
 CuTe-DSL:
 - Dtype views of swizzled smem drop the swizzle: re-attach the SAME

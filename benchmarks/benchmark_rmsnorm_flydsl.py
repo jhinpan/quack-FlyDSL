@@ -428,13 +428,12 @@ class _FlyDSLProvider:
             )
 
         dtype_str = self.impl._dtype_to_str(inputs["x"].dtype)
-        path, selected_programs = self.impl._select_rmsnorm_bwd_config(
+        num_programs = self.impl._select_rmsnorm_bwd_programs(
             cell.m,
             cell.n,
             dtype_str,
             inputs["x"].device,
         )
-        num_programs = selected_programs if path == "two_stage" else 0
         tensor_sets = []
         calls = []
         for _ in range(rotation_buffers):
@@ -443,44 +442,20 @@ class _FlyDSLProvider:
             dout = inputs["dout"].clone()
             rstd = reference[2].clone()
             dx = torch.empty_like(x)
-            if num_programs:
-                raw_dweight = torch.empty_like(weight)
-                partial = torch.empty(
-                    num_programs * cell.n,
-                    device=x.device,
-                    dtype=torch.float32,
-                )
-            else:
-                raw_dweight = torch.zeros(cell.n, device=x.device, dtype=torch.float32)
-                partial = torch.empty(0, device=x.device, dtype=torch.float32)
-            converted_dweight = [None]
-            tensor_sets.append((dx, converted_dweight))
+            dweight = torch.empty_like(weight)
+            tensor_sets.append((dx, dweight))
 
+            # The launcher allocates its own partials, so that allocation is
+            # inside the timed region, which is where the operation pays it.
             def call(
                 x=x,
                 weight=weight,
                 dout=dout,
                 rstd=rstd,
                 dx=dx,
-                raw_dweight=raw_dweight,
-                partial=partial,
-                converted_dweight=converted_dweight,
+                dweight=dweight,
             ):
-                # The atomic path accumulates into dweight, so zeroing it is
-                # part of the operation and has to be inside the timed region.
-                if not num_programs:
-                    raw_dweight.zero_()
-                self.impl._launch_rmsnorm_bwd(
-                    x,
-                    weight,
-                    dout,
-                    rstd,
-                    dx,
-                    raw_dweight,
-                    partial,
-                    num_programs,
-                )
-                converted_dweight[0] = raw_dweight.to(weight.dtype)
+                self.impl._launch_rmsnorm_bwd(x, weight, dout, rstd, dx, dweight)
 
             calls.append(call)
 
@@ -489,7 +464,6 @@ class _FlyDSLProvider:
 
         compile_key = (
             "bwd",
-            path,
             cell.n,
             cell.activation_dtype,
             cell.weight_dtype,
@@ -501,13 +475,12 @@ class _FlyDSLProvider:
             compile_key,
             self.compile_timings,
         )
-        actual = tensor_sets[0][0], tensor_sets[0][1][0]
-        _assert_correct(torch, cell, actual, reference[:2])
+        _assert_correct(torch, cell, tensor_sets[0], reference[:2])
         return PreparedCase(
             calls=calls,
             reset=reset,
-            outputs=lambda: (tensor_sets[0][0], tensor_sets[0][1][0]),
-            provider_detail=f"FlyDSL low-level backward ({path})",
+            outputs=lambda: tensor_sets[0],
+            provider_detail=f"FlyDSL low-level backward ({num_programs} programs)",
             cold_compile_ms=cold_ms,
             cold_compile_reused=reused,
         )
