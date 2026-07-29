@@ -12,15 +12,14 @@ import numbers
 import torch
 
 from quack.flydsl.rmsnorm_bwd_kernel import (
-    build_rmsnorm_feature_bwd_two_stage_module,
-    build_rmsnorm_bwd_two_stage_module,
     TWO_STAGE_MAX_NUM_THREADS,
+    build_rmsnorm_bwd_two_stage_module,
+    build_rmsnorm_feature_bwd_two_stage_module,
     rmsnorm_bwd_two_stage_config,
 )
 from quack.flydsl.rmsnorm_common import EPS, FLYDSL_BUILD_LOCK, run_compiled
 from quack.flydsl.rmsnorm_config import MAX_N, next_power_of_two
 from quack.flydsl.rmsnorm_kernel import build_rmsnorm_feature_module, build_rmsnorm_module
-
 
 __all__ = ["rmsnorm"]
 
@@ -202,6 +201,16 @@ def _build_cached(cache: dict, key: tuple, device: torch.device, build):
     return launcher
 
 
+def _dispatch(custom_op, eager_launch, *args, **kwargs) -> None:
+    """Use the opaque custom op only while torch is tracing."""
+    target = custom_op if torch.compiler.is_compiling() else eager_launch
+    target(*args, **kwargs)
+
+
+def _noop_fake(*args, **kwargs) -> None:
+    """Mutation-only custom ops have no fake-tensor work to perform."""
+
+
 def _select_rmsnorm_bwd_programs(
     m: int,
     n: int,
@@ -298,44 +307,7 @@ def _rmsnorm_flydsl_fwd_op(
     _launch_rmsnorm_fwd(x, weight, out, rstd, eps, store_rstd)
 
 
-@_rmsnorm_flydsl_fwd_op.register_fake
-def _rmsnorm_flydsl_fwd_fake(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    out: torch.Tensor,
-    rstd: torch.Tensor,
-    eps: float,
-    store_rstd: bool,
-) -> None:
-    return None
-
-
-def _dispatch_rmsnorm_fwd(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    out: torch.Tensor,
-    rstd: torch.Tensor,
-    eps: float,
-    store_rstd: bool,
-) -> None:
-    if torch.compiler.is_compiling():
-        _rmsnorm_flydsl_fwd_op(
-            x,
-            weight,
-            out,
-            rstd,
-            eps,
-            store_rstd,
-        )
-    else:
-        _launch_rmsnorm_fwd(
-            x,
-            weight,
-            out,
-            rstd,
-            eps,
-            store_rstd,
-        )
+_rmsnorm_flydsl_fwd_op.register_fake(_noop_fake)
 
 
 def _rmsnorm_fwd(
@@ -352,7 +324,9 @@ def _rmsnorm_fwd(
         device=x.device,
         dtype=torch.float32,
     )
-    _dispatch_rmsnorm_fwd(
+    _dispatch(
+        _rmsnorm_flydsl_fwd_op,
+        _launch_rmsnorm_fwd,
         x,
         weight,
         out,
@@ -499,33 +473,7 @@ def _rmsnorm_flydsl_feature_fwd_op(
     )
 
 
-@_rmsnorm_flydsl_feature_fwd_op.register_fake
-def _rmsnorm_flydsl_feature_fwd_fake(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor,
-    residual: torch.Tensor,
-    out: torch.Tensor,
-    residual_out: torch.Tensor,
-    rstd: torch.Tensor,
-    eps: float,
-    weight_offset: float,
-    has_weight: bool,
-    has_bias: bool,
-    has_residual: bool,
-    store_residual: bool,
-    store_rstd: bool,
-    per_head: bool,
-    num_heads: int,
-) -> None:
-    return None
-
-
-def _dispatch_rmsnorm_feature_fwd(*args, **kwargs) -> None:
-    if torch.compiler.is_compiling():
-        _rmsnorm_flydsl_feature_fwd_op(*args, **kwargs)
-    else:
-        _launch_rmsnorm_feature_fwd(*args, **kwargs)
+_rmsnorm_flydsl_feature_fwd_op.register_fake(_noop_fake)
 
 
 def _launch_rmsnorm_bwd(
@@ -604,23 +552,7 @@ def _rmsnorm_flydsl_bwd_op(
     _launch_rmsnorm_bwd(x, weight, dout, rstd, dx, dweight)
 
 
-@_rmsnorm_flydsl_bwd_op.register_fake
-def _rmsnorm_flydsl_bwd_fake(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    dout: torch.Tensor,
-    rstd: torch.Tensor,
-    dx: torch.Tensor,
-    dweight: torch.Tensor,
-) -> None:
-    return None
-
-
-def _dispatch_rmsnorm_bwd(*args, **kwargs) -> None:
-    if torch.compiler.is_compiling():
-        _rmsnorm_flydsl_bwd_op(*args, **kwargs)
-    else:
-        _launch_rmsnorm_bwd(*args, **kwargs)
+_rmsnorm_flydsl_bwd_op.register_fake(_noop_fake)
 
 
 def _rmsnorm_bwd(
@@ -633,7 +565,16 @@ def _rmsnorm_bwd(
     # The reduce kernel writes every element of dweight in the weight's own
     # dtype, so this needs neither zeroing nor a cast on the way out.
     dweight = torch.empty_like(weight)
-    _dispatch_rmsnorm_bwd(x, weight, dout, rstd, dx, dweight)
+    _dispatch(
+        _rmsnorm_flydsl_bwd_op,
+        _launch_rmsnorm_bwd,
+        x,
+        weight,
+        dout,
+        rstd,
+        dx,
+        dweight,
+    )
     return dx, dweight
 
 
@@ -799,35 +740,7 @@ def _rmsnorm_flydsl_feature_bwd_op(
     )
 
 
-@_rmsnorm_flydsl_feature_bwd_op.register_fake
-def _rmsnorm_flydsl_feature_bwd_fake(
-    source: torch.Tensor,
-    weight: torch.Tensor,
-    dout: torch.Tensor,
-    dresidual_out: torch.Tensor,
-    rstd: torch.Tensor,
-    dx: torch.Tensor,
-    dresidual: torch.Tensor,
-    dweight: torch.Tensor,
-    dbias: torch.Tensor,
-    weight_offset: float,
-    has_weight: bool,
-    has_bias: bool,
-    compute_dweight: bool,
-    compute_dbias: bool,
-    has_residual: bool,
-    has_dresidual_out: bool,
-    per_head: bool,
-    num_heads: int,
-) -> None:
-    return None
-
-
-def _dispatch_rmsnorm_feature_bwd(*args, **kwargs) -> None:
-    if torch.compiler.is_compiling():
-        _rmsnorm_flydsl_feature_bwd_op(*args, **kwargs)
-    else:
-        _launch_rmsnorm_feature_bwd(*args, **kwargs)
+_rmsnorm_flydsl_feature_bwd_op.register_fake(_noop_fake)
 
 
 class _RMSNormFunction(torch.autograd.Function):
@@ -898,7 +811,9 @@ class _RMSNormFeatureFunction(torch.autograd.Function):
             device=x.device,
             dtype=torch.float32,
         )
-        _dispatch_rmsnorm_feature_fwd(
+        _dispatch(
+            _rmsnorm_flydsl_feature_fwd_op,
+            _launch_rmsnorm_feature_fwd,
             x,
             weight,
             bias,
@@ -966,7 +881,9 @@ class _RMSNormFeatureFunction(torch.autograd.Function):
             device=source.device,
             dtype=torch.float32,
         )
-        _dispatch_rmsnorm_feature_bwd(
+        _dispatch(
+            _rmsnorm_flydsl_feature_bwd_op,
+            _launch_rmsnorm_feature_bwd,
             source,
             weight,
             dout,

@@ -6,16 +6,16 @@
 
 """Host and device helpers shared by the plain RMSNorm kernels."""
 
+import math
 import threading
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import const_expr
+from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.typing import full
 from flydsl.runtime.device import is_rdna_arch
 
 from .rmsnorm_config import ACCESS_BITS, WAVE_SIZE
-
 
 EPS = 1e-6
 BLOCK_THREADS = 256
@@ -164,6 +164,16 @@ def make_reduction_storage(red_slots: int):
     return SharedStorage
 
 
+def shuffle_reduce_add(value, lanes: int, shuffle_width, fast_math):
+    """Add ``value`` across a compile-time-sized lane group."""
+    result = value
+    for shift_exp in range_constexpr(int(math.log2(lanes))):
+        offset = lanes // (2 << shift_exp)
+        peer = result.shuffle_xor(offset, shuffle_width)
+        result = result.addf(peer, fastmath=fast_math)
+    return result
+
+
 def load_scalar(copy_atom, elem_dtype, divided_tensor, index):
     view = fx.slice(divided_tensor, (None, index))
     register = fx.make_rmem_tensor(1, elem_dtype)
@@ -282,6 +292,13 @@ def to_elem_vec(dtype_str: str, elem_dtype, use_hw_cvt_bf16: bool, value, vec_wi
     if const_expr(dtype_str == "f32"):
         return value
     return value.to(elem_dtype)
+
+
+def to_store_dtype(dtype_str: str, elem_dtype, use_hw_cvt_bf16: bool, value, vecsize: int):
+    """Narrow an fp32 value while preserving software BF16 vector packing."""
+    if const_expr(vecsize > 1):
+        return to_elem_vec(dtype_str, elem_dtype, use_hw_cvt_bf16, value, vecsize)
+    return to_elem_scalar(dtype_str, elem_dtype, value)
 
 
 def resolve_rmsnorm_weight_dtype(

@@ -6,8 +6,6 @@
 
 """Optimized plain and feature-complete RMSNorm forward builders."""
 
-import math
-
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
@@ -29,11 +27,13 @@ from .rmsnorm_common import (
     resolve_rmsnorm_weight_dtype,
     row_buffer,
     row_head_buffer,
+    shuffle_reduce_add,
     store_dtype_vec,
     store_scalar,
     store_vec,
     to_elem_scalar,
     to_elem_vec,
+    to_store_dtype,
     vector_access_plan,
 )
 from .rmsnorm_config import (
@@ -101,12 +101,7 @@ def build_rmsnorm_module(
             rstd_copy_atom = buffer_copy_atom(32, 32)
 
         def wave_reduce_add(value):
-            result = value
-            for shift_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                offset = WARP_SIZE // (2 << shift_exp)
-                peer = result.shuffle_xor(offset, WARP_SIZE)
-                result = result.addf(peer, fastmath=fast_math)
-            return result
+            return shuffle_reduce_add(value, WARP_SIZE, WARP_SIZE, fast_math)
 
         # Inline rather than shared: FlyDSL rewrites the AST of the decorated
         # kernel only, so a helper holding `if lane == 0` would be traced as a
@@ -336,7 +331,6 @@ def _build_rmsnorm_small_n_module(
     vecsize = config.vecsize
     num_vecs = config.num_vecs
     last_tile = config.num_tiles - 1
-    reduce_steps = int(math.log2(threads_per_row))
     _, weight_per_access = vector_access_plan(vecsize, weight_elem_bits)
 
     @flyc.kernel(known_block_size=[block_threads, 1, 1])
@@ -381,20 +375,6 @@ def _build_rmsnorm_small_n_module(
                 weight_elem_bits,
             )
 
-            def group_reduce_add(value):
-                result = value
-                for shift_exp in range_constexpr(reduce_steps):
-                    offset = threads_per_row // (2 << shift_exp)
-                    peer = result.shuffle_xor(offset, fx.Int32(threads_per_row))
-                    result = result.addf(peer, fastmath=fast_math)
-                return result
-
-            def to_store_dtype(value):
-                """The software BF16 rounding packs lane pairs, so it needs a vector."""
-                if const_expr(vecsize > 1):
-                    return to_elem_vec(dtype_str, elem_dtype, use_hw_cvt_bf16, value, vecsize)
-                return to_elem_scalar(dtype_str, elem_dtype, value)
-
             # The row is held in registers between the two passes, so it is read
             # from memory once.
             thread_sumsq = fx.Float32(0.0)
@@ -415,7 +395,14 @@ def _build_rmsnorm_small_n_module(
                 thread_sumsq = thread_sumsq + contribution
 
             rrms = fmath.rsqrt(
-                group_reduce_add(thread_sumsq) / float(n) + eps,
+                shuffle_reduce_add(
+                    thread_sumsq,
+                    threads_per_row,
+                    fx.Int32(threads_per_row),
+                    fast_math,
+                )
+                / float(n)
+                + eps,
                 fastmath=fast_math,
             )
             if const_expr(store_rstd):
@@ -445,7 +432,13 @@ def _build_rmsnorm_small_n_module(
                     vecsize,
                 )
                 values = row_values[tile_i].to(fx.Float32)
-                result = to_store_dtype(values * rrms * weights)
+                result = to_store_dtype(
+                    dtype_str,
+                    elem_dtype,
+                    use_hw_cvt_bf16,
+                    values * rrms * weights,
+                    vecsize,
+                )
                 if const_expr(partial):
                     if in_row:
                         store_vec(copy_atom, vecsize, elem_dtype, result, output_div, index)
@@ -560,7 +553,6 @@ def build_rmsnorm_feature_module(
     # has to stitch together through LDS. A group wider than a wavefront only
     # happens when the row has a block to itself.
     reduce_lanes = min(threads_per_row, WARP_SIZE)
-    reduce_steps = int(math.log2(reduce_lanes))
     red_slots = max(1, threads_per_row // WARP_SIZE)
     shared_storage = make_reduction_storage(red_slots)
 
@@ -615,12 +607,12 @@ def build_rmsnorm_feature_module(
 
         def group_reduce_add(value):
             """Sum across the lanes covering one row, within a wavefront."""
-            result = value
-            for shift_exp in range_constexpr(reduce_steps):
-                offset = reduce_lanes // (2 << shift_exp)
-                peer = result.shuffle_xor(offset, fx.Int32(reduce_lanes))
-                result = result.addf(peer, fastmath=fast_math)
-            return result
+            return shuffle_reduce_add(
+                value,
+                reduce_lanes,
+                fx.Int32(reduce_lanes),
+                fast_math,
+            )
 
         def row_reduce_add(value):
             if const_expr(red_slots == 1):
@@ -663,16 +655,6 @@ def build_rmsnorm_feature_module(
                 else fx.rocdl.make_buffer_tensor(tensor)
             )
             return fx.logical_divide(buffer, fx.make_layout(per_access, 1))
-
-        def to_store_dtype(dtype_str, elem_dtype, value):
-            """Narrow an fp32 vector to a store dtype.
-
-            The software BF16 rounding packs pairs of lanes, so it only
-            applies to a real vector; a one-wide vector converts directly.
-            """
-            if const_expr(vecsize > 1):
-                return to_elem_vec(dtype_str, elem_dtype, use_hw_cvt_bf16, value, vecsize)
-            return to_elem_scalar(dtype_str, elem_dtype, value)
 
         input_div = row_div(input_tensor, input_bits, input_per_access)
         output_div = row_div(output_tensor, output_bits, output_per_access)
@@ -738,7 +720,13 @@ def build_rmsnorm_feature_module(
                     vecsize,
                 )
             if const_expr(store_residual):
-                stored = to_store_dtype(residual_out_dtype_str, residual_out_dtype, value)
+                stored = to_store_dtype(
+                    residual_out_dtype_str,
+                    residual_out_dtype,
+                    use_hw_cvt_bf16,
+                    value,
+                    vecsize,
+                )
                 if const_expr(partial):
                     if in_row:
                         store_dtype_vec(
@@ -806,7 +794,13 @@ def build_rmsnorm_feature_module(
                     safe_index,
                     vecsize,
                 )
-            output_value = to_store_dtype(output_dtype_str, output_dtype, result)
+            output_value = to_store_dtype(
+                output_dtype_str,
+                output_dtype,
+                use_hw_cvt_bf16,
+                result,
+                vecsize,
+            )
             if const_expr(partial):
                 if in_row:
                     store_dtype_vec(
