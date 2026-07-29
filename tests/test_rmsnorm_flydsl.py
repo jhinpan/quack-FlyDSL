@@ -215,24 +215,19 @@ def test_public_contract_rejects_mixed_devices():
 
 
 @pytest.mark.parametrize(
-    ("expected_path", "shape", "dtype", "weight_dtype"),
+    ("shape", "dtype", "weight_dtype"),
     [
-        ("atomic", (17, 513), torch.float16, torch.float16),
-        ("atomic", (5, 257), torch.float32, torch.float32),
-        ("two_stage", (512, 4096), torch.bfloat16, torch.float32),
-        ("two_stage", (512, 3001), torch.float16, torch.float16),
+        ((17, 513), torch.float16, torch.float16),
+        ((5, 257), torch.float32, torch.float32),
+        ((512, 4096), torch.bfloat16, torch.float32),
+        ((512, 3001), torch.float16, torch.float16),
         # Staged backward with 128-bit FP32 column I/O.
-        ("two_stage", (512, 2048), torch.float32, torch.float32),
+        ((512, 2048), torch.float32, torch.float32),
         # Staged backward whose column count is not a whole number of blocks.
-        ("two_stage", (512, 3000), torch.bfloat16, torch.float32),
+        ((512, 3000), torch.bfloat16, torch.float32),
     ],
 )
-def test_backward_paths_match_fp32_reference(
-    expected_path,
-    shape,
-    dtype,
-    weight_dtype,
-):
+def test_backward_matches_fp32_reference(shape, dtype, weight_dtype):
     torch.manual_seed(2)
     x = (torch.randn(shape, device="cuda", dtype=dtype) * 0.5).requires_grad_()
     weight = (
@@ -240,22 +235,65 @@ def test_backward_paths_match_fp32_reference(
     ).requires_grad_()
     dout = torch.randn(shape, device="cuda", dtype=dtype) * 0.1
     eps = 1e-6
-    dtype_str = rmsnorm_flydsl_impl._dtype_to_str(dtype)
-    path, _ = rmsnorm_flydsl_impl._select_rmsnorm_bwd_config(
-        shape[0],
-        shape[1],
-        dtype_str,
-        x.device,
+    dx, dweight = rmsnorm_flydsl_impl._rmsnorm_bwd(
+        x,
+        weight,
+        dout,
+        torch.rsqrt(x.float().square().mean(dim=-1) + eps),
     )
-    assert path == expected_path
+    _, dx_ref, dweight_ref = _reference_with_grads(x, weight, dout, eps)
 
-    actual = rmsnorm(x, weight, eps=eps)
-    actual.backward(dout)
-    out_ref, dx_ref, dweight_ref = _reference_with_grads(x, weight, dout, eps)
+    _assert_grad_close(dx, dx_ref)
+    _assert_grad_close(dweight, dweight_ref)
 
-    _assert_close(actual, out_ref)
-    _assert_grad_close(x.grad, dx_ref)
-    _assert_grad_close(weight.grad, dweight_ref)
+
+@pytest.mark.parametrize(
+    ("shape", "dtype", "weight_dtype"),
+    [
+        ((17, 513), torch.float16, torch.float16),
+        ((512, 2048), torch.bfloat16, torch.float32),
+        ((512, 3001), torch.float32, torch.float32),
+    ],
+)
+def test_default_backward_matches_reference(shape, dtype, weight_dtype):
+    torch.manual_seed(21)
+    x = torch.randn(shape, device="cuda", dtype=dtype) * 0.5
+    weight = 1.0 + torch.randn(shape[-1], device="cuda", dtype=weight_dtype) * 0.1
+    dout = torch.randn(shape, device="cuda", dtype=dtype) * 0.1
+    rstd = torch.rsqrt(x.float().square().mean(dim=-1) + 1e-6)
+
+    dx, dweight = rmsnorm_flydsl_impl._rmsnorm_bwd(x, weight, dout, rstd)
+    _, dx_ref, dweight_ref = _reference_with_grads(x, weight, dout, 1e-6)
+
+    _assert_grad_close(dx, dx_ref)
+    _assert_grad_close(dweight, dweight_ref)
+
+
+def test_backward_empty_batch():
+    x = torch.empty((0, 257), device="cuda", dtype=torch.float16)
+    weight = torch.randn(257, device="cuda", dtype=torch.float32)
+    dout = torch.empty_like(x)
+    rstd = torch.empty(0, device="cuda", dtype=torch.float32)
+
+    dx, dweight = rmsnorm_flydsl_impl._rmsnorm_bwd(x, weight, dout, rstd)
+
+    assert dx.shape == x.shape
+    torch.testing.assert_close(dweight, torch.zeros_like(weight))
+
+
+def test_backward_fullgraph():
+    torch.manual_seed(22)
+    x = torch.randn((64, 257), device="cuda", dtype=torch.float16)
+    weight = torch.randn(257, device="cuda", dtype=torch.float32)
+    dout = torch.randn_like(x)
+    rstd = torch.rsqrt(x.float().square().mean(dim=-1) + 1e-6)
+
+    expected = rmsnorm_flydsl_impl._rmsnorm_bwd(x, weight, dout, rstd)
+    compiled = torch.compile(rmsnorm_flydsl_impl._rmsnorm_bwd, fullgraph=True)
+    actual = compiled(x, weight, dout, rstd)
+
+    _assert_grad_close(actual[0], expected[0])
+    _assert_grad_close(actual[1], expected[1])
 
 
 @pytest.mark.parametrize(
@@ -767,8 +805,7 @@ def test_custom_ops_are_unique_mutation_only_and_fake_safe():
     assert "Tensor(a2!) out" in str(fwd._schema)
     assert "Tensor(a3!) rstd" in str(fwd._schema)
     assert "Tensor(a4!) dx" in str(bwd._schema)
-    assert "Tensor(a5!) dweight" in str(bwd._schema)
-    assert "Tensor(a6!) partial" in str(bwd._schema)
+    assert "Tensor(a5!) partial" in str(bwd._schema)
     assert "Tensor(a4!) out" in str(feature_fwd._schema)
     assert "Tensor(a5!) residual_out" in str(feature_fwd._schema)
     assert "Tensor(a8!) dbias" in str(feature_bwd._schema)
@@ -786,7 +823,7 @@ def test_custom_ops_are_unique_mutation_only_and_fake_safe():
         dx = torch.empty_like(x)
         dweight = torch.empty_like(weight)
         partial = torch.empty(0, device="cuda", dtype=torch.float32)
-        bwd(x, weight, dout, rstd, dx, dweight, partial, 0)
+        bwd(x, weight, dout, rstd, dx, partial, 1)
 
         bias = torch.empty_like(weight)
         residual = torch.empty_like(x)
@@ -906,7 +943,7 @@ def test_fullgraph_forward_backward_cold_and_warm_cache():
     assert bwd_launcher._cf is bwd_compiled
 
 
-def test_fullgraph_two_stage_backward():
+def test_fullgraph_persistent_backward():
     torch._dynamo.reset()
     _clear_caches()
 
@@ -931,7 +968,7 @@ def test_fullgraph_two_stage_backward():
     _assert_close(actual, expected)
     _assert_grad_close(x.grad, dx_expected)
     _assert_grad_close(weight.grad, dw_expected)
-    assert {key[0] for key in rmsnorm_flydsl_impl._BWD_CACHE} == {"two_stage"}
+    assert len(rmsnorm_flydsl_impl._BWD_CACHE) == 1
 
 
 def test_forward_cache_identity_is_shape_and_dtype_only():
@@ -1045,7 +1082,7 @@ def test_same_architecture_eight_device_caches_are_device_local():
 
     assert len(seen_arches) == 1
     assert {key[0] for key in rmsnorm_flydsl_impl._FWD_CACHE} == set(range(8))
-    assert {key[1] for key in rmsnorm_flydsl_impl._BWD_CACHE} == set(range(8))
+    assert {key[0] for key in rmsnorm_flydsl_impl._BWD_CACHE} == set(range(8))
 
 
 def test_compile_target_must_match_the_device(monkeypatch):
@@ -1277,12 +1314,7 @@ def test_operands_larger_than_one_buffer_descriptor():
     _assert_grad_close(x.grad[tail], x_tail.grad.to(x.dtype))
 
 
-def test_deterministic_mode_avoids_the_atomic_weight_reduction():
-    """Unordered fp32 atomics make dweight vary run to run.
-
-    Without this, whether a backward is reproducible depends on the batch
-    size, because the atomic path is only chosen below 512 rows.
-    """
+def test_default_backward_is_deterministic():
     torch.manual_seed(4)
     x = torch.randn((64, 512), device="cuda", dtype=torch.bfloat16)
     dout = torch.randn_like(x)
@@ -1297,7 +1329,7 @@ def test_deterministic_mode_avoids_the_atomic_weight_reduction():
     torch.use_deterministic_algorithms(True)
     try:
         grads = [weight_grad() for _ in range(6)]
-        assert {key[0] for key in rmsnorm_flydsl_impl._BWD_CACHE} == {"two_stage"}
+        assert len(rmsnorm_flydsl_impl._BWD_CACHE) == 1
     finally:
         torch.use_deterministic_algorithms(False)
 
@@ -1354,7 +1386,7 @@ def test_the_staged_backward_does_not_recompile_per_batch_size():
     finally:
         torch.use_deterministic_algorithms(False)
 
-    programs = {key[5] for key in rmsnorm_flydsl_impl._BWD_CACHE}
+    programs = {key[4] for key in rmsnorm_flydsl_impl._BWD_CACHE}
     assert programs, "expected at least one staged backward build"
     assert all(p & (p - 1) == 0 for p in programs), (
         f"num_programs must be a power of two: {programs}"
@@ -1362,7 +1394,7 @@ def test_the_staged_backward_does_not_recompile_per_batch_size():
     assert len(rmsnorm_flydsl_impl._BWD_CACHE) < len(row_counts)
 
 
-def test_small_batches_still_use_the_atomic_backward_by_default():
+def test_small_batches_use_persistent_backward_by_default():
     _clear_caches()
     torch.manual_seed(5)
     x = torch.randn((64, 512), device="cuda", dtype=torch.bfloat16, requires_grad=True)
@@ -1372,7 +1404,7 @@ def test_small_batches_still_use_the_atomic_backward_by_default():
     out = rmsnorm(x, weight)
     out.backward(dout)
 
-    assert {key[0] for key in rmsnorm_flydsl_impl._BWD_CACHE} == {"atomic"}
+    assert len(rmsnorm_flydsl_impl._BWD_CACHE) == 1
     _, dx_expected, dweight_expected = _reference_with_grads(x, weight, dout, 1e-6)
     _assert_grad_close(x.grad, dx_expected)
     _assert_grad_close(weight.grad, dweight_expected)
