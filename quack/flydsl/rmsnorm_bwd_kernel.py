@@ -14,8 +14,6 @@ cost two torch launches to save one FlyDSL launch. See
 AI/flydsl_rmsnorm_notes.md.
 """
 
-import math
-
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
@@ -37,15 +35,15 @@ from .rmsnorm_common import (
     resolve_rmsnorm_weight_dtype,
     row_buffer,
     row_head_buffer,
+    shuffle_reduce_add,
     store_dtype_vec,
     store_scalar,
     store_vec,
-    to_elem_scalar,
     to_elem_vec,
+    to_store_dtype,
     vector_access_plan,
 )
 from .rmsnorm_config import RmsNormRowConfig
-
 
 DWEIGHT_REDUCE_COLS = 64
 DWEIGHT_REDUCE_ROW_LANES = 4
@@ -115,12 +113,7 @@ def build_rmsnorm_bwd_two_stage_module(
         s_red = storage.s_red.view(fx.make_layout(red_slots, 1))
 
         def wave_reduce_add(value):
-            result = value
-            for shift_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                offset = WARP_SIZE // (2 << shift_exp)
-                peer = result.shuffle_xor(offset, WARP_SIZE)
-                result = result.addf(peer, fastmath=fast_math)
-            return result
+            return shuffle_reduce_add(value, WARP_SIZE, WARP_SIZE, fast_math)
 
         # Inline rather than shared: FlyDSL rewrites the AST of the decorated
         # kernel only, so a helper holding `if lane == 0` would be traced as a
@@ -535,12 +528,7 @@ def build_rmsnorm_feature_bwd_two_stage_module(
         reduction = storage.s_red.view(fx.make_layout(red_slots, 1))
 
         def wave_reduce_add(value):
-            result = value
-            for shift_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                offset = WARP_SIZE // (2 << shift_exp)
-                peer = result.shuffle_xor(offset, WARP_SIZE)
-                result = result.addf(peer, fastmath=fast_math)
-            return result
+            return shuffle_reduce_add(value, WARP_SIZE, WARP_SIZE, fast_math)
 
         def block_reduce_add(value):
             if const_expr(red_slots == 1):
@@ -571,11 +559,6 @@ def build_rmsnorm_feature_bwd_two_stage_module(
                 else row_buffer(tensor, row_index, elem_bits, n)
             )
             return fx.logical_divide(buffer, fx.make_layout(per_access, 1))
-
-        def to_store_dtype(dtype_str, elem_dtype, value):
-            if const_expr(vecsize > 1):
-                return to_elem_vec(dtype_str, elem_dtype, use_hw_cvt_bf16, value, vecsize)
-            return to_elem_scalar(dtype_str, elem_dtype, value)
 
         rstd_buffer = fx.rocdl.make_buffer_tensor(rstd_tensor)
         rstd_div = fx.logical_divide(rstd_buffer, fx.make_layout(1, 1))
@@ -710,7 +693,13 @@ def build_rmsnorm_feature_bwd_two_stage_module(
                         dx_copy,
                         dx_dtype,
                         dx_bits,
-                        to_store_dtype(dx_dtype_str, dx_dtype, total),
+                        to_store_dtype(
+                            dx_dtype_str,
+                            dx_dtype,
+                            use_hw_cvt_bf16,
+                            total,
+                            vecsize,
+                        ),
                         dx_div,
                         index,
                         vecsize,
@@ -720,7 +709,13 @@ def build_rmsnorm_feature_bwd_two_stage_module(
                             dresidual_copy,
                             dresidual_dtype,
                             dresidual_bits,
-                            to_store_dtype(dresidual_dtype_str, dresidual_dtype, total),
+                            to_store_dtype(
+                                dresidual_dtype_str,
+                                dresidual_dtype,
+                                use_hw_cvt_bf16,
+                                total,
+                                vecsize,
+                            ),
                             dresidual_div,
                             index,
                             vecsize,
