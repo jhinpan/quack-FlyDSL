@@ -12,9 +12,7 @@ import numbers
 import torch
 
 from quack.flydsl.rmsnorm_bwd_kernel import (
-    build_rmsnorm_feature_bwd_atomic_module,
     build_rmsnorm_feature_bwd_two_stage_module,
-    build_rmsnorm_bwd_module,
     build_rmsnorm_bwd_two_stage_module,
     TWO_STAGE_MAX_NUM_THREADS,
     rmsnorm_bwd_two_stage_config,
@@ -38,7 +36,6 @@ _FWD_CACHE: dict[tuple, object] = {}
 _BWD_CACHE: dict[tuple, object] = {}
 _BWD_CU_COUNT_CACHE: dict[torch.device, int] = {}
 _DEVICE_ARCH_CACHE: dict[int, str] = {}
-_BWD_TWO_STAGE_MIN_ROWS = 512
 
 
 def _dtype_to_str(dtype: torch.dtype) -> str:
@@ -205,22 +202,20 @@ def _build_cached(cache: dict, key: tuple, device: torch.device, build):
     return launcher
 
 
-def _select_rmsnorm_bwd_config(
+def _select_rmsnorm_bwd_programs(
     m: int,
     n: int,
     dtype_str: str,
     device: torch.device,
-) -> tuple[str, int | None]:
-    """Pick the weight-gradient reduction.
+) -> int:
+    """Size the persistent grid for the staged weight-gradient reduction.
 
-    The atomic path accumulates dweight with unordered fp32 atomics, so it is
-    not run-to-run reproducible. The staged path uses a fixed reduction tree,
-    so it is what deterministic mode gets, at any row count.
+    There is one reduction path at every row count. A small-row atomic variant
+    existed and was removed: fp32 atomics need a zeroed accumulator and a cast
+    back to the weight dtype, which is two torch launches to save one FlyDSL
+    launch, and its scalar kernel lost on device time as well. See
+    AI/flydsl_rmsnorm_notes.md.
     """
-    deterministic = torch.are_deterministic_algorithms_enabled()
-    if not (deterministic or m >= _BWD_TWO_STAGE_MIN_ROWS):
-        return "atomic", None
-
     num_cus = _BWD_CU_COUNT_CACHE.get(device)
     if num_cus is None:
         num_cus = torch.cuda.get_device_properties(device).multi_processor_count
@@ -239,7 +234,7 @@ def _select_rmsnorm_bwd_config(
     # compile and retain a separate kernel for every batch size. Rounding to a
     # power of two bounds that at one entry per octave. A block with no row of
     # its own just contributes a zeroed partial.
-    return "two_stage", min(next_power_of_two(m), num_programs)
+    return min(next_power_of_two(m), num_programs)
 
 
 def _launch_rmsnorm_fwd(
@@ -540,17 +535,21 @@ def _launch_rmsnorm_bwd(
     rstd: torch.Tensor,
     dx: torch.Tensor,
     dweight: torch.Tensor,
-    partial: torch.Tensor,
-    num_programs: int,
 ) -> None:
     m, n = x.shape
     dtype_str = _dtype_to_str(x.dtype)
     weight_dtype_str = _dtype_to_str(weight.dtype)
-    path = "two_stage" if num_programs > 0 else "atomic"
+    # Resolved here rather than by the caller, the way the feature backward
+    # already does it. num_programs comes from a row config that computes a gcd
+    # over n, which Dynamo cannot trace on a symbolic shape, and the partials
+    # are scratch that nothing outside this call reads. Both belong behind the
+    # opaque op, not in the graph.
+    num_programs = _select_rmsnorm_bwd_programs(m, n, dtype_str, x.device)
+    partial = torch.empty((num_programs * n,), device=x.device, dtype=torch.float32)
 
     with torch.cuda.device(x.device):
         key = (
-            path,
+            "plain",
             x.device.index,
             n,
             dtype_str,
@@ -558,43 +557,15 @@ def _launch_rmsnorm_bwd(
             num_programs,
         )
         launcher = _BWD_CACHE.get(key)
-        stream = _current_raw_stream(x.device)
-        if path == "two_stage":
-            if launcher is None:
-                launcher = _build_cached(
-                    _BWD_CACHE,
-                    key,
-                    x.device,
-                    lambda arch: build_rmsnorm_bwd_two_stage_module(
-                        n,
-                        dtype_str,
-                        num_programs,
-                        weight_dtype_str=weight_dtype_str,
-                        arch=arch,
-                    ),
-                )
-            run_compiled(
-                launcher,
-                x,
-                weight,
-                dout,
-                rstd,
-                dx,
-                dweight,
-                partial,
-                m,
-                stream,
-            )
-            return
-
         if launcher is None:
             launcher = _build_cached(
                 _BWD_CACHE,
                 key,
                 x.device,
-                lambda arch: build_rmsnorm_bwd_module(
+                lambda arch: build_rmsnorm_bwd_two_stage_module(
                     n,
                     dtype_str,
+                    num_programs,
                     weight_dtype_str=weight_dtype_str,
                     arch=arch,
                 ),
@@ -607,18 +578,19 @@ def _launch_rmsnorm_bwd(
             rstd,
             dx,
             dweight,
+            partial,
             m,
-            stream,
+            _current_raw_stream(x.device),
         )
 
 
 @torch.library.custom_op(
     "quack::_rmsnorm_flydsl_bwd",
-    mutates_args=("dx", "dweight", "partial"),
+    mutates_args=("dx", "dweight"),
     device_types="cuda",
     schema=(
         "(Tensor x, Tensor weight, Tensor dout, Tensor rstd, Tensor(a4!) dx, "
-        "Tensor(a5!) dweight, Tensor(a6!) partial, int num_programs) -> ()"
+        "Tensor(a5!) dweight) -> ()"
     ),
 )
 def _rmsnorm_flydsl_bwd_op(
@@ -628,19 +600,8 @@ def _rmsnorm_flydsl_bwd_op(
     rstd: torch.Tensor,
     dx: torch.Tensor,
     dweight: torch.Tensor,
-    partial: torch.Tensor,
-    num_programs: int,
 ) -> None:
-    _launch_rmsnorm_bwd(
-        x,
-        weight,
-        dout,
-        rstd,
-        dx,
-        dweight,
-        partial,
-        num_programs,
-    )
+    _launch_rmsnorm_bwd(x, weight, dout, rstd, dx, dweight)
 
 
 @_rmsnorm_flydsl_bwd_op.register_fake
@@ -651,44 +612,15 @@ def _rmsnorm_flydsl_bwd_fake(
     rstd: torch.Tensor,
     dx: torch.Tensor,
     dweight: torch.Tensor,
-    partial: torch.Tensor,
-    num_programs: int,
 ) -> None:
     return None
 
 
-def _dispatch_rmsnorm_bwd(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    dout: torch.Tensor,
-    rstd: torch.Tensor,
-    dx: torch.Tensor,
-    dweight: torch.Tensor,
-    partial: torch.Tensor,
-    num_programs: int,
-) -> None:
+def _dispatch_rmsnorm_bwd(*args, **kwargs) -> None:
     if torch.compiler.is_compiling():
-        _rmsnorm_flydsl_bwd_op(
-            x,
-            weight,
-            dout,
-            rstd,
-            dx,
-            dweight,
-            partial,
-            num_programs,
-        )
+        _rmsnorm_flydsl_bwd_op(*args, **kwargs)
     else:
-        _launch_rmsnorm_bwd(
-            x,
-            weight,
-            dout,
-            rstd,
-            dx,
-            dweight,
-            partial,
-            num_programs,
-        )
+        _launch_rmsnorm_bwd(*args, **kwargs)
 
 
 def _rmsnorm_bwd(
@@ -697,38 +629,12 @@ def _rmsnorm_bwd(
     dout: torch.Tensor,
     rstd: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    m, n = x.shape
-    dtype_str = _dtype_to_str(x.dtype)
-    path, selected_programs = _select_rmsnorm_bwd_config(
-        m,
-        n,
-        dtype_str,
-        x.device,
-    )
-    num_programs = selected_programs if path == "two_stage" else 0
     dx = torch.empty_like(x)
-    if num_programs:
-        dweight = torch.empty_like(weight)
-        partial = torch.empty(
-            (num_programs * n,),
-            device=x.device,
-            dtype=torch.float32,
-        )
-    else:
-        dweight = torch.zeros((n,), device=x.device, dtype=torch.float32)
-        partial = torch.empty((0,), device=x.device, dtype=torch.float32)
-
-    _dispatch_rmsnorm_bwd(
-        x,
-        weight,
-        dout,
-        rstd,
-        dx,
-        dweight,
-        partial,
-        num_programs,
-    )
-    return dx, dweight.to(weight.dtype)
+    # The reduce kernel writes every element of dweight in the weight's own
+    # dtype, so this needs neither zeroing nor a cast on the way out.
+    dweight = torch.empty_like(weight)
+    _dispatch_rmsnorm_bwd(x, weight, dout, rstd, dx, dweight)
+    return dx, dweight
 
 
 def _launch_rmsnorm_feature_bwd(
@@ -760,21 +666,13 @@ def _launch_rmsnorm_feature_bwd(
     dresidual_out_dtype_str = _dtype_to_str(dresidual_out.dtype)
     weight_dtype_str = _dtype_to_str(weight.dtype)
 
-    path, selected_programs = _select_rmsnorm_bwd_config(
-        m,
-        n,
-        source_dtype_str,
-        source.device,
-    )
-    has_parameter_grads = compute_dweight or compute_dbias
-    num_programs = selected_programs if path == "two_stage" and has_parameter_grads else 0
-    if num_programs and per_head:
+    num_programs = _select_rmsnorm_bwd_programs(m, n, source_dtype_str, source.device)
+    if per_head:
         # The staged grid is num_programs * num_heads, and the workspace has a
         # row per block, so the CU-derived count has to be divided by the head
         # count or a per-head launch oversubscribes and allocates num_heads
         # times the workspace it needs. Each program just walks more rows.
         num_programs = max(1, next_power_of_two(num_programs // num_heads))
-    path = "two_stage" if num_programs else "atomic"
     workspace_rows = num_programs * num_heads * (int(compute_dweight) + int(compute_dbias))
     workspace = torch.empty(
         (workspace_rows, n) if workspace_rows else (1, n),
@@ -783,7 +681,7 @@ def _launch_rmsnorm_feature_bwd(
     )
     with torch.cuda.device(source.device):
         key = (
-            f"feature-{path}",
+            "feature",
             source.device.index,
             n,
             source_dtype_str,
@@ -808,81 +706,42 @@ def _launch_rmsnorm_feature_bwd(
                 _BWD_CACHE,
                 key,
                 source.device,
-                lambda arch: (
-                    build_rmsnorm_feature_bwd_two_stage_module(
-                        n,
-                        source_dtype_str,
-                        dy_dtype_str,
-                        dx_dtype_str,
-                        dresidual_dtype_str,
-                        dresidual_out_dtype_str,
-                        num_programs,
-                        weight_dtype_str=weight_dtype_str,
-                        has_weight=has_weight,
-                        has_bias=has_bias,
-                        compute_dweight=compute_dweight,
-                        compute_dbias=compute_dbias,
-                        has_residual=has_residual,
-                        has_dresidual_out=has_dresidual_out,
-                        per_head=per_head,
-                        num_heads=num_heads,
-                        arch=arch,
-                    )
-                    if path == "two_stage"
-                    else build_rmsnorm_feature_bwd_atomic_module(
-                        n,
-                        source_dtype_str,
-                        dy_dtype_str,
-                        dx_dtype_str,
-                        dresidual_dtype_str,
-                        dresidual_out_dtype_str,
-                        weight_dtype_str=weight_dtype_str,
-                        has_weight=has_weight,
-                        has_bias=has_bias,
-                        compute_dweight=compute_dweight,
-                        compute_dbias=compute_dbias,
-                        has_residual=has_residual,
-                        has_dresidual_out=has_dresidual_out,
-                        per_head=per_head,
-                        num_heads=num_heads,
-                        arch=arch,
-                    )
+                lambda arch: build_rmsnorm_feature_bwd_two_stage_module(
+                    n,
+                    source_dtype_str,
+                    dy_dtype_str,
+                    dx_dtype_str,
+                    dresidual_dtype_str,
+                    dresidual_out_dtype_str,
+                    num_programs,
+                    weight_dtype_str=weight_dtype_str,
+                    has_weight=has_weight,
+                    has_bias=has_bias,
+                    compute_dweight=compute_dweight,
+                    compute_dbias=compute_dbias,
+                    has_residual=has_residual,
+                    has_dresidual_out=has_dresidual_out,
+                    per_head=per_head,
+                    num_heads=num_heads,
+                    arch=arch,
                 ),
             )
-        stream = _current_raw_stream(source.device)
-        if path == "two_stage":
-            run_compiled(
-                launcher,
-                source,
-                weight,
-                dout,
-                dresidual_out,
-                rstd,
-                dx,
-                dresidual,
-                dweight,
-                dbias,
-                workspace,
-                m,
-                weight_offset,
-                stream,
-            )
-        else:
-            run_compiled(
-                launcher,
-                source,
-                weight,
-                dout,
-                dresidual_out,
-                rstd,
-                dx,
-                dresidual,
-                dweight,
-                dbias,
-                m,
-                weight_offset,
-                stream,
-            )
+        run_compiled(
+            launcher,
+            source,
+            weight,
+            dout,
+            dresidual_out,
+            rstd,
+            dx,
+            dresidual,
+            dweight,
+            dbias,
+            workspace,
+            m,
+            weight_offset,
+            _current_raw_stream(source.device),
+        )
 
 
 @torch.library.custom_op(
@@ -1094,12 +953,15 @@ class _RMSNormFeatureFunction(torch.autograd.Function):
             else torch.empty(0, device=source.device, dtype=ctx.residual_dtype)
         )
         parameter_shape = (ctx.num_heads, source.shape[-1]) if ctx.per_head else (source.shape[-1],)
-        dweight_f32 = torch.zeros(
+        # The parameter reduce kernel writes every element it is asked for, so
+        # these do not need zeroing; a torch.zeros here was a memset launch per
+        # call, and one for the unused placeholder as well.
+        dweight_f32 = torch.empty(
             parameter_shape if ctx.weight_needs_grad else (1,),
             device=source.device,
             dtype=torch.float32,
         )
-        dbias_f32 = torch.zeros(
+        dbias_f32 = torch.empty(
             parameter_shape if ctx.bias_needs_grad else (1,),
             device=source.device,
             dtype=torch.float32,

@@ -4,7 +4,15 @@
 # Adapted for Quack from ROCm/FlyDSL commit
 # ddaa507f56aa3fe9c08ebe6161a717b755540248.
 
-"""Plain and feature-complete RMSNorm backward kernel builders."""
+"""Plain and feature-complete RMSNorm backward kernel builders.
+
+Both are staged: a persistent kernel writes one partial parameter gradient per
+block, then a second kernel reduces the partials. There is no atomic variant.
+One existed for small row counts and was removed after measurement -- fp32
+atomics force a zeroed accumulator and a cast back to the weight dtype, which
+cost two torch launches to save one FlyDSL launch. See
+AI/flydsl_rmsnorm_notes.md.
+"""
 
 import math
 
@@ -17,7 +25,6 @@ from flydsl.runtime.device import get_rocm_arch
 from .rmsnorm_common import (
     BLOCK_THREADS,
     WARP_SIZE,
-    atomic_add,
     buffer_copy_atom,
     dtype_to_elem_bits,
     dtype_to_elem_type,
@@ -56,171 +63,6 @@ def rmsnorm_bwd_two_stage_config(n: int, dtype_str: str) -> RmsNormRowConfig:
         dtype_to_elem_bits(dtype_str),
         TWO_STAGE_MAX_NUM_THREADS,
     )
-
-
-def build_rmsnorm_bwd_module(
-    n: int,
-    dtype_str: str,
-    weight_dtype_str: str | None = None,
-    arch: str | None = None,
-):
-    """Build the one-block-per-row backward with fp32 weight atomics."""
-    weight_dtype_str = resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
-    require_wave64(get_rocm_arch() if arch is None else arch)
-    red_slots = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
-    elem_bits = dtype_to_elem_bits(dtype_str)
-    weight_elem_bits = dtype_to_elem_bits(weight_dtype_str)
-    shared_storage = make_reduction_storage(red_slots)
-
-    @flyc.kernel
-    def rmsnorm_bwd_kernel(
-        input_tensor: fx.Tensor,
-        gamma: fx.Tensor,
-        dy: fx.Tensor,
-        rstd_tensor: fx.Tensor,
-        dx: fx.Tensor,
-        dweight: fx.Tensor,
-    ):
-        row = fx.block_idx.x
-        tid = fx.thread_idx.x
-        elem_dtype = dtype_to_elem_type(dtype_str)
-        weight_elem_dtype = dtype_to_elem_type(weight_dtype_str)
-        fast_math = arith.FastMathFlags.fast
-        zero = fx.Float32(0.0)
-
-        storage = fx.SharedAllocator().allocate(shared_storage).peek()
-        s_red = storage.s_red.view(fx.make_layout(red_slots, 1))
-
-        def wave_reduce_add(value):
-            result = value
-            for shift_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                offset = WARP_SIZE // (2 << shift_exp)
-                peer = result.shuffle_xor(offset, WARP_SIZE)
-                result = result.addf(peer, fastmath=fast_math)
-            return result
-
-        # Inline rather than shared: FlyDSL rewrites the AST of the decorated
-        # kernel only, so a helper holding `if lane == 0` would be traced as a
-        # plain Python conditional and fail.
-        def block_reduce_add(value):
-            if const_expr(red_slots == 1):
-                return wave_reduce_add(value)
-            lane = tid % WARP_SIZE
-            wave = tid // WARP_SIZE
-            reduced = wave_reduce_add(value)
-            if lane == 0:
-                fx.memref_store(reduced, s_red, wave)
-            gpu.barrier()
-            if wave == 0:
-                in_range = lane < red_slots
-                safe_lane = in_range.select(lane, 0)
-                partial = in_range.select(fx.memref_load(s_red, safe_lane), fx.Float32(0.0))
-                partial = wave_reduce_add(partial)
-                if lane == 0:
-                    fx.memref_store(partial, s_red, 0)
-            gpu.barrier()
-            return fx.memref_load(s_red, 0)
-
-        gamma_buffer = fx.rocdl.make_buffer_tensor(gamma)
-        rstd_buffer = fx.rocdl.make_buffer_tensor(rstd_tensor)
-
-        input_div = fx.logical_divide(
-            row_buffer(input_tensor, row, elem_bits, n),
-            fx.make_layout(1, 1),
-        )
-        gamma_div = fx.logical_divide(gamma_buffer, fx.make_layout(1, 1))
-        dy_div = fx.logical_divide(
-            row_buffer(dy, row, elem_bits, n),
-            fx.make_layout(1, 1),
-        )
-        rstd_div = fx.logical_divide(rstd_buffer, fx.make_layout(1, 1))
-        dx_div = fx.logical_divide(
-            row_buffer(dx, row, elem_bits, n),
-            fx.make_layout(1, 1),
-        )
-
-        copy_atom = buffer_copy_atom(elem_bits, elem_bits)
-        gamma_copy_atom = buffer_copy_atom(weight_elem_bits, weight_elem_bits)
-        f32_copy_atom = buffer_copy_atom(32, 32)
-        rstd = load_scalar(f32_copy_atom, fx.Float32, rstd_div, row)
-
-        thread_acc = zero
-        for base in range_constexpr(0, n, BLOCK_THREADS):
-            index = tid + base
-            is_valid = index < n
-            safe_index = is_valid.select(index, 0)
-            x_elem = load_scalar(copy_atom, elem_dtype, input_div, safe_index)
-            dy_elem = load_scalar(copy_atom, elem_dtype, dy_div, safe_index)
-            gamma_elem = load_scalar(
-                gamma_copy_atom,
-                weight_elem_dtype,
-                gamma_div,
-                safe_index,
-            )
-            x_value = x_elem if dtype_str == "f32" else x_elem.to(fx.Float32)
-            dy_value = dy_elem if dtype_str == "f32" else dy_elem.to(fx.Float32)
-            gamma_value = gamma_elem if weight_dtype_str == "f32" else gamma_elem.to(fx.Float32)
-            x_hat = x_value * rstd
-            thread_acc = thread_acc + is_valid.select(
-                x_hat * dy_value * gamma_value,
-                zero,
-            )
-
-        correction = block_reduce_add(thread_acc) / float(n)
-        for base in range_constexpr(0, n, BLOCK_THREADS):
-            index = tid + base
-            if index < n:
-                x_elem = load_scalar(copy_atom, elem_dtype, input_div, index)
-                dy_elem = load_scalar(copy_atom, elem_dtype, dy_div, index)
-                gamma_elem = load_scalar(
-                    gamma_copy_atom,
-                    weight_elem_dtype,
-                    gamma_div,
-                    index,
-                )
-                x_value = x_elem if dtype_str == "f32" else x_elem.to(fx.Float32)
-                dy_value = dy_elem if dtype_str == "f32" else dy_elem.to(fx.Float32)
-                gamma_value = gamma_elem if weight_dtype_str == "f32" else gamma_elem.to(fx.Float32)
-                x_hat = x_value * rstd
-                weighted_dy = dy_value * gamma_value
-                dx_value = (weighted_dy - x_hat * correction) * rstd
-                dx_elem = dx_value if dtype_str == "f32" else dx_value.to(elem_dtype)
-                store_scalar(
-                    copy_atom,
-                    elem_dtype,
-                    elem_dtype,
-                    dx_div,
-                    index,
-                    dx_elem,
-                )
-                atomic_add(dweight, index, dy_value * x_hat, dtype_bytes=4)
-
-    @flyc.jit
-    def launch_rmsnorm_bwd(
-        input_tensor: fx.Tensor,
-        gamma: fx.Tensor,
-        dy: fx.Tensor,
-        rstd_tensor: fx.Tensor,
-        dx: fx.Tensor,
-        dweight: fx.Tensor,
-        m: fx.Int32,
-        stream: fx.Stream = fx.Stream(None),
-    ):
-        launcher = rmsnorm_bwd_kernel(
-            input_tensor,
-            gamma,
-            dy,
-            rstd_tensor,
-            dx,
-            dweight,
-        )
-        launcher.launch(
-            grid=(m, 1, 1),
-            block=(BLOCK_THREADS, 1, 1),
-            stream=stream,
-        )
-
-    return launch_rmsnorm_bwd
 
 
 def build_rmsnorm_bwd_two_stage_module(
@@ -609,330 +451,6 @@ def build_rmsnorm_bwd_two_stage_module(
         )
 
     return launch_rmsnorm_bwd_two_stage
-
-
-def build_rmsnorm_feature_bwd_atomic_module(
-    n: int,
-    source_dtype_str: str,
-    dy_dtype_str: str,
-    dx_dtype_str: str,
-    dresidual_dtype_str: str,
-    dresidual_out_dtype_str: str,
-    *,
-    weight_dtype_str: str,
-    has_weight: bool,
-    has_bias: bool,
-    compute_dweight: bool,
-    compute_dbias: bool,
-    has_residual: bool,
-    has_dresidual_out: bool,
-    per_head: bool,
-    num_heads: int,
-    arch: str | None = None,
-):
-    """Build the generic one-block-per-row/head feature backward."""
-    arch = get_rocm_arch() if arch is None else arch
-    require_wave64(arch)
-    source_bits = dtype_to_elem_bits(source_dtype_str)
-    dy_bits = dtype_to_elem_bits(dy_dtype_str)
-    dx_bits = dtype_to_elem_bits(dx_dtype_str)
-    dresidual_bits = dtype_to_elem_bits(dresidual_dtype_str)
-    dresidual_out_bits = dtype_to_elem_bits(dresidual_out_dtype_str)
-    weight_bits = dtype_to_elem_bits(weight_dtype_str)
-    config = RmsNormRowConfig.from_analytical_heuristic(n, source_bits)
-    block_threads = config.num_threads
-    red_slots = max(1, (block_threads + WARP_SIZE - 1) // WARP_SIZE)
-    shared_storage = make_reduction_storage(red_slots)
-
-    @flyc.kernel
-    def rmsnorm_feature_bwd_kernel(
-        source_tensor: fx.Tensor,
-        weight_tensor: fx.Tensor,
-        dy_tensor: fx.Tensor,
-        dresidual_out_tensor: fx.Tensor,
-        rstd_tensor: fx.Tensor,
-        dx_tensor: fx.Tensor,
-        dresidual_tensor: fx.Tensor,
-        dweight_tensor: fx.Tensor,
-        dbias_tensor: fx.Tensor,
-        weight_offset: fx.Float32,
-    ):
-        program = fx.block_idx.x
-        tid = fx.thread_idx.x
-        row = program // fx.Int32(num_heads) if per_head else program
-        head = program % fx.Int32(num_heads) if per_head else fx.Int32(0)
-
-        source_dtype = dtype_to_elem_type(source_dtype_str)
-        dy_dtype = dtype_to_elem_type(dy_dtype_str)
-        dx_dtype = dtype_to_elem_type(dx_dtype_str)
-        dresidual_dtype = dtype_to_elem_type(dresidual_dtype_str)
-        dresidual_out_dtype = dtype_to_elem_type(dresidual_out_dtype_str)
-        weight_dtype = dtype_to_elem_type(weight_dtype_str)
-        fast_math = arith.FastMathFlags.fast
-
-        storage = fx.SharedAllocator().allocate(shared_storage).peek()
-        reduction = storage.s_red.view(fx.make_layout(red_slots, 1))
-
-        def wave_reduce_add(value):
-            result = value
-            for shift_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                offset = WARP_SIZE // (2 << shift_exp)
-                peer = result.shuffle_xor(offset, WARP_SIZE)
-                result = result.addf(peer, fastmath=fast_math)
-            return result
-
-        def block_reduce_add(value):
-            if const_expr(red_slots == 1):
-                return wave_reduce_add(value)
-            lane = tid % WARP_SIZE
-            wave = tid // WARP_SIZE
-            reduced = wave_reduce_add(value)
-            if lane == 0:
-                fx.memref_store(reduced, reduction, wave)
-            gpu.barrier()
-            if wave == 0:
-                in_range = lane < red_slots
-                safe_lane = in_range.select(lane, 0)
-                partial = in_range.select(
-                    fx.memref_load(reduction, safe_lane),
-                    fx.Float32(0.0),
-                )
-                partial = wave_reduce_add(partial)
-                if lane == 0:
-                    fx.memref_store(partial, reduction, 0)
-            gpu.barrier()
-            return fx.memref_load(reduction, 0)
-
-        source_row = (
-            row_head_buffer(source_tensor, row, head, source_bits, n)
-            if per_head
-            else row_buffer(source_tensor, row, source_bits, n)
-        )
-        dy_row = (
-            row_head_buffer(dy_tensor, row, head, dy_bits, n)
-            if per_head
-            else row_buffer(dy_tensor, row, dy_bits, n)
-        )
-        dx_row = (
-            row_head_buffer(dx_tensor, row, head, dx_bits, n)
-            if per_head
-            else row_buffer(dx_tensor, row, dx_bits, n)
-        )
-        source_div = fx.logical_divide(source_row, fx.make_layout(1, 1))
-        dy_div = fx.logical_divide(dy_row, fx.make_layout(1, 1))
-        dx_div = fx.logical_divide(dx_row, fx.make_layout(1, 1))
-        if const_expr(has_dresidual_out):
-            dresidual_out_row = (
-                row_head_buffer(
-                    dresidual_out_tensor,
-                    row,
-                    head,
-                    dresidual_out_bits,
-                    n,
-                )
-                if per_head
-                else row_buffer(
-                    dresidual_out_tensor,
-                    row,
-                    dresidual_out_bits,
-                    n,
-                )
-            )
-            dresidual_out_div = fx.logical_divide(
-                dresidual_out_row,
-                fx.make_layout(1, 1),
-            )
-        if const_expr(has_residual):
-            dresidual_row = (
-                row_head_buffer(
-                    dresidual_tensor,
-                    row,
-                    head,
-                    dresidual_bits,
-                    n,
-                )
-                if per_head
-                else row_buffer(dresidual_tensor, row, dresidual_bits, n)
-            )
-            dresidual_div = fx.logical_divide(
-                dresidual_row,
-                fx.make_layout(1, 1),
-            )
-
-        if const_expr(has_weight):
-            weight_row = (
-                row_buffer(weight_tensor, head, weight_bits, n)
-                if per_head
-                else fx.rocdl.make_buffer_tensor(weight_tensor)
-            )
-            weight_div = fx.logical_divide(weight_row, fx.make_layout(1, 1))
-            weight_copy = buffer_copy_atom(weight_bits, weight_bits)
-
-        rstd_buffer = fx.rocdl.make_buffer_tensor(rstd_tensor)
-        rstd_div = fx.logical_divide(rstd_buffer, fx.make_layout(1, 1))
-
-        source_copy = buffer_copy_atom(source_bits, source_bits)
-        dy_copy = buffer_copy_atom(dy_bits, dy_bits)
-        dx_copy = buffer_copy_atom(dx_bits, dx_bits)
-        if const_expr(has_residual):
-            dresidual_copy = buffer_copy_atom(
-                dresidual_bits,
-                dresidual_bits,
-            )
-        if const_expr(has_dresidual_out):
-            dresidual_out_copy = buffer_copy_atom(
-                dresidual_out_bits,
-                dresidual_out_bits,
-            )
-        f32_copy = buffer_copy_atom(32, 32)
-        if const_expr(compute_dweight):
-            dweight_destination = (
-                fx.slice(dweight_tensor, (head, None)) if per_head else dweight_tensor
-            )
-        if const_expr(compute_dbias):
-            dbias_destination = fx.slice(dbias_tensor, (head, None)) if per_head else dbias_tensor
-
-        rstd = load_scalar(f32_copy, fx.Float32, rstd_div, program)
-        thread_sum = fx.Float32(0.0)
-        for base in range_constexpr(0, n, block_threads):
-            index = tid + base
-            valid = index < n
-            safe_index = valid.select(index, 0)
-            source_elem = load_scalar(
-                source_copy,
-                source_dtype,
-                source_div,
-                safe_index,
-            )
-            dy_elem = load_scalar(dy_copy, dy_dtype, dy_div, safe_index)
-            source = source_elem if source_dtype_str == "f32" else source_elem.to(fx.Float32)
-            dy = dy_elem if dy_dtype_str == "f32" else dy_elem.to(fx.Float32)
-            effective_weight = fx.Float32(1.0)
-            if const_expr(has_weight):
-                weight_elem = load_scalar(
-                    weight_copy,
-                    weight_dtype,
-                    weight_div,
-                    safe_index,
-                )
-                weight_value = (
-                    weight_elem if weight_dtype_str == "f32" else weight_elem.to(fx.Float32)
-                )
-                effective_weight = weight_value + weight_offset
-            x_hat = source * rstd
-            thread_sum = thread_sum + valid.select(
-                x_hat * dy * effective_weight,
-                fx.Float32(0.0),
-            )
-
-        correction = block_reduce_add(thread_sum) / float(n)
-        for base in range_constexpr(0, n, block_threads):
-            index = tid + base
-            if index < n:
-                source_elem = load_scalar(source_copy, source_dtype, source_div, index)
-                dy_elem = load_scalar(dy_copy, dy_dtype, dy_div, index)
-                source = source_elem if source_dtype_str == "f32" else source_elem.to(fx.Float32)
-                dy = dy_elem if dy_dtype_str == "f32" else dy_elem.to(fx.Float32)
-                effective_weight = fx.Float32(1.0)
-                if const_expr(has_weight):
-                    weight_elem = load_scalar(
-                        weight_copy,
-                        weight_dtype,
-                        weight_div,
-                        index,
-                    )
-                    weight_value = (
-                        weight_elem if weight_dtype_str == "f32" else weight_elem.to(fx.Float32)
-                    )
-                    effective_weight = weight_value + weight_offset
-                x_hat = source * rstd
-                total = (dy * effective_weight - x_hat * correction) * rstd
-                if const_expr(has_dresidual_out):
-                    dresidual_out_elem = load_scalar(
-                        dresidual_out_copy,
-                        dresidual_out_dtype,
-                        dresidual_out_div,
-                        index,
-                    )
-                    dresidual_out_value = (
-                        dresidual_out_elem
-                        if dresidual_out_dtype_str == "f32"
-                        else dresidual_out_elem.to(fx.Float32)
-                    )
-                    total = total + dresidual_out_value
-
-                dx_value = to_elem_scalar(dx_dtype_str, dx_dtype, total)
-                store_scalar(
-                    dx_copy,
-                    dx_dtype,
-                    dx_dtype,
-                    dx_div,
-                    index,
-                    dx_value,
-                )
-                if const_expr(has_residual):
-                    dresidual_value = to_elem_scalar(
-                        dresidual_dtype_str,
-                        dresidual_dtype,
-                        total,
-                    )
-                    store_scalar(
-                        dresidual_copy,
-                        dresidual_dtype,
-                        dresidual_dtype,
-                        dresidual_div,
-                        index,
-                        dresidual_value,
-                    )
-
-                if const_expr(compute_dweight):
-                    atomic_add(
-                        dweight_destination,
-                        index,
-                        dy * x_hat,
-                        dtype_bytes=4,
-                    )
-                if const_expr(compute_dbias):
-                    atomic_add(
-                        dbias_destination,
-                        index,
-                        dy,
-                        dtype_bytes=4,
-                    )
-
-    @flyc.jit
-    def launch_rmsnorm_feature_bwd(
-        source_tensor: fx.Tensor,
-        weight_tensor: fx.Tensor,
-        dy_tensor: fx.Tensor,
-        dresidual_out_tensor: fx.Tensor,
-        rstd_tensor: fx.Tensor,
-        dx_tensor: fx.Tensor,
-        dresidual_tensor: fx.Tensor,
-        dweight_tensor: fx.Tensor,
-        dbias_tensor: fx.Tensor,
-        m: fx.Int32,
-        weight_offset: fx.Float32,
-        stream: fx.Stream = fx.Stream(None),
-    ):
-        rmsnorm_feature_bwd_kernel(
-            source_tensor,
-            weight_tensor,
-            dy_tensor,
-            dresidual_out_tensor,
-            rstd_tensor,
-            dx_tensor,
-            dresidual_tensor,
-            dweight_tensor,
-            dbias_tensor,
-            weight_offset,
-        ).launch(
-            grid=(m * fx.Int32(num_heads), 1, 1),
-            block=(block_threads, 1, 1),
-            stream=stream,
-        )
-
-    return launch_rmsnorm_feature_bwd
 
 
 def build_rmsnorm_feature_bwd_two_stage_module(
@@ -1384,6 +902,7 @@ def build_rmsnorm_feature_bwd_two_stage_module(
                 )
 
     reduce_grid = (parameter_numel + BLOCK_THREADS - 1) // BLOCK_THREADS
+    reduces_parameters = compute_dweight or compute_dbias
 
     @flyc.jit
     def launch_rmsnorm_feature_bwd_two_stage(
@@ -1417,14 +936,17 @@ def build_rmsnorm_feature_bwd_two_stage_module(
             block=(block_threads, 1, 1),
             stream=stream,
         )
-        rmsnorm_feature_parameter_reduce_kernel(
-            workspace_tensor,
-            dweight_tensor,
-            dbias_tensor,
-        ).launch(
-            grid=(reduce_grid, 1, 1),
-            block=(BLOCK_THREADS, 1, 1),
-            stream=stream,
-        )
+        # Both reduce branches compile out when no parameter gradient is
+        # wanted, so the launch would cover parameter_numel doing nothing.
+        if const_expr(reduces_parameters):
+            rmsnorm_feature_parameter_reduce_kernel(
+                workspace_tensor,
+                dweight_tensor,
+                dbias_tensor,
+            ).launch(
+                grid=(reduce_grid, 1, 1),
+                block=(BLOCK_THREADS, 1, 1),
+                stream=stream,
+            )
 
     return launch_rmsnorm_feature_bwd_two_stage

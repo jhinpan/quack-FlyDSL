@@ -6,8 +6,7 @@ Mirrors :mod:`quack.rmsnorm_config`: a frozen dataclass capturing the launch
 knobs, plus factories that own the heuristic. The knobs are the vector size,
 the width of the thread group covering a row, and the tile-loop trip count.
 One factory hands a row a whole block; the other hands it a lane group so the
-multi-row kernel can batch short rows. The atomic backward is scalar and sets
-its own geometry.
+multi-row kernel can batch short rows.
 
 Pure arithmetic: no FlyDSL, no torch.
 """
