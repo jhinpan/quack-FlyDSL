@@ -210,18 +210,39 @@ gfx950 and would never be exercised.
 This validates the rounding *code path*, not any pre-gfx95x part. Nothing
 here has run on gfx942, which is why the backend claims gfx950 only.
 
-## Vector size follows `quack/rmsnorm.py`
+## The row is aligned, so the vector size belongs to the dtype
 
-`vecsize = gcd(N, 128 // dtype_width)`, the same rule the CuTe kernel uses. A
-row that is not a whole number of 128-bit vectors degrades to a narrower
-access rather than collapsing to scalar. Worth about 1.5x on hidden sizes
-divisible by 2 or 4 but not 8:
+`from_analytical_heuristic` still writes `vecsize = gcd(N, 128 // dtype_width)`,
+the rule `quack/rmsnorm.py` uses, but the adapter admits only rows that are a
+multiple of `N_ALIGNMENT`, so the gcd always comes back at full width -- 8 for
+16-bit, 4 for fp32 -- and the lower rungs of that ladder are unreachable.
+
+The ladder earned its place while the backend took any row. Serving a length
+divisible by 4 but not 8 with a narrower access rather than a scalar loop was
+worth about 1.5x:
 
 | shape | scalar fallback | gcd rule |
 | --- | --- | --- |
 | 32768 x 4092 bf16 | 159.5 us | 107.3 us |
 | 32768 x 4094 bf16 | 161.9 us | 107.9 us |
 | 32768 x 8188 bf16 | 302.3 us | 205.1 us |
+
+What changed is the scope, not the measurement. No hidden size in practice is
+anything but a multiple of 64 or 128 -- 3584, 4608, 5120 and 7168 all are -- so
+those rungs only ever ran on shapes nobody feeds this kernel, and such shapes
+distort what gets optimized: this file gated a whole refactor on 131072x257 for
+exactly that reason. The adapter now refuses them and names `quack.rmsnorm`,
+which serves any length, as the fallback.
+
+Three things fell out with them. `use_multi_row_kernel` and
+`batch_feature_rows` were two predicates that could only disagree on an
+unaligned row, and are now one. `SMALL_ROW_THRESHOLD` existed to decide what to
+do with a long scalar row, and there are none. `_select_rmsnorm_bwd_programs`
+branched on whether the row vectorized, and it always does.
+
+The gcd stays in the config rather than being replaced by the constant, so a
+row that somehow reaches the kernel unaligned narrows its access instead of
+reading past the end of the row.
 
 ## Persistent kernels need their block sized to the row too
 
@@ -261,21 +282,20 @@ block took `weight_offset` at 262144x128 from 1.86 to 3.79 TB/s, which is
 parity with inductor, and 131072x256 from 3.03 to 3.83. That is the QK-norm
 shape, so it is worth having.
 
-The two paths stop batching at different points, and that is measured rather
-than assumed. The feature kernel only gains while a lane group covers the row
-in a single pass; once the group has to loop, a block of its own is faster,
-by 1.4x at 33554432/1021 rows and 1.9x at 2047. The plain kernel does not
-behave that way and keeps batching further out. Why the feature kernel loses
-its deep tile loop is still open: at 16384x2047 both kernels compile to 28
-VGPRs with no scratch and no LDS, launch the same grid with the same block,
-and still differ by 1.4x. Predication, the tail guard, the fp32 register
-cache and `weight_offset` were each measured out. Both rules agree everywhere
-a row shares a factor with a 128-bit access, so the disagreement only shows on
-coprime lengths, where neither path is close to the compiler anyway
-(131072x257: plain 2.33, feature 1.00, inductor 3.12).
+Batching stops once a lane group would have to loop: a block of its own is
+faster then, by 1.4x at 33554432x1021 and 1.9x at 2047. On an aligned row that
+condition and "the row has fewer vectors than the block-width floor" are the
+same condition, which is why one predicate now answers for both.
 
-Rows of 64 remain at 0.79x of inductor, but the plain path sits at the same
-2.99 TB/s there, so that gap is older than the batching and shared by both.
+Why a batched kernel loses a deep tile loop at all is still open. At 16384x2047
+it compiled to the same 28 VGPRs with no scratch and no LDS, launched the same
+grid with the same block, and still ran 1.4x behind a block per row;
+predication, the tail guard, the fp32 register cache and `weight_offset` were
+each measured out. Both shapes that exposed it are unaligned and no longer
+admitted, so this is recorded rather than chased.
+
+Rows of 64 remain at 0.79x of inductor, and the plain path sat at the same
+2.99 TB/s there while it existed, so that gap is older than the batching.
 
 ## The tail block's guard depends on how deep the tile loop is
 
@@ -292,12 +312,12 @@ feature forward does, and it is safe there precisely because
 `batch_feature_rows` only batches rows a group covers in one pass.
 
 On a **deep** tile loop, one uniform branch around the whole row wins, and by a
-lot. The plain forward, while it existed, batched scalar rows up to
-`SMALL_ROW_THRESHOLD`, so a 2047-wide row was 32 tiles. This is why
-`batch_feature_rows` is stricter than `use_multi_row_kernel` and why the
-surviving path never meets the case; keep it that way. Left to the descriptor
-on such a row, the compiler predicates every
-access on its own: 64 `s_cbranch_execnz` against one, and 1311 instructions
+lot. The forward no longer batches such a row -- `batch_feature_rows` stops at
+the block-width floor, and on an aligned row that already means one pass -- so
+this is a case the surviving path cannot reach. Keep it that way: while a
+deep batched loop was reachable, leaving the tail to the descriptor made the
+compiler predicate every access on its own, 64 `s_cbranch_execnz` against one
+and 1311 instructions
 against 476, costing 1.6x on 16384x2047 and 131072x257. Neither VGPR count (52
 against 49) nor spilling explains it -- there is no spilling either way and both
 land in the same occupancy bucket. It is purely the per-access exec-mask
@@ -374,7 +394,8 @@ the standing price of one implementation instead of two.
 `AI/probe_rmsnorm_flydsl_bandwidth.py` backs the throughput numbers here and
 `AI/probe_rmsnorm_flydsl_accuracy.py` backs the error figures. Run both before
 and after a change; between them they cover long rows, the short rows the
-batching is for, and the coprime rows that are still open.
+batching is for, and the hidden sizes real models use, whose last tile is a
+partial one where a power of two's is not.
 
 Backward cleanups also have a component gate, so a faster partial kernel cannot
 hide a slower finalizer or vice versa:

@@ -17,7 +17,7 @@ from quack.flydsl.rmsnorm_bwd_kernel import (
     rmsnorm_bwd_two_stage_config,
 )
 from quack.flydsl.rmsnorm_common import EPS, FLYDSL_BUILD_LOCK, run_compiled
-from quack.flydsl.rmsnorm_config import MAX_N, next_power_of_two
+from quack.flydsl.rmsnorm_config import MAX_N, N_ALIGNMENT, next_power_of_two
 from quack.flydsl.rmsnorm_kernel import build_rmsnorm_feature_module
 
 __all__ = ["rmsnorm"]
@@ -133,6 +133,16 @@ def _validate_feature_inputs(
 
     if not 1 <= n <= MAX_N:
         raise ValueError(f"x normalized dimension must be between 1 and {MAX_N}, got {n}")
+    if n % N_ALIGNMENT:
+        # Every row start is then naturally aligned and every operand reaches
+        # full vector width, which is what lets the kernels treat the vector
+        # size as a property of the dtype. Refusing is deliberate: serving such
+        # a row with a narrower access is a path nothing measures and nothing
+        # in practice reaches, so it would only distort what gets optimized.
+        raise ValueError(
+            f"x normalized dimension must be a multiple of {N_ALIGNMENT}, got {n}; "
+            "use quack.rmsnorm for row lengths this backend does not accept"
+        )
     for name, tensor in (("weight", weight), ("bias", bias)):
         if tensor is not None and tuple(tensor.shape) != parameter_shape:
             raise ValueError(f"{name} shape must be {parameter_shape}, got {tuple(tensor.shape)}")
@@ -230,10 +240,7 @@ def _select_rmsnorm_bwd_programs(
         if not torch.compiler.is_compiling():
             _BWD_CU_COUNT_CACHE[device] = num_cus
     config = rmsnorm_bwd_two_stage_config(n, dtype_str)
-    if config.vectorized:
-        num_programs = num_cus if m < 2048 else (3 * num_cus) // 2
-    else:
-        num_programs = num_cus if m < 1024 else 2 * num_cus
+    num_programs = num_cus if m < 2048 else (3 * num_cus) // 2
     # A row narrower than the widest block gets a narrower block, so launch
     # proportionally more of them to keep the same threads resident.
     num_programs *= TWO_STAGE_MAX_NUM_THREADS // config.num_threads

@@ -96,12 +96,12 @@ def _assert_fused_residual_grad_close(actual: torch.Tensor, expected: torch.Tens
 @pytest.mark.parametrize(
     ("shape", "dtype", "weight_dtype", "eps"),
     [
-        ((3, 127), torch.float16, torch.float16, 1e-6),
+        ((3, 120), torch.float16, torch.float16, 1e-6),
         ((2, 1024), torch.bfloat16, torch.float32, 1e-5),
         ((4, 4096), torch.float16, torch.float16, 1e-6),
         ((2, 4096), torch.bfloat16, torch.float32, 1e-5),
-        ((3, 3001), torch.float16, torch.float32, 1e-6),
-        ((2, 3001), torch.bfloat16, torch.bfloat16, 1e-5),
+        ((3, 3584), torch.float16, torch.float32, 1e-6),
+        ((2, 3584), torch.bfloat16, torch.bfloat16, 1e-5),
         ((2, 4096), torch.float32, torch.float32, 1e-6),
         # Vectorized with a predicated final tile: 375 vectors over 256 threads.
         ((3, 3000), torch.bfloat16, torch.bfloat16, 1e-6),
@@ -110,7 +110,7 @@ def _assert_fused_residual_grad_close(actual: torch.Tensor, expected: torch.Tens
         ((4, 1000), torch.bfloat16, torch.float32, 1e-6),
         # 128-bit FP32 loads, exact and predicated.
         ((2, 2048), torch.float32, torch.float32, 1e-6),
-        ((2, 1020), torch.float32, torch.float32, 1e-6),
+        ((2, 1000), torch.float32, torch.float32, 1e-6),
         # Rows short enough to share a block, so a lane group covers the row and
         # the reduction is a shuffle rather than a trip through LDS. One whole
         # access per lane: 16 lanes of 8 BF16, and the same row with an FP32
@@ -122,8 +122,8 @@ def _assert_fused_residual_grad_close(actual: torch.Tensor, expected: torch.Tens
         # One vector for the whole row, so the group is a single lane and the
         # reduction has nothing to shuffle.
         ((5, 8), torch.bfloat16, torch.bfloat16, 1e-6),
-        # Predicated inside a lane group: 63 FP32 vectors over 64 lanes.
-        ((4, 252), torch.float32, torch.float32, 1e-6),
+        # Predicated inside a lane group: 62 FP32 vectors over 64 lanes.
+        ((4, 248), torch.float32, torch.float32, 1e-6),
     ],
 )
 def test_forward_matches_fp32_reference(shape, dtype, weight_dtype, eps):
@@ -141,7 +141,7 @@ def test_forward_matches_fp32_reference(shape, dtype, weight_dtype, eps):
 
 def test_forward_flattens_noncontiguous_leading_dimensions():
     torch.manual_seed(1)
-    n = 3001
+    n = 3584
     x = torch.randn((2, n, 3), device="cuda", dtype=torch.bfloat16).transpose(1, 2)
     weight = torch.randn(n * 2, device="cuda", dtype=torch.float32)[::2]
     assert not x.is_contiguous()
@@ -205,6 +205,21 @@ def test_public_contract_validates_eps(eps, error):
         rmsnorm(x, weight, eps=eps)
 
 
+@pytest.mark.parametrize("n", [1, 3, 7, 127, 257, 1020, 3001])
+def test_public_contract_rejects_rows_that_are_not_whole_accesses(n):
+    """A row this backend cannot cover with whole 128-bit accesses is refused.
+
+    Serving it with a narrower access is implementable -- quack.rmsnorm does
+    exactly that, and this backend used to -- but no hidden size in practice
+    reaches it, so the path could only ever be measured on shapes nobody runs.
+    The error names the fallback rather than leaving the caller guessing.
+    """
+    x = torch.ones(2, n, device="cuda", dtype=torch.float16)
+    weight = torch.ones(n, device="cuda", dtype=torch.float16)
+    with pytest.raises(ValueError, match="multiple of 8"):
+        rmsnorm(x, weight)
+
+
 def test_public_contract_rejects_mixed_devices():
     if torch.cuda.device_count() < 2:
         pytest.skip("requires two ROCm devices")
@@ -219,10 +234,10 @@ def test_public_contract_rejects_mixed_devices():
     [
         # Fewer rows than the persistent grid would like, so most blocks
         # contribute a zeroed partial.
-        ((17, 513), torch.float16, torch.float16),
-        ((5, 257), torch.float32, torch.float32),
+        ((17, 520), torch.float16, torch.float16),
+        ((5, 760), torch.float32, torch.float32),
         ((512, 4096), torch.bfloat16, torch.float32),
-        ((512, 3001), torch.float16, torch.float16),
+        ((512, 3584), torch.float16, torch.float16),
         # 128-bit FP32 column I/O.
         ((512, 2048), torch.float32, torch.float32),
         # Column count that is not a whole number of blocks.
@@ -253,7 +268,7 @@ def test_backward_matches_fp32_reference(shape, dtype, weight_dtype):
 )
 def test_autograd_respects_requested_gradients(requires_x, requires_weight):
     torch.manual_seed(3)
-    n = 257
+    n = 760
     x = (
         torch.randn((2, n, 3), device="cuda", dtype=torch.float16)
         .transpose(1, 2)
@@ -324,18 +339,18 @@ def test_optional_affine_features_match_reference(
 ):
     torch.manual_seed(11)
     x = torch.randn(
-        (4, 257),
+        (4, 760),
         device="cuda",
         dtype=torch.float16,
         requires_grad=True,
     )
     weight = (
-        torch.randn(257, device="cuda", dtype=torch.float32, requires_grad=True)
+        torch.randn(760, device="cuda", dtype=torch.float32, requires_grad=True)
         if has_weight
         else None
     )
     bias = (
-        torch.randn(257, device="cuda", dtype=torch.float32, requires_grad=True)
+        torch.randn(760, device="cuda", dtype=torch.float32, requires_grad=True)
         if has_bias
         else None
     )
@@ -375,13 +390,13 @@ def test_optional_affine_features_match_reference(
 def test_residual_and_prenorm_match_reference(use_compile, prenorm):
     torch.manual_seed(12)
     x = torch.randn(
-        (4, 257),
+        (4, 760),
         device="cuda",
         dtype=torch.bfloat16,
         requires_grad=True,
     )
     residual = torch.randn_like(x, requires_grad=True)
-    weight = torch.randn(257, device="cuda", dtype=torch.float32, requires_grad=True)
+    weight = torch.randn(760, device="cuda", dtype=torch.float32, requires_grad=True)
     x_ref = x.detach().clone().requires_grad_(True)
     residual_ref = residual.detach().clone().requires_grad_(True)
     weight_ref = weight.detach().clone().requires_grad_(True)
@@ -421,9 +436,9 @@ def test_residual_and_prenorm_match_reference(use_compile, prenorm):
 @pytest.mark.parametrize("use_compile", [False, True])
 def test_residual_dtype_override_preserves_fp32_sum(use_compile):
     torch.manual_seed(13)
-    x = torch.randn((3, 257), device="cuda", dtype=torch.bfloat16)
+    x = torch.randn((3, 760), device="cuda", dtype=torch.bfloat16)
     residual = torch.randn_like(x)
-    weight = torch.randn(257, device="cuda", dtype=torch.float32)
+    weight = torch.randn(760, device="cuda", dtype=torch.float32)
     function = torch.compile(rmsnorm, fullgraph=True) if use_compile else rmsnorm
 
     actual, residual_out = function(
@@ -446,12 +461,12 @@ def test_residual_dtype_override_preserves_fp32_sum(use_compile):
 
 def test_prenorm_without_residual_propagates_second_output_gradient():
     x = torch.randn(
-        (4, 257),
+        (4, 760),
         device="cuda",
         dtype=torch.float16,
         requires_grad=True,
     )
-    weight = torch.randn(257, device="cuda", dtype=torch.float32, requires_grad=True)
+    weight = torch.randn(760, device="cuda", dtype=torch.float32, requires_grad=True)
 
     _, residual_out = rmsnorm(x, weight, prenorm=True)
     residual_out.sum().backward()
@@ -461,13 +476,13 @@ def test_prenorm_without_residual_propagates_second_output_gradient():
 
 def test_mixed_input_and_weight_dtypes_use_generic_path():
     x = torch.randn(
-        (4, 257),
+        (4, 760),
         device="cuda",
         dtype=torch.float32,
         requires_grad=True,
     )
     weight = torch.randn(
-        257,
+        760,
         device="cuda",
         dtype=torch.float16,
         requires_grad=True,
@@ -487,10 +502,10 @@ def test_mixed_input_and_weight_dtypes_use_generic_path():
 
 
 def test_feature_path_respects_selective_gradients():
-    x = torch.randn((4, 257), device="cuda", dtype=torch.float16)
-    weight = torch.randn(257, device="cuda", dtype=torch.float32)
+    x = torch.randn((4, 760), device="cuda", dtype=torch.float16)
+    weight = torch.randn(760, device="cuda", dtype=torch.float32)
     bias = torch.randn(
-        257,
+        760,
         device="cuda",
         dtype=torch.float32,
         requires_grad=True,
@@ -628,13 +643,13 @@ def test_dynamic_compiled_feature_backward_selects_at_runtime():
         return rmsnorm(x, weight, bias=bias)
 
     x = torch.randn(
-        (512, 257),
+        (512, 760),
         device="cuda",
         dtype=torch.float16,
         requires_grad=True,
     )
-    weight = torch.randn(257, device="cuda", dtype=torch.float32, requires_grad=True)
-    bias = torch.randn(257, device="cuda", dtype=torch.float32, requires_grad=True)
+    weight = torch.randn(760, device="cuda", dtype=torch.float32, requires_grad=True)
+    bias = torch.randn(760, device="cuda", dtype=torch.float32, requires_grad=True)
 
     compiled(x, weight, bias).sum().backward()
 
@@ -645,10 +660,10 @@ def test_dynamic_compiled_feature_backward_selects_at_runtime():
 
 def test_feature_backward_with_bias_matches_reference():
     torch.manual_seed(15)
-    shape = (512, 257)
+    shape = (512, 760)
     x = torch.randn(shape, device="cuda", dtype=torch.float16, requires_grad=True)
-    weight = torch.randn(257, device="cuda", dtype=torch.float32, requires_grad=True)
-    bias = torch.randn(257, device="cuda", dtype=torch.float32, requires_grad=True)
+    weight = torch.randn(760, device="cuda", dtype=torch.float32, requires_grad=True)
+    bias = torch.randn(760, device="cuda", dtype=torch.float32, requires_grad=True)
     dout = torch.randn_like(x)
 
     actual = rmsnorm(x, weight, bias=bias)
@@ -668,19 +683,19 @@ def test_feature_backward_with_bias_matches_reference():
 @pytest.mark.parametrize("requested", ["weight", "bias"])
 def test_staged_per_head_backward_supports_selective_parameter_grads(requested):
     x = torch.randn(
-        (512, 2, 65),
+        (512, 2, 72),
         device="cuda",
         dtype=torch.float16,
         requires_grad=True,
     )
     weight = torch.randn(
-        (2, 65),
+        (2, 72),
         device="cuda",
         dtype=torch.float32,
         requires_grad=requested == "weight",
     )
     bias = torch.randn(
-        (2, 65),
+        (2, 72),
         device="cuda",
         dtype=torch.float32,
         requires_grad=requested == "bias",
@@ -701,7 +716,7 @@ def test_feature_backward_with_no_parameter_grads(per_head):
     reduce is not launched at all.
     """
     torch.manual_seed(11)
-    n = 257
+    n = 760
     shape = (64, 2, n) if per_head else (64, n)
     parameter_shape = (2, n) if per_head else (n,)
     x = torch.randn(shape, device="cuda", dtype=torch.bfloat16, requires_grad=True)
@@ -726,9 +741,9 @@ def test_feature_workspace_descriptors_are_row_scoped():
 
 def test_deterministic_feature_backward_is_reproducible():
     torch.manual_seed(16)
-    x = torch.randn((64, 257), device="cuda", dtype=torch.float16)
-    weight = torch.randn(257, device="cuda", dtype=torch.float32)
-    bias = torch.randn(257, device="cuda", dtype=torch.float32)
+    x = torch.randn((64, 760), device="cuda", dtype=torch.float16)
+    weight = torch.randn(760, device="cuda", dtype=torch.float32)
+    bias = torch.randn(760, device="cuda", dtype=torch.float32)
     dout = torch.randn_like(x)
     results = []
 
@@ -848,13 +863,13 @@ def test_custom_ops_are_unique_mutation_only_and_fake_safe():
 
 def test_eager_fast_path_bypasses_custom_op_dispatch():
     x = torch.randn(
-        (4, 129),
+        (4, 136),
         device="cuda",
         dtype=torch.float16,
         requires_grad=True,
     )
     weight = torch.randn(
-        129,
+        136,
         device="cuda",
         dtype=torch.float32,
         requires_grad=True,
@@ -875,13 +890,13 @@ def test_fullgraph_forward_backward_cold_and_warm_cache():
 
     torch.manual_seed(4)
     x = torch.randn(
-        (8, 513),
+        (8, 520),
         device="cuda",
         dtype=torch.float16,
         requires_grad=True,
     )
     weight = torch.randn(
-        513,
+        520,
         device="cuda",
         dtype=torch.float32,
         requires_grad=True,
@@ -956,18 +971,18 @@ def test_forward_cache_identity_is_shape_and_dtype_only():
         weight = torch.randn(n, device="cuda", dtype=dtype)
         return rmsnorm(x, weight, eps=eps)
 
-    call(129, torch.float16, 1e-6)
+    call(136, torch.float16, 1e-6)
     first_launcher = next(iter(rmsnorm_flydsl_impl._FWD_CACHE.values()))
-    call(129, torch.float16, 1e-6)
+    call(136, torch.float16, 1e-6)
     assert len(rmsnorm_flydsl_impl._FWD_CACHE) == 1
     assert next(iter(rmsnorm_flydsl_impl._FWD_CACHE.values())) is first_launcher
 
     for eps in (1e-5, 1e-4, 3e-7, 0.5):
-        call(129, torch.float16, eps)
+        call(136, torch.float16, eps)
     assert len(rmsnorm_flydsl_impl._FWD_CACHE) == 1
 
-    call(130, torch.float16, 1e-6)
-    call(129, torch.bfloat16, 1e-6)
+    call(144, torch.float16, 1e-6)
+    call(136, torch.bfloat16, 1e-6)
     assert len(rmsnorm_flydsl_impl._FWD_CACHE) == 3
 
 
@@ -1006,13 +1021,13 @@ def test_fullgraph_with_dynamic_shapes():
 def test_non_default_stream_forward_backward():
     torch.manual_seed(5)
     x = torch.randn(
-        (16, 257),
+        (16, 760),
         device="cuda",
         dtype=torch.bfloat16,
         requires_grad=True,
     )
     weight = torch.randn(
-        257,
+        760,
         device="cuda",
         dtype=torch.float32,
         requires_grad=True,
@@ -1439,10 +1454,10 @@ def test_the_feature_backward_zeroes_no_parameter_accumulator(with_bias):
     launch for four bytes.
     """
     torch.manual_seed(17)
-    x = torch.randn((64, 257), device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    weight = torch.randn(257, device="cuda", dtype=torch.float32, requires_grad=True)
+    x = torch.randn((64, 760), device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    weight = torch.randn(760, device="cuda", dtype=torch.float32, requires_grad=True)
     bias = (
-        torch.randn(257, device="cuda", dtype=torch.float32, requires_grad=True)
+        torch.randn(760, device="cuda", dtype=torch.float32, requires_grad=True)
         if with_bias
         else None
     )

@@ -15,38 +15,44 @@ from quack.flydsl.rmsnorm_config import (
     ACCESS_BITS,
     MAX_NUM_THREADS,
     MIN_NUM_THREADS,
+    N_ALIGNMENT,
     WAVE_SIZE,
     RmsNormRowConfig,
     batch_feature_rows,
     multi_row_block_rows,
-    use_multi_row_kernel,
 )
 
 
 DTYPE_WIDTHS = (16, 32)
+# The row lengths the backend accepts: multiples of N_ALIGNMENT up to MAX_N.
+# 192, 256, 760, 1024, 1128 and 4096 are the entries of quack's own RMSNorm test
+# ladder that fit; 3584, 4608, 5120 and 7168 are hidden sizes real models use;
+# the rest are the geometry boundaries -- a row of one vector, a row narrower
+# than a wavefront, the batching crossover, and the widest row a thread can hold
+# between the two passes. Nothing here is coprime with a 128-bit access, because
+# the adapter refuses those rather than serving them with a narrower one.
 HIDDEN_SIZES = (
-    1,
-    3,
-    7,
     8,
     16,
+    24,
     64,
-    127,
     128,
-    255,
+    192,
     256,
+    504,
     512,
+    760,
     1000,
-    1020,
     1024,
+    1128,
     2048,
     3000,
-    3001,
-    4092,
-    4095,
+    3584,
     4096,
+    4608,
+    5120,
     6144,
-    8191,
+    7168,
     8192,
 )
 # The persistent backward accepts a wider block than the one-block-per-row
@@ -68,22 +74,17 @@ def test_fp32_rows_vectorize():
     assert config(4096, 32).vecsize == 4
 
 
-@pytest.mark.parametrize(
-    ("N", "dtype_width", "vecsize"),
-    [
-        (4096, 16, 8),
-        (4092, 16, 4),
-        (1020, 16, 4),
-        (1018, 16, 2),
-        (3001, 16, 1),
-        (4096, 32, 4),
-        (4094, 32, 2),
-        (4095, 32, 1),
-    ],
-)
-def test_vecsize_degrades_by_gcd_rather_than_collapsing_to_scalar(N, dtype_width, vecsize):
-    """Matches quack.rmsnorm: gcd(N, 128 // dtype_width), not an all-or-nothing test."""
-    assert config(N, dtype_width).vecsize == vecsize
+@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
+@pytest.mark.parametrize("N", HIDDEN_SIZES)
+def test_an_aligned_row_always_reaches_full_vector_width(N, dtype_width):
+    """The point of the alignment rule: vecsize depends on the dtype alone.
+
+    ``from_analytical_heuristic`` still writes the gcd quack.rmsnorm uses, so an
+    unaligned row would narrow rather than read past itself, but no row the
+    adapter admits can take that branch.
+    """
+    assert N % N_ALIGNMENT == 0
+    assert config(N, dtype_width).vecsize == ACCESS_BITS // dtype_width
 
 
 @pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
@@ -152,39 +153,31 @@ def test_unsupported_element_width_is_rejected():
 
 
 @pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
-@pytest.mark.parametrize("N", (1, 3, 7, 8, 16, 64, 127, 128, 255))
+@pytest.mark.parametrize("N", (8, 16, 24, 64, 128, 192))
 def test_tiny_rows_are_batched_several_to_a_block(N, dtype_width):
     """One block per row wastes a launch when the row cannot fill one wave."""
-    assert use_multi_row_kernel(N, dtype_width)
+    assert batch_feature_rows(N, dtype_width)
 
 
 @pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
 @pytest.mark.parametrize("N", (1024, 2048, 4096, 6144, 8192))
-def test_rows_that_fill_a_block_use_the_vectorized_kernel(N, dtype_width):
-    """Regression: 1024 and 2048 used to be forced onto the scalar kernel."""
-    assert not use_multi_row_kernel(N, dtype_width)
-    assert config(N, dtype_width).vectorized
+def test_rows_that_fill_a_block_get_one_of_their_own(N, dtype_width):
+    assert not batch_feature_rows(N, dtype_width)
 
 
-@pytest.mark.parametrize("N", (3001, 4095, 8191))
-def test_wide_unvectorizable_rows_prefer_one_block_per_row(N):
-    """A long scalar row still beats batching it into a multi-row block."""
-    assert not use_multi_row_kernel(N, 16)
-
-
-def test_the_vectorized_crossover_is_one_minimum_block_of_vectors():
+def test_the_batching_crossover_is_one_minimum_block_of_vectors():
     """bf16 crosses over at 64 x 8 elements, fp32 at 64 x 4."""
-    assert use_multi_row_kernel(504, 16)
-    assert not use_multi_row_kernel(512, 16)
-    assert use_multi_row_kernel(252, 32)
-    assert not use_multi_row_kernel(256, 32)
+    assert batch_feature_rows(504, 16)
+    assert not batch_feature_rows(512, 16)
+    assert batch_feature_rows(248, 32)
+    assert not batch_feature_rows(256, 32)
 
 
 # The multi-row kernel splits a row across a group of lanes rather than a whole
 # block, so it asks the same factory for a different lane budget.
 
 MULTI_ROW_CASES = [
-    (N, width) for width in DTYPE_WIDTHS for N in HIDDEN_SIZES if use_multi_row_kernel(N, width)
+    (N, width) for width in DTYPE_WIDTHS for N in HIDDEN_SIZES if batch_feature_rows(N, width)
 ]
 
 
@@ -256,9 +249,6 @@ def test_a_multi_row_thread_caches_a_bounded_slice_of_its_row(N, dtype_width):
         (64, 16, 8, 8, 32),
         (8, 16, 8, 1, 256),
         (128, 32, 4, 32, 8),
-        # gcd(257, 8) == 1 leaves no vector to widen, so the group saturates a
-        # wave and loops instead.
-        (257, 16, 1, 64, 4),
     ],
 )
 def test_the_lane_group_shrinks_to_the_row(N, dtype_width, vecsize, threads_per_row, block_rows):
@@ -286,35 +276,29 @@ def test_the_wavefront_constant_is_the_block_width_floor():
 
 @pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
 @pytest.mark.parametrize("N", HIDDEN_SIZES)
-def test_the_feature_path_only_batches_rows_a_group_covers_in_one_pass(N, dtype_width):
-    """Measured: batching the feature kernel stops paying once the group loops."""
+def test_batching_only_takes_rows_a_group_covers_in_one_pass(N, dtype_width):
+    """Measured: batching stops paying once the lane group has to loop.
+
+    On an aligned row this falls out of the vector count rather than needing a
+    second condition, which is why one predicate now answers for both.
+    """
     if batch_feature_rows(N, dtype_width):
         assert lane_group(N, dtype_width).num_tiles == 1
-
-
-@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
-@pytest.mark.parametrize("N", HIDDEN_SIZES)
-def test_the_feature_path_never_batches_more_than_the_plain_path(N, dtype_width):
-    if batch_feature_rows(N, dtype_width):
-        assert use_multi_row_kernel(N, dtype_width)
 
 
 @pytest.mark.parametrize(
     ("N", "dtype_width", "batched"),
     [
-        # Vectorizable short rows: the group covers them outright.
+        # Short rows: the group covers them outright.
+        (8, 16, True),
         (128, 16, True),
         (256, 16, True),
-        (8, 16, True),
         (128, 32, True),
-        # gcd(N, 8) == 1 leaves nothing to widen, so a group of 64 lanes has to
-        # loop and the row is better off with a block of its own.
-        (255, 16, False),
-        (127, 16, False),
-        # Long enough that neither path batches.
+        # Long enough to keep a block busy on their own.
         (512, 16, False),
         (4096, 16, False),
+        (256, 32, False),
     ],
 )
-def test_the_feature_batching_crossover(N, dtype_width, batched):
+def test_the_batching_crossover(N, dtype_width, batched):
     assert batch_feature_rows(N, dtype_width) is batched

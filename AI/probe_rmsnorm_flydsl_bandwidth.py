@@ -4,13 +4,14 @@ Backs the numbers in flydsl_rmsnorm_notes.md. The compiler is the baseline
 that matters: it fuses this shape of work close to the roofline, and it is
 what a caller falls back to when the backend refuses a combination.
 
-Each shape prints the geometry both paths pick for it, because that is what
+Each shape prints the geometry the kernel picks for it, because that is what
 explains the number: how wide a vector is, how many threads cover a row, how
 many passes they take, and how many rows share a block.
 
-The short and coprime rows at the bottom are the interesting ones. A 128-wide
-row is the QK-norm case. A row whose length shares no factor with a 128-bit
-access cannot vectorize at all, and is where the two paths disagree.
+The short rows are the interesting ones -- a 128-wide row is the QK-norm case,
+and rows that short are batched several to a block. 3584 and 5120 are hidden
+sizes real models use, and unlike the powers of two above them their last tile
+is a partial one.
 """
 
 import statistics
@@ -106,8 +107,8 @@ SHAPES = [
     (524288, 64),
     (262144, 128),
     (131072, 256),
-    (131072, 257),
-    (16384, 2047),
+    (16384, 3584),
+    (16384, 5120),
 ]
 
 for m, n in SHAPES:

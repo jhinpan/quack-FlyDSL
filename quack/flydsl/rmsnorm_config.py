@@ -32,9 +32,13 @@ SUPPORTED_DTYPE_WIDTHS = (16, 32)
 # budget expressed as a row length. Every other cap on N derives from it.
 MAX_N = 8192
 
-# Longest scalar row still worth batching several-to-a-block rather than
-# giving each row a block of its own.
-SMALL_ROW_THRESHOLD = 2048
+# A row must be a whole number of 128-bit accesses at the narrowest element the
+# backend supports. That is what makes every row start naturally aligned and
+# every operand reach full vector width, so the vector size is a property of
+# the dtype alone and never of the row length. Hidden sizes are multiples of 64
+# or 128 in practice -- 3584, 4608, 5120, 7168 all qualify -- and a row that is
+# not is rejected rather than served by a narrower access.
+N_ALIGNMENT = ACCESS_BITS // min(SUPPORTED_DTYPE_WIDTHS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,11 +80,13 @@ class RmsNormRowConfig:
     ) -> "RmsNormRowConfig":
         """Pick the widest whole access and the narrowest block that covers ``N``.
 
-        ``vecsize`` follows :mod:`quack.rmsnorm`: the greatest common divisor of
-        the row length and a full 128-bit access, so a row that is not a whole
-        number of wide vectors degrades to a narrower one rather than all the
-        way to scalar. ``max_num_threads`` is wider for the persistent backward,
-        whose block also has to keep the machine busy across rows.
+        ``vecsize`` is written as the gcd :mod:`quack.rmsnorm` uses, but the
+        adapter only admits rows aligned to :data:`N_ALIGNMENT`, so it always
+        comes back at full width for the dtype. Keeping the gcd rather than the
+        constant means a row that somehow reached here unaligned narrows its
+        access instead of reading past the row. ``max_num_threads`` is wider for
+        the persistent backward, whose block also has to keep the machine busy
+        across rows.
         """
         if dtype_width not in SUPPORTED_DTYPE_WIDTHS:
             raise ValueError(f"unsupported element width: {dtype_width} bits")
@@ -131,47 +137,26 @@ def multi_row_block_rows(threads_per_row: int) -> int:
     return max(1, MAX_NUM_THREADS // threads_per_row)
 
 
-def use_multi_row_kernel(
-    N: int,
-    dtype_width: int,
-    small_row_threshold: int = SMALL_ROW_THRESHOLD,
-) -> bool:
-    """Whether to batch several rows per block instead of one block per row.
-
-    Batching pays off only when a row is too short to keep one block busy. A
-    row that fills at least the smallest block is always better served by the
-    vectorized one-block-per-row kernel; a long row that cannot vectorize
-    still prefers one block per row over a deep scalar loop per lane.
-    """
-    config = RmsNormRowConfig.from_analytical_heuristic(N, dtype_width)
-    if config.vectorized:
-        return config.num_vecs < MIN_NUM_THREADS
-    return N <= small_row_threshold
-
-
 def batch_feature_rows(N: int, dtype_width: int) -> bool:
-    """Whether the feature forward should batch several rows into one block.
+    """Whether the forward should batch several rows into one block.
 
-    Stricter than :func:`use_multi_row_kernel`, and measured rather than
-    derived: batching pays for the feature kernel only while a lane group
-    covers the row in a single pass. Once the group has to loop, giving the
-    row a whole block is faster, because a wider group makes the same trip
-    count in fewer passes. The plain kernel keeps its own crossover, which
-    sits further out; the two disagree only on rows whose length shares no
-    factor with a 128-bit access, where neither is close to the compiler.
+    Batching pays only when a row is too short to keep a block busy on its own,
+    and only while a lane group still covers the row in a single pass -- once
+    the group has to loop, a whole block is faster, because a wider group makes
+    the same trip count in fewer passes. On an aligned row those two conditions
+    are the same one: a row of fewer vectors than the block-width floor gets a
+    group rounded up to a power of two no narrower than the row, so its tile
+    count is one by construction.
     """
-    return (
-        use_multi_row_kernel(N, dtype_width)
-        and RmsNormRowConfig.for_lane_group(N, dtype_width).num_tiles == 1
-    )
+    return RmsNormRowConfig.from_analytical_heuristic(N, dtype_width).num_vecs < MIN_NUM_THREADS
 
 
 __all__ = [
     "MAX_N",
+    "N_ALIGNMENT",
     "WAVE_SIZE",
     "RmsNormRowConfig",
     "batch_feature_rows",
     "multi_row_block_rows",
     "next_power_of_two",
-    "use_multi_row_kernel",
 ]
