@@ -21,7 +21,6 @@ from flydsl.expr.typing import ReductionOp
 from flydsl.runtime.device import get_rocm_arch
 
 from .rmsnorm_common import (
-    BLOCK_THREADS,
     WARP_SIZE,
     buffer_copy_atom,
     dtype_to_elem_bits,
@@ -489,6 +488,13 @@ def build_rmsnorm_feature_bwd_two_stage_module(
     parameter_numel = num_heads * n
     dweight_workspace_row_offset = 0
     dbias_workspace_row_offset = num_programs * num_heads if compute_dweight else 0
+    # The reduce below splits the partial rows across lanes and combines them
+    # through LDS, so each gradient it produces needs a slot per thread.
+    reduced_parameters = int(compute_dweight) + int(compute_dbias)
+    dbias_shared_offset = DWEIGHT_REDUCE_THREADS if compute_dweight else 0
+    parameter_reduce_storage = make_reduction_storage(
+        max(1, DWEIGHT_REDUCE_THREADS * reduced_parameters)
+    )
 
     _, source_per_access = vector_access_plan(vecsize, source_bits)
     _, dy_per_access = vector_access_plan(vecsize, dy_bits)
@@ -795,19 +801,25 @@ def build_rmsnorm_feature_bwd_two_stage_module(
                         vecsize,
                     )
 
-    @flyc.kernel
+    @flyc.kernel(known_block_size=[DWEIGHT_REDUCE_THREADS, 1, 1])
     def rmsnorm_feature_parameter_reduce_kernel(
-        workspace_tensor: fx.Tensor,
+        workspace_flat: fx.Tensor,
         dweight_tensor: fx.Tensor,
         dbias_tensor: fx.Tensor,
     ):
         block = fx.block_idx.x
         tid = fx.thread_idx.x
-        parameter_index = fx.Int64(block) * fx.Int64(BLOCK_THREADS) + fx.Int64(tid)
+        # The work here is num_programs x n, but a grid opened on the parameter
+        # alone is one block for a 256-element weight however many rows fed it.
+        # Block by column and give the partial rows their own lanes, which is
+        # what the plain reduce above does and why it is the faster of the two.
+        column_lane = tid % DWEIGHT_REDUCE_COLS
+        partial_lane = tid // DWEIGHT_REDUCE_COLS
+        parameter_index = block * DWEIGHT_REDUCE_COLS + column_lane
         valid = parameter_index < parameter_numel
         safe_index = valid.select(parameter_index, 0)
-        parameter_head = safe_index // fx.Int64(n) if per_head else fx.Int64(0)
-        parameter_column = safe_index % fx.Int64(n) if per_head else safe_index
+        parameter_head = safe_index // n if per_head else fx.Int32(0)
+        parameter_column = safe_index % n if per_head else safe_index
         if const_expr(compute_dweight):
             dweight_buffer = (
                 row_buffer(dweight_tensor, parameter_head, 32, n)
@@ -830,73 +842,88 @@ def build_rmsnorm_feature_bwd_two_stage_module(
             )
         output_index = parameter_column if per_head else parameter_index
         f32_copy = buffer_copy_atom(32, 32)
+        # One descriptor for the whole workspace, built once and indexed flat.
+        # Per-row descriptors cannot be hoisted out of the loop below, and the
+        # row a lane reads depends on its lane, so building them inside would
+        # make the descriptor itself divergent -- which costs far more than the
+        # lane split saves. num_programs comes from the CU count, so the
+        # workspace stays well inside the 4 GiB a descriptor addresses.
+        workspace_div = fx.logical_divide(
+            fx.rocdl.make_buffer_tensor(workspace_flat),
+            fx.make_layout(1, 1),
+        )
+        storage = fx.SharedAllocator().allocate(parameter_reduce_storage).peek()
+        shared_partial = storage.s_red.view(
+            fx.make_layout(max(1, DWEIGHT_REDUCE_THREADS * reduced_parameters), 1)
+        )
 
         dweight_total = fx.Float32(0.0)
         dbias_total = fx.Float32(0.0)
         # A device loop, not range_constexpr: num_programs tracks the row count,
         # so unrolling it made codegen linear in the batch size (32s at 1536
         # against a flat 0.13s for the plain reduce next door).
-        for partial_row in range(num_programs):
-            workspace_row = (
-                fx.Int64(partial_row) * fx.Int64(num_heads) + parameter_head
-                if per_head
-                else fx.Int64(partial_row)
-            )
+        for partial_base in range(0, num_programs, DWEIGHT_REDUCE_ROW_LANES):
+            partial_row = partial_base + partial_lane
+            partial_valid = partial_row < num_programs
+            safe_row = partial_valid.select(partial_row, 0)
+            workspace_row = safe_row * num_heads + parameter_head if per_head else safe_row
             if const_expr(compute_dweight):
-                dweight_workspace_row = row_buffer(
-                    workspace_tensor,
-                    dweight_workspace_row_offset + workspace_row,
-                    32,
-                    n,
-                )
-                dweight_workspace_div = fx.logical_divide(
-                    dweight_workspace_row,
-                    fx.make_layout(1, 1),
-                )
-                dweight_total = dweight_total + load_scalar(
+                value = load_scalar(
                     f32_copy,
                     fx.Float32,
-                    dweight_workspace_div,
-                    parameter_column,
+                    workspace_div,
+                    (dweight_workspace_row_offset + workspace_row) * n + parameter_column,
                 )
+                dweight_total = dweight_total + partial_valid.select(value, fx.Float32(0.0))
             if const_expr(compute_dbias):
-                dbias_workspace_row = row_buffer(
-                    workspace_tensor,
-                    dbias_workspace_row_offset + workspace_row,
-                    32,
-                    n,
-                )
-                dbias_workspace_div = fx.logical_divide(
-                    dbias_workspace_row,
-                    fx.make_layout(1, 1),
-                )
-                dbias_total = dbias_total + load_scalar(
+                value = load_scalar(
                     f32_copy,
                     fx.Float32,
-                    dbias_workspace_div,
-                    parameter_column,
+                    workspace_div,
+                    (dbias_workspace_row_offset + workspace_row) * n + parameter_column,
                 )
-        if parameter_index < parameter_numel:
-            if const_expr(compute_dweight):
-                store_scalar(
-                    f32_copy,
-                    fx.Float32,
-                    fx.Float32,
-                    dweight_div,
-                    output_index,
-                    dweight_total,
-                )
-            if const_expr(compute_dbias):
-                store_scalar(
-                    f32_copy,
-                    fx.Float32,
-                    fx.Float32,
-                    dbias_div,
-                    output_index,
-                    dbias_total,
-                )
+                dbias_total = dbias_total + partial_valid.select(value, fx.Float32(0.0))
 
-    reduce_grid = (parameter_numel + BLOCK_THREADS - 1) // BLOCK_THREADS
+        if const_expr(compute_dweight):
+            fx.memref_store(dweight_total, shared_partial, tid)
+        if const_expr(compute_dbias):
+            fx.memref_store(dbias_total, shared_partial, dbias_shared_offset + tid)
+        gpu.barrier()
+
+        if partial_lane == 0:
+            if parameter_index < parameter_numel:
+                if const_expr(compute_dweight):
+                    total = fx.Float32(0.0)
+                    for lane in range_constexpr(DWEIGHT_REDUCE_ROW_LANES):
+                        total = total + fx.memref_load(
+                            shared_partial,
+                            lane * DWEIGHT_REDUCE_COLS + column_lane,
+                        )
+                    store_scalar(
+                        f32_copy,
+                        fx.Float32,
+                        fx.Float32,
+                        dweight_div,
+                        output_index,
+                        total,
+                    )
+                if const_expr(compute_dbias):
+                    total = fx.Float32(0.0)
+                    for lane in range_constexpr(DWEIGHT_REDUCE_ROW_LANES):
+                        total = total + fx.memref_load(
+                            shared_partial,
+                            dbias_shared_offset + lane * DWEIGHT_REDUCE_COLS + column_lane,
+                        )
+                    store_scalar(
+                        f32_copy,
+                        fx.Float32,
+                        fx.Float32,
+                        dbias_div,
+                        output_index,
+                        total,
+                    )
+
+    reduce_grid = (parameter_numel + DWEIGHT_REDUCE_COLS - 1) // DWEIGHT_REDUCE_COLS
     reduces_parameters = compute_dweight or compute_dbias
 
     @flyc.jit
@@ -911,6 +938,7 @@ def build_rmsnorm_feature_bwd_two_stage_module(
         dweight_tensor: fx.Tensor,
         dbias_tensor: fx.Tensor,
         workspace_tensor: fx.Tensor,
+        workspace_flat: fx.Tensor,
         m: fx.Int32,
         weight_offset: fx.Float32,
         stream: fx.Stream = fx.Stream(None),
@@ -935,12 +963,12 @@ def build_rmsnorm_feature_bwd_two_stage_module(
         # wanted, so the launch would cover parameter_numel doing nothing.
         if const_expr(reduces_parameters):
             rmsnorm_feature_parameter_reduce_kernel(
-                workspace_tensor,
+                workspace_flat,
                 dweight_tensor,
                 dbias_tensor,
             ).launch(
                 grid=(reduce_grid, 1, 1),
-                block=(BLOCK_THREADS, 1, 1),
+                block=(DWEIGHT_REDUCE_THREADS, 1, 1),
                 stream=stream,
             )
 

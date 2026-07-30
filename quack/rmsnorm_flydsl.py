@@ -679,6 +679,10 @@ def _launch_rmsnorm_feature_bwd(
             dweight,
             dbias,
             workspace,
+            # The partial kernel writes the workspace a row at a time and the
+            # reduce reads all of it, so it takes the same memory flat: one
+            # descriptor it can hoist out of its accumulation loop.
+            workspace.view(-1),
             m,
             weight_offset,
             _current_raw_stream(source.device),
