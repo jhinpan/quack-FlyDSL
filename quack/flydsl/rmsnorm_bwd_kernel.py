@@ -4,9 +4,9 @@
 # Adapted for Quack from ROCm/FlyDSL commit
 # ddaa507f56aa3fe9c08ebe6161a717b755540248.
 
-"""Plain and feature-complete RMSNorm backward kernel builders.
+"""RMSNorm backward kernel builder.
 
-Both are staged: a persistent kernel writes one partial parameter gradient per
+It is staged: a persistent kernel writes one partial parameter gradient per
 block, then a second kernel reduces the partials. There is no atomic variant.
 One existed for small row counts and was removed after measurement -- fp32
 atomics force a zeroed accumulator and a cast back to the weight dtype, which
@@ -62,7 +62,7 @@ def rmsnorm_bwd_two_stage_config(n: int, dtype_str: str) -> RmsNormRowConfig:
     )
 
 
-def build_rmsnorm_feature_bwd_two_stage_module(
+def build_rmsnorm_bwd_two_stage_module(
     n: int,
     source_dtype_str: str,
     dy_dtype_str: str,
@@ -83,7 +83,7 @@ def build_rmsnorm_feature_bwd_two_stage_module(
     num_heads: int,
     arch: str | None = None,
 ):
-    """Build deterministic persistent feature backward plus parameter reduce."""
+    """Build the deterministic persistent backward plus its parameter reduce."""
     if num_programs <= 0:
         raise ValueError(f"num_programs must be positive, got {num_programs}")
     arch = get_rocm_arch() if arch is None else arch
@@ -127,7 +127,7 @@ def build_rmsnorm_feature_bwd_two_stage_module(
     _, workspace_per_access = vector_access_plan(vecsize, 32)
 
     @flyc.kernel(known_block_size=[block_threads, 1, 1])
-    def rmsnorm_feature_bwd_partial_kernel(
+    def rmsnorm_bwd_partial_kernel(
         source_tensor: fx.Tensor,
         weight_tensor: fx.Tensor,
         dy_tensor: fx.Tensor,
@@ -424,7 +424,7 @@ def build_rmsnorm_feature_bwd_two_stage_module(
                     )
 
     @flyc.kernel(known_block_size=[PARAMETER_REDUCE_THREADS, 1, 1])
-    def rmsnorm_feature_parameter_reduce_kernel(
+    def rmsnorm_parameter_reduce_kernel(
         workspace_flat: fx.Tensor,
         dweight_tensor: fx.Tensor,
         dbias_tensor: fx.Tensor,
@@ -482,8 +482,8 @@ def build_rmsnorm_feature_bwd_two_stage_module(
         dweight_total = fx.Float32(0.0)
         dbias_total = fx.Float32(0.0)
         # A device loop, not range_constexpr: num_programs tracks the row count,
-        # so unrolling it made codegen linear in the batch size (32s at 1536
-        # against a flat 0.13s for the plain reduce next door).
+        # so unrolling it made codegen linear in the batch size -- 32s to build
+        # at 1536 programs, against a flat 0.13s once it stayed a loop.
         for partial_base in range(0, num_programs, PARAMETER_REDUCE_ROW_LANES):
             partial_row = partial_base + partial_lane
             partial_valid = partial_row < num_programs
@@ -549,7 +549,7 @@ def build_rmsnorm_feature_bwd_two_stage_module(
     reduces_parameters = compute_dweight or compute_dbias
 
     @flyc.jit
-    def launch_rmsnorm_feature_bwd_two_stage(
+    def launch_rmsnorm_bwd_two_stage(
         source_tensor: fx.Tensor,
         weight_tensor: fx.Tensor,
         dy_tensor: fx.Tensor,
@@ -565,7 +565,7 @@ def build_rmsnorm_feature_bwd_two_stage_module(
         weight_offset: fx.Float32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        rmsnorm_feature_bwd_partial_kernel(
+        rmsnorm_bwd_partial_kernel(
             source_tensor,
             weight_tensor,
             dy_tensor,
@@ -584,7 +584,7 @@ def build_rmsnorm_feature_bwd_two_stage_module(
         # Both reduce branches compile out when no parameter gradient is
         # wanted, so the launch would cover parameter_numel doing nothing.
         if const_expr(reduces_parameters):
-            rmsnorm_feature_parameter_reduce_kernel(
+            rmsnorm_parameter_reduce_kernel(
                 workspace_flat,
                 dweight_tensor,
                 dbias_tensor,
@@ -594,4 +594,4 @@ def build_rmsnorm_feature_bwd_two_stage_module(
                 stream=stream,
             )
 
-    return launch_rmsnorm_feature_bwd_two_stage
+    return launch_rmsnorm_bwd_two_stage

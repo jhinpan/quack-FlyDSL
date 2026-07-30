@@ -19,18 +19,18 @@ reduction tree, so the backward is bitwise reproducible with no opt-in.
 Per-head workspaces and final parameter-gradient stores use row-scoped buffer
 descriptors so neither temporary nor output addressing silently wraps at 4 GiB.
 
-## The baseline for a feature kernel is the compiler, not the plain path
+## The baseline is the compiler, not another hand-written kernel
 
-The plain path cannot express bias, residual, prenorm, per-head or dtype
-overrides at all, so it is not what a caller gives up by using them. What they
-give up is `torch.compile`, which fuses this shape of work close to the
-roofline. That is the number to beat, and it is a demanding one: inductor
-reaches 4.8 TB/s on fused residual + prenorm, above anything this backend
-achieves on any other shape.
+Bias, residual, prenorm, per-head and dtype overrides have no cheaper
+hand-written alternative here, so what a caller gives up by using them is
+`torch.compile`, which fuses this shape of work close to the roofline. That is
+the number to beat, and it is a demanding one: inductor reaches 4.8 TB/s on
+fused residual + prenorm, above anything this backend achieves on any other
+shape.
 
-A first cut of the feature path was scalar and re-read the row from global
-memory after the reduction, which put it well under that bar. Measured at
-32768x2048 bf16, forward, against `torch.compile`:
+A first cut of that kernel was scalar and re-read the row from global memory
+after the reduction, which put it well under that bar. Measured at 32768x2048
+bf16, forward, against `torch.compile`:
 
 | case | scalar first cut | vectorized | `torch.compile` |
 | --- | --- | --- | --- |
@@ -38,8 +38,7 @@ memory after the reduction, which put it well under that bar. Measured at
 | `weight_offset=1` | 3.04 TB/s (0.77x) | 4.36 TB/s (1.11x) | 3.93 TB/s |
 | `+residual+prenorm` | 2.71 TB/s (0.57x) | 4.75 TB/s (1.00x) | 4.77 TB/s |
 
-Three things closed that gap, and all three are visible in the plain path
-already:
+Three things closed that gap:
 
 1. **Take the vector width from the activation dtype and let every other
    operand cover that same span.** `vector_access_plan` splits an operand into
@@ -111,9 +110,9 @@ the crossover depends on `n`, which a fixed row count cannot express: about
 m=370 at n=512, m=250 at n=2048, and m=8 at n=8192, where the atomic kernel was
 3.1x slower by m=511.
 
-Two things came out with it. The parameter accumulators in the feature backward
-were zeroed on every call on both paths, including the `(1,)` placeholder for a
-gradient nobody asked for, and `torch.zeros((1,))` is still a full kernel
+Two things came out with it. The parameter accumulators were zeroed on every
+call, including the `(1,)` placeholder for a gradient nobody asked for, and
+`torch.zeros((1,))` is still a full kernel
 launch; the reduce writes what it is asked for, so `torch.empty` is enough. The
 effect is inside the noise of the autograd path, but the launches are gone.
 And the raw MLIR `atomic_add` went with the kernel, which leaves nothing in this
@@ -134,12 +133,9 @@ compiled small batches, and those returned from the path selector before they
 touched the config.
 
 The forward never had the problem because it resolves its tiling inside the
-launcher, behind the opaque custom op, and the feature backward already
-allocated its workspace there too. The plain backward passed both in from
-outside only because the atomic path needed a different argument list. It now
-resolves `num_programs` and allocates its partials in the launcher like the
-other two, which is also where the allocation belongs for timing: the benchmark
-had been hoisting it out of the timed region.
+launcher, behind the opaque custom op. The backward now does the same with
+`num_programs` and its workspace, which is also where the allocation belongs
+for timing: the benchmark had been hoisting it out of the timed region.
 
 The general rule: anything a kernel is specialized on has to be a build-time
 constant, so it must be resolved behind the op, not in the graph.
@@ -235,7 +231,7 @@ exactly that reason. The adapter now refuses them and names `quack.rmsnorm`,
 which serves any length, as the fallback.
 
 Three things fell out with them. `use_multi_row_kernel` and
-`batch_feature_rows` were two predicates that could only disagree on an
+`batch_short_rows` were two predicates that could only disagree on an
 unaligned row, and are now one. `SMALL_ROW_THRESHOLD` existed to decide what to
 do with a long scalar row, and there are none. `_select_rmsnorm_bwd_programs`
 branched on whether the row vectorized, and it always does.
@@ -276,11 +272,11 @@ Forward, BF16, against `torch.compile`:
 | 262144 x 128 | 1.44 TB/s | 3.72 TB/s | 3.78 TB/s |
 | 262144 x 256 | 1.47 TB/s | 4.29 TB/s | 3.96 TB/s |
 
-The feature path had no batching at all, which cost it more: one block per
-128-element row leaves 48 of its 64 lanes with nothing to load. Sharing the
-block took `weight_offset` at 262144x128 from 1.86 to 3.79 TB/s, which is
-parity with inductor, and 131072x256 from 3.03 to 3.83. That is the QK-norm
-shape, so it is worth having.
+Before any of it existed a short row got a block to itself, which leaves 48 of
+64 lanes with nothing to load on a 128-element row. Sharing the block took
+`weight_offset` at 262144x128 from 1.86 to 3.79 TB/s, which is parity with
+inductor, and 131072x256 from 3.03 to 3.83. That is the QK-norm shape, so it is
+worth having.
 
 Batching stops once a lane group would have to loop: a block of its own is
 faster then, by 1.4x at 33554432x1021 and 1.9x at 2047. On an aligned row that
@@ -308,11 +304,11 @@ group's `num_records` to zero bytes makes the hardware discard its loads and
 stores and leaves every lane free to keep taking part in the reduction shuffle.
 Predicating the stores instead cost 8% here, and up to 1.5x once the loop was
 deep, because it turns one exec-mask update into one per tile. This is what the
-feature forward does, and it is safe there precisely because
-`batch_feature_rows` only batches rows a group covers in one pass.
+forward does, and it is safe precisely because `batch_short_rows` only batches
+rows a group covers in one pass.
 
 On a **deep** tile loop, one uniform branch around the whole row wins, and by a
-lot. The forward no longer batches such a row -- `batch_feature_rows` stops at
+lot. The forward no longer batches such a row -- `batch_short_rows` stops at
 the block-width floor, and on an aligned row that already means one pass -- so
 this is a case the surviving path cannot reach. Keep it that way: while a
 deep batched loop was reachable, leaving the tail to the descriptor made the

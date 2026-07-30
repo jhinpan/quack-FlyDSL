@@ -21,7 +21,7 @@ import triton
 
 from quack.flydsl.rmsnorm_config import (
     RmsNormRowConfig,
-    batch_feature_rows,
+    batch_short_rows,
     multi_row_block_rows,
 )
 from quack.rmsnorm_flydsl import rmsnorm
@@ -119,7 +119,7 @@ for m, n in SHAPES:
     row = m * n * x.element_size()
 
     print(f"\n=== {m}x{n} bf16 ===")
-    print(f"  geometry {geometry(n, 16, batch_feature_rows(n, 16))}")
+    print(f"  geometry {geometry(n, 16, batch_short_rows(n, 16))}")
     print(f"{'case':>19} {'FlyDSL':>19} {'torch.compile':>19} {'speedup':>8}")
     print("-" * 68)
 

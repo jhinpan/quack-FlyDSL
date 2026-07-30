@@ -4,7 +4,7 @@
 # Adapted for Quack from ROCm/FlyDSL commit
 # ddaa507f56aa3fe9c08ebe6161a717b755540248.
 
-"""Host and device helpers shared by the plain RMSNorm kernels."""
+"""Host and device helpers shared by the RMSNorm kernels."""
 
 import math
 import threading

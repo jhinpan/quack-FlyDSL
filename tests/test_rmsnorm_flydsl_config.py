@@ -18,7 +18,7 @@ from quack.flydsl.rmsnorm_config import (
     N_ALIGNMENT,
     WAVE_SIZE,
     RmsNormRowConfig,
-    batch_feature_rows,
+    batch_short_rows,
     multi_row_block_rows,
 )
 
@@ -156,28 +156,28 @@ def test_unsupported_element_width_is_rejected():
 @pytest.mark.parametrize("N", (8, 16, 24, 64, 128, 192))
 def test_tiny_rows_are_batched_several_to_a_block(N, dtype_width):
     """One block per row wastes a launch when the row cannot fill one wave."""
-    assert batch_feature_rows(N, dtype_width)
+    assert batch_short_rows(N, dtype_width)
 
 
 @pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
 @pytest.mark.parametrize("N", (1024, 2048, 4096, 6144, 8192))
 def test_rows_that_fill_a_block_get_one_of_their_own(N, dtype_width):
-    assert not batch_feature_rows(N, dtype_width)
+    assert not batch_short_rows(N, dtype_width)
 
 
 def test_the_batching_crossover_is_one_minimum_block_of_vectors():
     """bf16 crosses over at 64 x 8 elements, fp32 at 64 x 4."""
-    assert batch_feature_rows(504, 16)
-    assert not batch_feature_rows(512, 16)
-    assert batch_feature_rows(248, 32)
-    assert not batch_feature_rows(256, 32)
+    assert batch_short_rows(504, 16)
+    assert not batch_short_rows(512, 16)
+    assert batch_short_rows(248, 32)
+    assert not batch_short_rows(256, 32)
 
 
 # The multi-row kernel splits a row across a group of lanes rather than a whole
 # block, so it asks the same factory for a different lane budget.
 
 MULTI_ROW_CASES = [
-    (N, width) for width in DTYPE_WIDTHS for N in HIDDEN_SIZES if batch_feature_rows(N, width)
+    (N, width) for width in DTYPE_WIDTHS for N in HIDDEN_SIZES if batch_short_rows(N, width)
 ]
 
 
@@ -282,7 +282,7 @@ def test_batching_only_takes_rows_a_group_covers_in_one_pass(N, dtype_width):
     On an aligned row this falls out of the vector count rather than needing a
     second condition, which is why one predicate now answers for both.
     """
-    if batch_feature_rows(N, dtype_width):
+    if batch_short_rows(N, dtype_width):
         assert lane_group(N, dtype_width).num_tiles == 1
 
 
@@ -301,4 +301,4 @@ def test_batching_only_takes_rows_a_group_covers_in_one_pass(N, dtype_width):
     ],
 )
 def test_the_batching_crossover(N, dtype_width, batched):
-    assert batch_feature_rows(N, dtype_width) is batched
+    assert batch_short_rows(N, dtype_width) is batched

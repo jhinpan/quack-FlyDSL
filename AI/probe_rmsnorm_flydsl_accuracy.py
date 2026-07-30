@@ -1,4 +1,4 @@
-"""Probe: does the FlyDSL feature path agree with an eager fp32 reference?
+"""Probe: does the FlyDSL backend agree with an eager fp32 reference?
 
 The test suite asserts this too, but at the tolerance each dtype deserves.
 This probe pins the number itself, in fp32 where there is nowhere for an

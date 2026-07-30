@@ -52,9 +52,9 @@ def _profile_device_us(
         for event in profiler.key_averages():
             if event.self_device_time_total <= 0:
                 continue
-            if "rmsnorm_feature_bwd_partial_kernel" in event.key:
+            if "rmsnorm_bwd_partial_kernel" in event.key:
                 name = "partial"
-            elif "rmsnorm_feature_parameter_reduce_kernel" in event.key:
+            elif "rmsnorm_parameter_reduce_kernel" in event.key:
                 name = "reduce"
             elif "reduce_kernel" in event.key:
                 name = "torch_sum"
@@ -113,7 +113,7 @@ def _measure_cell(
     partial = torch.randn(num_programs, n, device=device, dtype=torch.float32)
 
     def full_backward() -> None:
-        rmsnorm_flydsl._launch_rmsnorm_feature_bwd(
+        rmsnorm_flydsl._launch_rmsnorm_bwd(
             x,
             weight,
             dout,

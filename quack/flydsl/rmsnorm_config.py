@@ -137,7 +137,7 @@ def multi_row_block_rows(threads_per_row: int) -> int:
     return max(1, MAX_NUM_THREADS // threads_per_row)
 
 
-def batch_feature_rows(N: int, dtype_width: int) -> bool:
+def batch_short_rows(N: int, dtype_width: int) -> bool:
     """Whether the forward should batch several rows into one block.
 
     Batching pays only when a row is too short to keep a block busy on its own,
@@ -156,7 +156,7 @@ __all__ = [
     "N_ALIGNMENT",
     "WAVE_SIZE",
     "RmsNormRowConfig",
-    "batch_feature_rows",
+    "batch_short_rows",
     "multi_row_block_rows",
     "next_power_of_two",
 ]

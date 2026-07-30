@@ -13,12 +13,12 @@ import torch
 
 from quack.flydsl.rmsnorm_bwd_kernel import (
     TWO_STAGE_MAX_NUM_THREADS,
-    build_rmsnorm_feature_bwd_two_stage_module,
+    build_rmsnorm_bwd_two_stage_module,
     rmsnorm_bwd_two_stage_config,
 )
 from quack.flydsl.rmsnorm_common import EPS, FLYDSL_BUILD_LOCK, run_compiled
 from quack.flydsl.rmsnorm_config import MAX_N, N_ALIGNMENT, next_power_of_two
-from quack.flydsl.rmsnorm_kernel import build_rmsnorm_feature_module
+from quack.flydsl.rmsnorm_kernel import build_rmsnorm_module
 
 __all__ = ["rmsnorm"]
 
@@ -97,7 +97,7 @@ def _validate_arch(device: torch.device) -> str:
     return actual
 
 
-def _validate_feature_inputs(
+def _validate_inputs(
     x: torch.Tensor,
     weight: torch.Tensor | None,
     bias: torch.Tensor | None,
@@ -252,7 +252,7 @@ def _select_rmsnorm_bwd_programs(
     return min(next_power_of_two(m), num_programs)
 
 
-def _launch_rmsnorm_feature_fwd(
+def _launch_rmsnorm_fwd(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor,
@@ -281,7 +281,6 @@ def _launch_rmsnorm_feature_fwd(
 
     with torch.cuda.device(x.device):
         key = (
-            "feature",
             x.device.index,
             n,
             dtype_str,
@@ -304,7 +303,7 @@ def _launch_rmsnorm_feature_fwd(
                 _FWD_CACHE,
                 key,
                 x.device,
-                lambda arch: build_rmsnorm_feature_module(
+                lambda arch: build_rmsnorm_module(
                     n,
                     dtype_str,
                     output_dtype_str,
@@ -339,7 +338,7 @@ def _launch_rmsnorm_feature_fwd(
 
 
 @torch.library.custom_op(
-    "quack::_rmsnorm_flydsl_feature_fwd",
+    "quack::_rmsnorm_flydsl_fwd",
     mutates_args=("out", "residual_out", "rstd"),
     device_types="cuda",
     schema=(
@@ -350,7 +349,7 @@ def _launch_rmsnorm_feature_fwd(
         "bool per_head, int num_heads) -> ()"
     ),
 )
-def _rmsnorm_flydsl_feature_fwd_op(
+def _rmsnorm_flydsl_fwd_op(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor,
@@ -368,7 +367,7 @@ def _rmsnorm_flydsl_feature_fwd_op(
     per_head: bool,
     num_heads: int,
 ) -> None:
-    _launch_rmsnorm_feature_fwd(
+    _launch_rmsnorm_fwd(
         x,
         weight,
         bias,
@@ -388,10 +387,10 @@ def _rmsnorm_flydsl_feature_fwd_op(
     )
 
 
-_rmsnorm_flydsl_feature_fwd_op.register_fake(_noop_fake)
+_rmsnorm_flydsl_fwd_op.register_fake(_noop_fake)
 
 
-def _launch_rmsnorm_feature_bwd(
+def _launch_rmsnorm_bwd(
     source: torch.Tensor,
     weight: torch.Tensor,
     dout: torch.Tensor,
@@ -436,7 +435,6 @@ def _launch_rmsnorm_feature_bwd(
     )
     with torch.cuda.device(source.device):
         key = (
-            "feature",
             source.device.index,
             n,
             source_dtype_str,
@@ -462,7 +460,7 @@ def _launch_rmsnorm_feature_bwd(
                 _BWD_CACHE,
                 key,
                 source.device,
-                lambda arch: build_rmsnorm_feature_bwd_two_stage_module(
+                lambda arch: build_rmsnorm_bwd_two_stage_module(
                     n,
                     source_dtype_str,
                     dy_dtype_str,
@@ -506,7 +504,7 @@ def _launch_rmsnorm_feature_bwd(
 
 
 @torch.library.custom_op(
-    "quack::_rmsnorm_flydsl_feature_bwd",
+    "quack::_rmsnorm_flydsl_bwd",
     mutates_args=("dx", "dresidual", "dweight", "dbias"),
     device_types="cuda",
     schema=(
@@ -518,7 +516,7 @@ def _launch_rmsnorm_feature_bwd(
         "bool has_dresidual_out, bool per_head, int num_heads) -> ()"
     ),
 )
-def _rmsnorm_flydsl_feature_bwd_op(
+def _rmsnorm_flydsl_bwd_op(
     source: torch.Tensor,
     weight: torch.Tensor,
     dout: torch.Tensor,
@@ -538,7 +536,7 @@ def _rmsnorm_flydsl_feature_bwd_op(
     per_head: bool,
     num_heads: int,
 ) -> None:
-    _launch_rmsnorm_feature_bwd(
+    _launch_rmsnorm_bwd(
         source,
         weight,
         dout,
@@ -560,10 +558,10 @@ def _rmsnorm_flydsl_feature_bwd_op(
     )
 
 
-_rmsnorm_flydsl_feature_bwd_op.register_fake(_noop_fake)
+_rmsnorm_flydsl_bwd_op.register_fake(_noop_fake)
 
 
-class _RMSNormFeatureFunction(torch.autograd.Function):
+class _RMSNormFunction(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
@@ -600,8 +598,8 @@ class _RMSNormFeatureFunction(torch.autograd.Function):
             dtype=torch.float32,
         )
         _dispatch(
-            _rmsnorm_flydsl_feature_fwd_op,
-            _launch_rmsnorm_feature_fwd,
+            _rmsnorm_flydsl_fwd_op,
+            _launch_rmsnorm_fwd,
             x,
             weight,
             bias,
@@ -671,8 +669,8 @@ class _RMSNormFeatureFunction(torch.autograd.Function):
             dtype=bias.dtype if ctx.bias_needs_grad else weight.dtype,
         )
         _dispatch(
-            _rmsnorm_flydsl_feature_bwd_op,
-            _launch_rmsnorm_feature_bwd,
+            _rmsnorm_flydsl_bwd_op,
+            _launch_rmsnorm_bwd,
             source,
             weight,
             dout,
@@ -723,7 +721,7 @@ def rmsnorm(
     weight_offset: float = 0.0,
 ) -> torch.Tensor:
     """Apply RMSNorm over the last dimension using the FlyDSL backend."""
-    m, n, num_heads, per_head, eps, weight_offset = _validate_feature_inputs(
+    m, n, num_heads, per_head, eps, weight_offset = _validate_inputs(
         x,
         weight,
         bias,
@@ -767,7 +765,7 @@ def rmsnorm(
     residual_arg = (
         residual.reshape(-1, *last_shape).contiguous() if residual is not None else x_flat
     )
-    result = _RMSNormFeatureFunction.apply(
+    result = _RMSNormFunction.apply(
         x_flat,
         weight_arg,
         bias_arg,

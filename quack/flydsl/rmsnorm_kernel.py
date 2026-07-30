@@ -4,7 +4,7 @@
 # Adapted for Quack from ROCm/FlyDSL commit
 # ddaa507f56aa3fe9c08ebe6161a717b755540248.
 
-"""Optimized plain and feature-complete RMSNorm forward builders."""
+"""RMSNorm forward builder."""
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -32,12 +32,12 @@ from .rmsnorm_common import (
 )
 from .rmsnorm_config import (
     RmsNormRowConfig,
-    batch_feature_rows,
+    batch_short_rows,
     multi_row_block_rows,
 )
 
 
-def build_rmsnorm_feature_module(
+def build_rmsnorm_module(
     n: int,
     input_dtype_str: str,
     output_dtype_str: str,
@@ -55,17 +55,16 @@ def build_rmsnorm_feature_module(
     num_heads: int,
     arch: str | None = None,
 ):
-    """Build the feature-complete RMSNorm forward path.
+    """Build the RMSNorm forward, specialized by shape, dtypes and feature flags.
 
-    The optimized plain-weighted builders above remain unchanged. This path
-    owns optional affine inputs, fused residual addition, independent output
-    dtypes, and per-head parameter addressing.
+    One builder covers every combination the backend accepts: optional affine
+    inputs, fused residual addition, independent output dtypes, and per-head
+    parameter addressing. Each flag is compile-time, so a combination that is
+    off costs nothing at run time.
 
-    The vector width comes from the activation dtype, exactly as it does for
-    the plain path, and every other operand covers that same span with whole
-    accesses of its own width. A row that is not a whole number of vectors
-    degrades to a narrower vector rather than to scalar, and ``vecsize == 1``
-    falls out of the same code as the scalar case.
+    The vector width comes from the activation dtype, and every other operand
+    covers that same span with whole accesses of its own width -- only a 32-bit
+    operand under a full 16-bit activation vector needs more than one.
 
     A row is covered by a group of threads, and a block holds one or more such
     groups. A row long enough to fill a block gets a group that wide and a
@@ -82,7 +81,7 @@ def build_rmsnorm_feature_module(
     bias_bits = dtype_to_elem_bits(bias_dtype_str)
     residual_bits = dtype_to_elem_bits(residual_dtype_str)
     residual_out_bits = dtype_to_elem_bits(residual_out_dtype_str)
-    batched = batch_feature_rows(n, input_bits)
+    batched = batch_short_rows(n, input_bits)
     config = (
         RmsNormRowConfig.for_lane_group(n, input_bits)
         if batched
@@ -111,7 +110,7 @@ def build_rmsnorm_feature_module(
     _, residual_out_per_access = vector_access_plan(vecsize, residual_out_bits)
 
     @flyc.kernel
-    def rmsnorm_feature_kernel(
+    def rmsnorm_kernel(
         input_tensor: fx.Tensor,
         weight_tensor: fx.Tensor,
         bias_tensor: fx.Tensor,
@@ -369,7 +368,7 @@ def build_rmsnorm_feature_module(
                 )
 
     @flyc.jit
-    def launch_rmsnorm_feature(
+    def launch_rmsnorm(
         input_tensor: fx.Tensor,
         weight_tensor: fx.Tensor,
         bias_tensor: fx.Tensor,
@@ -383,7 +382,7 @@ def build_rmsnorm_feature_module(
         stream: fx.Stream = fx.Stream(None),
     ):
         num_programs = m * fx.Int32(num_heads)
-        rmsnorm_feature_kernel(
+        rmsnorm_kernel(
             input_tensor,
             weight_tensor,
             bias_tensor,
@@ -404,4 +403,4 @@ def build_rmsnorm_feature_module(
             stream=stream,
         )
 
-    return launch_rmsnorm_feature
+    return launch_rmsnorm

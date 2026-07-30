@@ -87,7 +87,7 @@ def _assert_fused_residual_grad_close(actual: torch.Tensor, expected: torch.Tens
     rounded to ``residual_dtype``, and backward recomputes ``x_hat`` from the
     rounded copy. Quack's own kernels do the same. The slack here absorbs that
     one rounding, so it applies whatever the gradient's own dtype is -- and it
-    is why the non-residual feature tests use the tighter _assert_grad_close
+    is why the tests without a residual use the tighter _assert_grad_close
     instead of borrowing this tolerance.
     """
     torch.testing.assert_close(actual, expected, rtol=3e-2, atol=3e-2)
@@ -501,7 +501,7 @@ def test_mixed_input_and_weight_dtypes_use_generic_path():
     _assert_grad_close(weight.grad, weight_ref.grad)
 
 
-def test_feature_path_respects_selective_gradients():
+def test_selective_gradients_are_respected():
     x = torch.randn((4, 760), device="cuda", dtype=torch.float16)
     weight = torch.randn(760, device="cuda", dtype=torch.float32)
     bias = torch.randn(
@@ -520,7 +520,7 @@ def test_feature_path_respects_selective_gradients():
     assert residual.grad is not None
 
 
-def test_feature_rich_empty_batch_preserves_autograd_contract():
+def test_empty_batch_preserves_autograd_contract():
     x = torch.empty(
         (0, 4, 64),
         device="cuda",
@@ -637,7 +637,7 @@ def test_compiled_rmsnorm_switches_from_plain_to_per_head():
         assert tensor.grad is not None
 
 
-def test_dynamic_compiled_feature_backward_selects_at_runtime():
+def test_dynamic_compiled_backward_selects_at_runtime():
     @torch.compile(fullgraph=True, dynamic=True)
     def compiled(x, weight, bias):
         return rmsnorm(x, weight, bias=bias)
@@ -658,7 +658,7 @@ def test_dynamic_compiled_feature_backward_selects_at_runtime():
     assert bias.grad is not None
 
 
-def test_feature_backward_with_bias_matches_reference():
+def test_backward_with_bias_matches_reference():
     torch.manual_seed(15)
     shape = (512, 760)
     x = torch.randn(shape, device="cuda", dtype=torch.float16, requires_grad=True)
@@ -709,7 +709,7 @@ def test_staged_per_head_backward_supports_selective_parameter_grads(requested):
 
 
 @pytest.mark.parametrize("per_head", [False, True])
-def test_feature_backward_with_no_parameter_grads(per_head):
+def test_backward_with_no_parameter_grads(per_head):
     """Frozen parameters used to be the atomic kernel's other job.
 
     Nothing reduces, so the persistent kernel covers the rows and the parameter
@@ -733,13 +733,13 @@ def test_feature_backward_with_no_parameter_grads(per_head):
     _assert_grad_close(x.grad, x_ref.grad)
 
 
-def test_feature_workspace_descriptors_are_row_scoped():
-    source = inspect.getsource(rmsnorm_flydsl_impl.build_rmsnorm_feature_bwd_two_stage_module)
+def test_workspace_descriptors_are_row_scoped():
+    source = inspect.getsource(rmsnorm_flydsl_impl.build_rmsnorm_bwd_two_stage_module)
     assert "make_buffer_tensor(workspace_tensor)" not in source
     assert source.count("row_buffer(") >= 4
 
 
-def test_deterministic_feature_backward_is_reproducible():
+def test_deterministic_backward_is_reproducible():
     torch.manual_seed(16)
     x = torch.randn((64, 760), device="cuda", dtype=torch.float16)
     weight = torch.randn(760, device="cuda", dtype=torch.float32)
@@ -794,16 +794,16 @@ def _clear_caches():
 
 
 def test_custom_ops_are_unique_mutation_only_and_fake_safe():
-    feature_fwd = torch.ops.quack._rmsnorm_flydsl_feature_fwd.default
-    feature_bwd = torch.ops.quack._rmsnorm_flydsl_feature_bwd.default
-    for op in (feature_fwd, feature_bwd):
+    fwd = torch.ops.quack._rmsnorm_flydsl_fwd.default
+    bwd = torch.ops.quack._rmsnorm_flydsl_bwd.default
+    for op in (fwd, bwd):
         assert str(op._schema).endswith("-> ()")
     # The staged workspace is scratch the launcher allocates for itself; nothing
     # outside the op reads it, so it is not in the schema.
-    assert "workspace" not in str(feature_bwd._schema)
-    assert "Tensor(a4!) out" in str(feature_fwd._schema)
-    assert "Tensor(a5!) residual_out" in str(feature_fwd._schema)
-    assert "Tensor(a8!) dbias" in str(feature_bwd._schema)
+    assert "workspace" not in str(bwd._schema)
+    assert "Tensor(a4!) out" in str(fwd._schema)
+    assert "Tensor(a5!) residual_out" in str(fwd._schema)
+    assert "Tensor(a8!) dbias" in str(bwd._schema)
 
     from torch._subclasses.fake_tensor import FakeTensorMode
 
@@ -819,7 +819,7 @@ def test_custom_ops_are_unique_mutation_only_and_fake_safe():
         bias = torch.empty_like(weight)
         residual = torch.empty_like(x)
         residual_out = torch.empty_like(x)
-        feature_fwd(
+        fwd(
             x,
             weight,
             bias,
@@ -839,7 +839,7 @@ def test_custom_ops_are_unique_mutation_only_and_fake_safe():
         )
         dresidual = torch.empty_like(x)
         dbias = torch.empty_like(weight, dtype=torch.float32)
-        feature_bwd(
+        bwd(
             x,
             weight,
             dout,
@@ -959,7 +959,8 @@ def test_fullgraph_two_stage_backward():
     _assert_close(actual, expected)
     _assert_grad_close(x.grad, dx_expected)
     _assert_grad_close(weight.grad, dw_expected)
-    assert {key[0] for key in rmsnorm_flydsl_impl._BWD_CACHE} == {"feature"}
+    # One staged backward built, not one per graph the compiler produced.
+    assert len(rmsnorm_flydsl_impl._BWD_CACHE) == 1
 
 
 def test_forward_cache_identity_is_shape_and_dtype_only():
@@ -1079,8 +1080,8 @@ def test_same_architecture_eight_device_caches_are_device_local():
             seen_arches.add(torch.cuda.get_device_properties(device).gcnArchName.split(":", 1)[0])
 
     assert len(seen_arches) == 1
-    assert {key[1] for key in rmsnorm_flydsl_impl._FWD_CACHE} == set(range(8))
-    assert {key[1] for key in rmsnorm_flydsl_impl._BWD_CACHE} == set(range(8))
+    assert {key[0] for key in rmsnorm_flydsl_impl._FWD_CACHE} == set(range(8))
+    assert {key[0] for key in rmsnorm_flydsl_impl._BWD_CACHE} == set(range(8))
 
 
 def test_compile_target_must_match_the_device(monkeypatch):
@@ -1245,7 +1246,7 @@ def test_software_bf16_rounding_matches_the_hardware_convert():
     that any pre-gfx95x part has been validated.
     """
     from quack.flydsl.rmsnorm_common import run_compiled
-    from quack.flydsl.rmsnorm_kernel import build_rmsnorm_feature_module
+    from quack.flydsl.rmsnorm_kernel import build_rmsnorm_module
 
     torch.manual_seed(3)
     n = 4096
@@ -1258,7 +1259,7 @@ def test_software_bf16_rounding_matches_the_hardware_convert():
     rounded = {}
     for arch in ("gfx950", "gfx942"):
         out = torch.empty_like(x)
-        launcher = build_rmsnorm_feature_module(
+        launcher = build_rmsnorm_module(
             n,
             "bf16",
             "bf16",
@@ -1446,7 +1447,7 @@ def test_the_backward_neither_zeroes_nor_casts_the_weight_gradient(weight_dtype)
 
 
 @pytest.mark.parametrize("with_bias", [False, True])
-def test_the_feature_backward_zeroes_no_parameter_accumulator(with_bias):
+def test_the_backward_zeroes_no_parameter_accumulator(with_bias):
     """The parameter reduce writes what it is asked for, so nothing needs zeroing.
 
     Both accumulators were zeroed on every call regardless, and so was the
@@ -1470,7 +1471,7 @@ def test_the_feature_backward_zeroes_no_parameter_accumulator(with_bias):
     x.grad, weight.grad = None, None
     with recorder:
         out.backward(dout, retain_graph=True)
-    assert not recorder.matching("zero"), f"feature backward zeroed a buffer: {recorder.ops}"
+    assert not recorder.matching("zero"), f"backward zeroed a buffer: {recorder.ops}"
 
     x_ref = x.detach().clone().requires_grad_(True)
     weight_ref = weight.detach().clone().requires_grad_(True)

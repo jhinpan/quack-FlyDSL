@@ -394,7 +394,7 @@ class _FlyDSLProvider:
                 tensor_sets.append((out,))
 
                 def call(x=x, weight=weight, out=out, rstd=rstd, absent=absent):
-                    self.impl._launch_rmsnorm_feature_fwd(
+                    self.impl._launch_rmsnorm_fwd(
                         x,
                         weight,
                         absent,
@@ -470,7 +470,7 @@ class _FlyDSLProvider:
                 absent=absent,
                 dbias=dbias,
             ):
-                self.impl._launch_rmsnorm_feature_bwd(
+                self.impl._launch_rmsnorm_bwd(
                     x,
                     weight,
                     dout,
