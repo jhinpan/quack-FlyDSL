@@ -455,6 +455,7 @@ def build_rmsnorm_feature_bwd_two_stage_module(
     num_programs: int,
     *,
     weight_dtype_str: str,
+    dbias_dtype_str: str,
     has_weight: bool,
     has_bias: bool,
     compute_dweight: bool,
@@ -488,6 +489,10 @@ def build_rmsnorm_feature_bwd_two_stage_module(
     parameter_numel = num_heads * n
     dweight_workspace_row_offset = 0
     dbias_workspace_row_offset = num_programs * num_heads if compute_dweight else 0
+    # The reduce writes each gradient in the parameter's own dtype. dweight
+    # shares the weight's, and an eager cast on the way out would be a kernel
+    # launch per backward for a tensor the size of a row.
+    dbias_bits = dtype_to_elem_bits(dbias_dtype_str)
     # The reduce below splits the partial rows across lanes and combines them
     # through LDS, so each gradient it produces needs a slot per thread.
     reduced_parameters = int(compute_dweight) + int(compute_dbias)
@@ -821,8 +826,10 @@ def build_rmsnorm_feature_bwd_two_stage_module(
         parameter_head = safe_index // n if per_head else fx.Int32(0)
         parameter_column = safe_index % n if per_head else safe_index
         if const_expr(compute_dweight):
+            dweight_elem_dtype = dtype_to_elem_type(weight_dtype_str)
+            dweight_copy = buffer_copy_atom(weight_bits, weight_bits)
             dweight_buffer = (
-                row_buffer(dweight_tensor, parameter_head, 32, n)
+                row_buffer(dweight_tensor, parameter_head, weight_bits, n)
                 if per_head
                 else fx.rocdl.make_buffer_tensor(dweight_tensor)
             )
@@ -831,8 +838,10 @@ def build_rmsnorm_feature_bwd_two_stage_module(
                 fx.make_layout(1, 1),
             )
         if const_expr(compute_dbias):
+            dbias_elem_dtype = dtype_to_elem_type(dbias_dtype_str)
+            dbias_copy = buffer_copy_atom(dbias_bits, dbias_bits)
             dbias_buffer = (
-                row_buffer(dbias_tensor, parameter_head, 32, n)
+                row_buffer(dbias_tensor, parameter_head, dbias_bits, n)
                 if per_head
                 else fx.rocdl.make_buffer_tensor(dbias_tensor)
             )
@@ -900,12 +909,12 @@ def build_rmsnorm_feature_bwd_two_stage_module(
                             lane * DWEIGHT_REDUCE_COLS + column_lane,
                         )
                     store_scalar(
-                        f32_copy,
-                        fx.Float32,
-                        fx.Float32,
+                        dweight_copy,
+                        dweight_elem_dtype,
+                        dweight_elem_dtype,
                         dweight_div,
                         output_index,
-                        total,
+                        total if weight_dtype_str == "f32" else total.to(dweight_elem_dtype),
                     )
                 if const_expr(compute_dbias):
                     total = fx.Float32(0.0)
@@ -915,12 +924,12 @@ def build_rmsnorm_feature_bwd_two_stage_module(
                             dbias_shared_offset + lane * DWEIGHT_REDUCE_COLS + column_lane,
                         )
                     store_scalar(
-                        f32_copy,
-                        fx.Float32,
-                        fx.Float32,
+                        dbias_copy,
+                        dbias_elem_dtype,
+                        dbias_elem_dtype,
                         dbias_div,
                         output_index,
-                        total,
+                        total if dbias_dtype_str == "f32" else total.to(dbias_elem_dtype),
                     )
 
     reduce_grid = (parameter_numel + DWEIGHT_REDUCE_COLS - 1) // DWEIGHT_REDUCE_COLS

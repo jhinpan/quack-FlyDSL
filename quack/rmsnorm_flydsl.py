@@ -606,6 +606,7 @@ def _launch_rmsnorm_feature_bwd(
     dresidual_dtype_str = _dtype_to_str(dresidual.dtype)
     dresidual_out_dtype_str = _dtype_to_str(dresidual_out.dtype)
     weight_dtype_str = _dtype_to_str(weight.dtype)
+    dbias_dtype_str = _dtype_to_str(dbias.dtype)
 
     num_programs = _select_rmsnorm_bwd_programs(m, n, source_dtype_str, source.device)
     if per_head:
@@ -631,6 +632,7 @@ def _launch_rmsnorm_feature_bwd(
             dresidual_dtype_str,
             dresidual_out_dtype_str,
             weight_dtype_str,
+            dbias_dtype_str,
             has_weight,
             has_bias,
             compute_dweight,
@@ -656,6 +658,7 @@ def _launch_rmsnorm_feature_bwd(
                     dresidual_out_dtype_str,
                     num_programs,
                     weight_dtype_str=weight_dtype_str,
+                    dbias_dtype_str=dbias_dtype_str,
                     has_weight=has_weight,
                     has_bias=has_bias,
                     compute_dweight=compute_dweight,
@@ -872,18 +875,19 @@ class _RMSNormFeatureFunction(torch.autograd.Function):
             else torch.empty(0, device=source.device, dtype=ctx.residual_dtype)
         )
         parameter_shape = (ctx.num_heads, source.shape[-1]) if ctx.per_head else (source.shape[-1],)
-        # The parameter reduce kernel writes every element it is asked for, so
-        # these do not need zeroing; a torch.zeros here was a memset launch per
-        # call, and one for the unused placeholder as well.
-        dweight_f32 = torch.empty(
+        # The parameter reduce kernel writes every element it is asked for in
+        # the parameter's own dtype, so these need neither zeroing nor a cast
+        # on the way out; a torch.zeros here was a memset launch per call, and
+        # one for the unused placeholder as well.
+        dweight = torch.empty(
             parameter_shape if ctx.weight_needs_grad else (1,),
             device=source.device,
-            dtype=torch.float32,
+            dtype=weight.dtype,
         )
-        dbias_f32 = torch.empty(
+        dbias = torch.empty(
             parameter_shape if ctx.bias_needs_grad else (1,),
             device=source.device,
-            dtype=torch.float32,
+            dtype=bias.dtype if ctx.bias_needs_grad else weight.dtype,
         )
         _dispatch(
             _rmsnorm_flydsl_feature_bwd_op,
@@ -895,8 +899,8 @@ class _RMSNormFeatureFunction(torch.autograd.Function):
             rstd,
             dx,
             dresidual,
-            dweight_f32,
-            dbias_f32,
+            dweight,
+            dbias,
             ctx.weight_offset,
             has_weight=ctx.has_weight,
             has_bias=ctx.has_bias,
@@ -908,10 +912,6 @@ class _RMSNormFeatureFunction(torch.autograd.Function):
             num_heads=ctx.num_heads,
         )
 
-        dweight = (
-            dweight_f32.reshape(parameter_shape).to(weight.dtype) if ctx.weight_needs_grad else None
-        )
-        dbias = dbias_f32.reshape(parameter_shape).to(bias.dtype) if ctx.bias_needs_grad else None
         return (
             dx if ctx.x_needs_grad else None,
             dweight if ctx.weight_needs_grad else None,
