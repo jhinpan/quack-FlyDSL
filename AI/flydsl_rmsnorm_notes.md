@@ -277,16 +277,53 @@ coprime lengths, where neither path is close to the compiler anyway
 Rows of 64 remain at 0.79x of inductor, but the plain path sits at the same
 2.99 TB/s there, so that gap is older than the batching and shared by both.
 
-## The tail block wants the descriptor, not a predicate
+## The tail block's guard depends on how deep the tile loop is
 
-Batching rounds the grid up, so the last block holds groups with no row. The
-cheap guard is not a branch or a store predicate but the descriptor itself:
-sizing that group's `num_records` to zero bytes makes the hardware discard its
-loads and stores, and leaves every lane free to keep taking part in the
-reduction shuffle. Predicating the stores instead cost 8% on a single-tile row
-and up to 1.5x on a deep tile loop, because it turns one exec-mask update into
-one per tile. `rstd` is covered the same way, by sizing its descriptor to the
-real program count instead of leaving it wide open.
+Batching rounds the grid up, so the last block holds groups with no row. There
+are three ways to stop them, and which one wins is decided by the tile count,
+not by taste. The thing to minimize is exec-mask updates per row.
+
+On a row a group covers in **one pass**, the descriptor wins. Sizing that
+group's `num_records` to zero bytes makes the hardware discard its loads and
+stores and leaves every lane free to keep taking part in the reduction shuffle.
+Predicating the stores instead cost 8% here, and up to 1.5x once the loop was
+deep, because it turns one exec-mask update into one per tile. This is what the
+feature forward does, and it is safe there precisely because
+`batch_feature_rows` only batches rows a group covers in one pass.
+
+On a **deep** tile loop, one uniform branch around the whole row wins, and by a
+lot. The plain forward batches scalar rows up to `SMALL_ROW_THRESHOLD`, so a
+2047-wide row is 32 tiles. Left to the descriptor, the compiler predicates every
+access on its own: 64 `s_cbranch_execnz` against one, and 1311 instructions
+against 476, costing 1.6x on 16384x2047 and 131072x257. Neither VGPR count (52
+against 49) nor spilling explains it -- there is no spilling either way and both
+land in the same occupancy bucket. It is purely the per-access exec-mask
+updates. The branch is legitimate because the row index is uniform across a
+group, so the shuffles stay collective for every group that has a row.
+
+`rstd` is bounded by its descriptor in both kernels, sized to the real row or
+program count instead of left wide open, which is a tighter bound than the guard
+needs and costs nothing.
+
+## The plain forward is one kernel for both geometries
+
+It used to be two, plus a third body hiding inside the first. `rmsnorm_kernel`
+branched on `config.vectorized` and carried a scalar fallback that read the row
+from memory twice, and `use_multi_row_kernel` forked at build time into a
+separate `rmsnorm_small_n_kernel` for rows too short to fill a block. The
+feature forward had already collapsed the same two geometries into one body, so
+this is that treatment applied to the plain one: one block per row is the case
+where the lane group is the block, the reduction only reaches for LDS when the
+group spans more than one wavefront, and `vecsize == 1` falls out of the same
+code rather than needing a body of its own.
+
+That removed 193 lines. It is a simplification, not a speedup, and it was
+measured that way: 0.99x-1.03x on every vectorizing row and every batched row,
+with the scalar one-block-per-row rows landing 0.90x-1.13x, which is this node's
+noise on those shapes. The one thing that did not survive transcription is the
+tail guard, which is the section above -- the descriptor form the feature kernel
+uses costs 1.6x here, because the plain path batches deep tile loops and the
+feature path does not.
 
 ## Do not converge the plain and feature paths yet
 
