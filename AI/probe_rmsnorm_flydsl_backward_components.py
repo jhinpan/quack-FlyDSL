@@ -52,9 +52,9 @@ def _profile_device_us(
         for event in profiler.key_averages():
             if event.self_device_time_total <= 0:
                 continue
-            if "rmsnorm_bwd_partial_kernel" in event.key:
+            if "rmsnorm_feature_bwd_partial_kernel" in event.key:
                 name = "partial"
-            elif "rmsnorm_bwd_dweight_reduce_kernel" in event.key:
+            elif "rmsnorm_feature_parameter_reduce_kernel" in event.key:
                 name = "reduce"
             elif "reduce_kernel" in event.key:
                 name = "torch_sum"
@@ -108,10 +108,31 @@ def _measure_cell(
     )
     dx = torch.empty_like(x)
     dweight = torch.empty_like(weight)
+    absent = torch.empty(0, device=device, dtype=x.dtype)
+    dbias = torch.empty(1, device=device, dtype=weight_dtype)
     partial = torch.randn(num_programs, n, device=device, dtype=torch.float32)
 
     def full_backward() -> None:
-        rmsnorm_flydsl._launch_rmsnorm_bwd(x, weight, dout, rstd, dx, dweight)
+        rmsnorm_flydsl._launch_rmsnorm_feature_bwd(
+            x,
+            weight,
+            dout,
+            x,
+            rstd,
+            dx,
+            absent,
+            dweight,
+            dbias,
+            0.0,
+            has_weight=True,
+            has_bias=False,
+            compute_dweight=True,
+            compute_dbias=False,
+            has_residual=False,
+            has_dresidual_out=False,
+            per_head=False,
+            num_heads=1,
+        )
 
     def torch_sum() -> torch.Tensor:
         return partial.sum(dim=0)

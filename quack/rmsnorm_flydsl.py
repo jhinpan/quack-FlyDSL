@@ -13,13 +13,12 @@ import torch
 
 from quack.flydsl.rmsnorm_bwd_kernel import (
     TWO_STAGE_MAX_NUM_THREADS,
-    build_rmsnorm_bwd_two_stage_module,
     build_rmsnorm_feature_bwd_two_stage_module,
     rmsnorm_bwd_two_stage_config,
 )
 from quack.flydsl.rmsnorm_common import EPS, FLYDSL_BUILD_LOCK, run_compiled
 from quack.flydsl.rmsnorm_config import MAX_N, next_power_of_two
-from quack.flydsl.rmsnorm_kernel import build_rmsnorm_feature_module, build_rmsnorm_module
+from quack.flydsl.rmsnorm_kernel import build_rmsnorm_feature_module
 
 __all__ = ["rmsnorm"]
 
@@ -246,97 +245,6 @@ def _select_rmsnorm_bwd_programs(
     return min(next_power_of_two(m), num_programs)
 
 
-def _launch_rmsnorm_fwd(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    out: torch.Tensor,
-    rstd: torch.Tensor,
-    eps: float,
-    store_rstd: bool,
-) -> None:
-    m, n = x.shape
-    dtype_str = _dtype_to_str(x.dtype)
-    weight_dtype_str = _dtype_to_str(weight.dtype)
-
-    with torch.cuda.device(x.device):
-        key = (
-            x.device.index,
-            n,
-            dtype_str,
-            weight_dtype_str,
-            store_rstd,
-        )
-        launcher = _FWD_CACHE.get(key)
-        if launcher is None:
-            launcher = _build_cached(
-                _FWD_CACHE,
-                key,
-                x.device,
-                lambda arch: build_rmsnorm_module(
-                    n,
-                    dtype_str,
-                    store_rstd=store_rstd,
-                    weight_dtype_str=weight_dtype_str,
-                    arch=arch,
-                ),
-            )
-        stream = _current_raw_stream(x.device)
-        if store_rstd:
-            run_compiled(launcher, x, weight, out, rstd, m, eps, stream)
-        else:
-            run_compiled(launcher, x, weight, out, m, eps, stream)
-
-
-@torch.library.custom_op(
-    "quack::_rmsnorm_flydsl_fwd",
-    mutates_args=("out", "rstd"),
-    device_types="cuda",
-    schema=(
-        "(Tensor x, Tensor weight, Tensor(a2!) out, Tensor(a3!) rstd, "
-        "float eps, bool store_rstd) -> ()"
-    ),
-)
-def _rmsnorm_flydsl_fwd_op(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    out: torch.Tensor,
-    rstd: torch.Tensor,
-    eps: float,
-    store_rstd: bool,
-) -> None:
-    _launch_rmsnorm_fwd(x, weight, out, rstd, eps, store_rstd)
-
-
-_rmsnorm_flydsl_fwd_op.register_fake(_noop_fake)
-
-
-def _rmsnorm_fwd(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float,
-    *,
-    store_rstd: bool,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    m = x.shape[0]
-    out = torch.empty_like(x)
-    rstd = torch.empty(
-        (m if store_rstd else 0,),
-        device=x.device,
-        dtype=torch.float32,
-    )
-    _dispatch(
-        _rmsnorm_flydsl_fwd_op,
-        _launch_rmsnorm_fwd,
-        x,
-        weight,
-        out,
-        rstd,
-        eps,
-        store_rstd,
-    )
-    return out, rstd if store_rstd else None
-
-
 def _launch_rmsnorm_feature_fwd(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -474,108 +382,6 @@ def _rmsnorm_flydsl_feature_fwd_op(
 
 
 _rmsnorm_flydsl_feature_fwd_op.register_fake(_noop_fake)
-
-
-def _launch_rmsnorm_bwd(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    dout: torch.Tensor,
-    rstd: torch.Tensor,
-    dx: torch.Tensor,
-    dweight: torch.Tensor,
-) -> None:
-    m, n = x.shape
-    dtype_str = _dtype_to_str(x.dtype)
-    weight_dtype_str = _dtype_to_str(weight.dtype)
-    # Resolved here rather than by the caller, the way the feature backward
-    # already does it. num_programs comes from a row config that computes a gcd
-    # over n, which Dynamo cannot trace on a symbolic shape, and the partials
-    # are scratch that nothing outside this call reads. Both belong behind the
-    # opaque op, not in the graph.
-    num_programs = _select_rmsnorm_bwd_programs(m, n, dtype_str, x.device)
-    partial = torch.empty((num_programs * n,), device=x.device, dtype=torch.float32)
-
-    with torch.cuda.device(x.device):
-        key = (
-            "plain",
-            x.device.index,
-            n,
-            dtype_str,
-            weight_dtype_str,
-            num_programs,
-        )
-        launcher = _BWD_CACHE.get(key)
-        if launcher is None:
-            launcher = _build_cached(
-                _BWD_CACHE,
-                key,
-                x.device,
-                lambda arch: build_rmsnorm_bwd_two_stage_module(
-                    n,
-                    dtype_str,
-                    num_programs,
-                    weight_dtype_str=weight_dtype_str,
-                    arch=arch,
-                ),
-            )
-        run_compiled(
-            launcher,
-            x,
-            weight,
-            dout,
-            rstd,
-            dx,
-            dweight,
-            partial,
-            m,
-            _current_raw_stream(x.device),
-        )
-
-
-@torch.library.custom_op(
-    "quack::_rmsnorm_flydsl_bwd",
-    mutates_args=("dx", "dweight"),
-    device_types="cuda",
-    schema=(
-        "(Tensor x, Tensor weight, Tensor dout, Tensor rstd, Tensor(a4!) dx, "
-        "Tensor(a5!) dweight) -> ()"
-    ),
-)
-def _rmsnorm_flydsl_bwd_op(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    dout: torch.Tensor,
-    rstd: torch.Tensor,
-    dx: torch.Tensor,
-    dweight: torch.Tensor,
-) -> None:
-    _launch_rmsnorm_bwd(x, weight, dout, rstd, dx, dweight)
-
-
-_rmsnorm_flydsl_bwd_op.register_fake(_noop_fake)
-
-
-def _rmsnorm_bwd(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    dout: torch.Tensor,
-    rstd: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    dx = torch.empty_like(x)
-    # The reduce kernel writes every element of dweight in the weight's own
-    # dtype, so this needs neither zeroing nor a cast on the way out.
-    dweight = torch.empty_like(weight)
-    _dispatch(
-        _rmsnorm_flydsl_bwd_op,
-        _launch_rmsnorm_bwd,
-        x,
-        weight,
-        dout,
-        rstd,
-        dx,
-        dweight,
-    )
-    return dx, dweight
 
 
 def _launch_rmsnorm_feature_bwd(
@@ -748,38 +554,6 @@ def _rmsnorm_flydsl_feature_bwd_op(
 
 
 _rmsnorm_flydsl_feature_bwd_op.register_fake(_noop_fake)
-
-
-class _RMSNormFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x: torch.Tensor, weight: torch.Tensor, eps: float):
-        needs_grad = ctx.needs_input_grad[0] or ctx.needs_input_grad[1]
-        out, rstd = _rmsnorm_fwd(
-            x,
-            weight,
-            eps,
-            store_rstd=needs_grad,
-        )
-        if needs_grad:
-            ctx.save_for_backward(x, weight, rstd)
-            ctx.x_needs_grad = ctx.needs_input_grad[0]
-            ctx.weight_needs_grad = ctx.needs_input_grad[1]
-        return out
-
-    @staticmethod
-    def backward(ctx, dout: torch.Tensor):
-        x, weight, rstd = ctx.saved_tensors
-        dx, dweight = _rmsnorm_bwd(
-            x,
-            weight,
-            dout.contiguous(),
-            rstd,
-        )
-        return (
-            dx if ctx.x_needs_grad else None,
-            dweight if ctx.weight_needs_grad else None,
-            None,
-        )
 
 
 class _RMSNormFeatureFunction(torch.autograd.Function):
@@ -976,28 +750,6 @@ def rmsnorm(
     last_shape = (num_heads, n) if per_head else (n,)
     parameter_shape = (num_heads, n) if per_head else (n,)
     x_flat = x.reshape(-1, *last_shape).contiguous()
-
-    plain_optimized = (
-        weight is not None
-        and bias is None
-        and residual is None
-        and not per_head
-        and output_dtype == x.dtype
-        and residual_dtype is None
-        and not prenorm
-        and weight_offset == 0.0
-        and (
-            weight.dtype == x.dtype
-            or (x.dtype in (torch.float16, torch.bfloat16) and weight.dtype == torch.float32)
-        )
-    )
-    if plain_optimized:
-        out_flat = _RMSNormFunction.apply(
-            x_flat,
-            weight.contiguous(),
-            eps,
-        )
-        return out_flat.reshape(x.shape)
 
     # An absent weight or bias still has to be passed, because the custom op
     # schema is fixed. The kernels build no descriptor for it, so an empty

@@ -779,19 +779,13 @@ def _clear_caches():
 
 
 def test_custom_ops_are_unique_mutation_only_and_fake_safe():
-    fwd = torch.ops.quack._rmsnorm_flydsl_fwd.default
-    bwd = torch.ops.quack._rmsnorm_flydsl_bwd.default
     feature_fwd = torch.ops.quack._rmsnorm_flydsl_feature_fwd.default
     feature_bwd = torch.ops.quack._rmsnorm_flydsl_feature_bwd.default
-    for op in (fwd, bwd, feature_fwd, feature_bwd):
+    for op in (feature_fwd, feature_bwd):
         assert str(op._schema).endswith("-> ()")
-    assert "Tensor(a2!) out" in str(fwd._schema)
-    assert "Tensor(a3!) rstd" in str(fwd._schema)
-    assert "Tensor(a4!) dx" in str(bwd._schema)
-    assert "Tensor(a5!) dweight" in str(bwd._schema)
-    # The staged partials are scratch the launcher allocates for itself; nothing
-    # outside the op reads them, so they are not in the schema.
-    assert "partial" not in str(bwd._schema)
+    # The staged workspace is scratch the launcher allocates for itself; nothing
+    # outside the op reads it, so it is not in the schema.
+    assert "workspace" not in str(feature_bwd._schema)
     assert "Tensor(a4!) out" in str(feature_fwd._schema)
     assert "Tensor(a5!) residual_out" in str(feature_fwd._schema)
     assert "Tensor(a8!) dbias" in str(feature_bwd._schema)
@@ -803,12 +797,9 @@ def test_custom_ops_are_unique_mutation_only_and_fake_safe():
         weight = torch.empty(64, device="cuda", dtype=torch.float16)
         out = torch.empty_like(x)
         rstd = torch.empty(2, device="cuda", dtype=torch.float32)
-        fwd(x, weight, out, rstd, 1e-6, True)
-
         dout = torch.empty_like(x)
         dx = torch.empty_like(x)
         dweight = torch.empty_like(weight)
-        bwd(x, weight, dout, rstd, dx, dweight)
 
         bias = torch.empty_like(weight)
         residual = torch.empty_like(x)
@@ -953,7 +944,7 @@ def test_fullgraph_two_stage_backward():
     _assert_close(actual, expected)
     _assert_grad_close(x.grad, dx_expected)
     _assert_grad_close(weight.grad, dw_expected)
-    assert {key[0] for key in rmsnorm_flydsl_impl._BWD_CACHE} == {"plain"}
+    assert {key[0] for key in rmsnorm_flydsl_impl._BWD_CACHE} == {"feature"}
 
 
 def test_forward_cache_identity_is_shape_and_dtype_only():
@@ -1073,7 +1064,7 @@ def test_same_architecture_eight_device_caches_are_device_local():
             seen_arches.add(torch.cuda.get_device_properties(device).gcnArchName.split(":", 1)[0])
 
     assert len(seen_arches) == 1
-    assert {key[0] for key in rmsnorm_flydsl_impl._FWD_CACHE} == set(range(8))
+    assert {key[1] for key in rmsnorm_flydsl_impl._FWD_CACHE} == set(range(8))
     assert {key[1] for key in rmsnorm_flydsl_impl._BWD_CACHE} == set(range(8))
 
 
@@ -1239,25 +1230,50 @@ def test_software_bf16_rounding_matches_the_hardware_convert():
     that any pre-gfx95x part has been validated.
     """
     from quack.flydsl.rmsnorm_common import run_compiled
-    from quack.flydsl.rmsnorm_kernel import build_rmsnorm_module
+    from quack.flydsl.rmsnorm_kernel import build_rmsnorm_feature_module
 
     torch.manual_seed(3)
     n = 4096
     x = torch.randn((64, n), device="cuda", dtype=torch.bfloat16)
     weight = torch.randn(n, device="cuda", dtype=torch.float32)
+    absent = torch.empty(0, device="cuda", dtype=torch.bfloat16)
+    rstd = torch.empty(0, device="cuda", dtype=torch.float32)
     stream = torch.cuda.current_stream().cuda_stream
 
     rounded = {}
     for arch in ("gfx950", "gfx942"):
         out = torch.empty_like(x)
-        launcher = build_rmsnorm_module(
+        launcher = build_rmsnorm_feature_module(
             n,
             "bf16",
-            store_rstd=False,
+            "bf16",
             weight_dtype_str="f32",
+            bias_dtype_str="bf16",
+            residual_dtype_str="bf16",
+            residual_out_dtype_str="bf16",
+            has_weight=True,
+            has_bias=False,
+            has_residual=False,
+            store_residual=False,
+            store_rstd=False,
+            per_head=False,
+            num_heads=1,
             arch=arch,
         )
-        run_compiled(launcher, x, weight, out, x.shape[0], 1e-6, stream)
+        run_compiled(
+            launcher,
+            x,
+            weight,
+            absent,
+            absent,
+            out,
+            absent,
+            rstd,
+            x.shape[0],
+            1e-6,
+            0.0,
+            stream,
+        )
         torch.cuda.synchronize()
         rounded[arch] = out
 
@@ -1377,7 +1393,7 @@ def test_the_staged_backward_does_not_recompile_per_batch_size():
         _, dx_expected, _ = _reference_with_grads(x, weight, dout, 1e-6)
         _assert_grad_close(x.grad, dx_expected)
 
-    programs = {key[5] for key in rmsnorm_flydsl_impl._BWD_CACHE}
+    programs = {key[-1] for key in rmsnorm_flydsl_impl._BWD_CACHE}
     assert programs, "expected at least one staged backward build"
     assert all(p & (p - 1) == 0 for p in programs), (
         f"num_programs must be a power of two: {programs}"

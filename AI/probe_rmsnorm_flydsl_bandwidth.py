@@ -22,7 +22,6 @@ from quack.flydsl.rmsnorm_config import (
     RmsNormRowConfig,
     batch_feature_rows,
     multi_row_block_rows,
-    use_multi_row_kernel,
 )
 from quack.rmsnorm_flydsl import rmsnorm
 
@@ -119,8 +118,7 @@ for m, n in SHAPES:
     row = m * n * x.element_size()
 
     print(f"\n=== {m}x{n} bf16 ===")
-    print(f"  plain path   {geometry(n, 16, use_multi_row_kernel(n, 16))}")
-    print(f"  feature path {geometry(n, 16, batch_feature_rows(n, 16))}")
+    print(f"  geometry {geometry(n, 16, batch_feature_rows(n, 16))}")
     print(f"{'case':>19} {'FlyDSL':>19} {'torch.compile':>19} {'speedup':>8}")
     print("-" * 68)
 

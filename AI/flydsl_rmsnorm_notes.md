@@ -292,8 +292,11 @@ feature forward does, and it is safe there precisely because
 `batch_feature_rows` only batches rows a group covers in one pass.
 
 On a **deep** tile loop, one uniform branch around the whole row wins, and by a
-lot. The plain forward batches scalar rows up to `SMALL_ROW_THRESHOLD`, so a
-2047-wide row is 32 tiles. Left to the descriptor, the compiler predicates every
+lot. The plain forward, while it existed, batched scalar rows up to
+`SMALL_ROW_THRESHOLD`, so a 2047-wide row was 32 tiles. This is why
+`batch_feature_rows` is stricter than `use_multi_row_kernel` and why the
+surviving path never meets the case; keep it that way. Left to the descriptor
+on such a row, the compiler predicates every
 access on its own: 64 `s_cbranch_execnz` against one, and 1311 instructions
 against 476, costing 1.6x on 16384x2047 and 131072x257. Neither VGPR count (52
 against 49) nor spilling explains it -- there is no spilling either way and both
@@ -305,42 +308,66 @@ group, so the shuffles stay collective for every group that has a row.
 program count instead of left wide open, which is a tighter bound than the guard
 needs and costs nothing.
 
-## The plain forward is one kernel for both geometries
+## A parameter reduce has to open on the rows, not just the parameter
 
-It used to be two, plus a third body hiding inside the first. `rmsnorm_kernel`
-branched on `config.vectorized` and carried a scalar fallback that read the row
-from memory twice, and `use_multi_row_kernel` forked at build time into a
-separate `rmsnorm_small_n_kernel` for rows too short to fill a block. The
-feature forward had already collapsed the same two geometries into one body, so
-this is that treatment applied to the plain one: one block per row is the case
-where the lane group is the block, the reduction only reaches for LDS when the
-group spans more than one wavefront, and `vecsize == 1` falls out of the same
-code rather than needing a body of its own.
+Stage 2 of the staged backward reduces a `num_programs x n` workspace down to
+one parameter. Its grid was opened on the parameter alone -- one thread per
+output element, each walking every partial row -- so a 256-element weight ran
+on a single block whatever the row count, and stage 2 became the whole of the
+short-row backward: 159us against a 13us stage 1, slower than a bare
+`torch.sum` on the same workspace.
 
-That removed 193 lines. It is a simplification, not a speedup, and it was
-measured that way: 0.99x-1.03x on every vectorizing row and every batched row,
-with the scalar one-block-per-row rows landing 0.90x-1.13x, which is this node's
-noise on those shapes. The one thing that did not survive transcription is the
-tail guard, which is the section above -- the descriptor form the feature kernel
-uses costs 1.6x here, because the plain path batches deep tile loops and the
-feature path does not.
+Block by column and give the partial rows their own lanes, combining them
+through LDS. Two things make it pay. The descriptor has to come out of the
+accumulation loop, because the row a lane reads now depends on the lane and a
+divergent buffer descriptor costs more than the split saves -- the reduce
+therefore takes the workspace flat, one descriptor for all of it, which is safe
+because `num_programs` is CU-derived. And the reduce writes each gradient in
+the parameter's own dtype, so nothing casts on the way out.
 
-## Do not converge the plain and feature paths yet
+Reduce, bf16, m=32768, against `torch.sum` on the same workspace:
 
-The feature builder is a strict superset of the plain one -- plain is
-`has_weight=True` with every other flag off -- and it is now within 0.93x-1.02x
-of the plain path on every row that vectorizes, so deleting
-`build_rmsnorm_module`, `_RMSNormFunction` and the `plain_optimized` predicate
-looks like free simplification. It is not, yet. On rows whose length shares no
-factor with a 128-bit access the feature path is far behind: 131072x257 runs
-at 2.33 TB/s through the plain path and 1.00 through the feature path.
-Collapsing them costs those shapes 2.3x.
+| n | before | after | `torch.sum` |
+| --- | --- | --- | --- |
+| 256 | 159.2us | 19.6us | 19.8us |
+| 1024 | 88.9us | 10.6us | 19.6us |
+| 4096 | 21.5us | 4.2us | 30.9us |
 
-This is worth revisiting, because three sources of truth for what the backend
-supports (`plain_optimized`, `_validate_feature_inputs`,
-`resolve_rmsnorm_weight_dtype`) will drift. But it is blocked on the deep tile
-loop above, not on the refactor itself: the feature kernel has to stop losing
-that case first. Probe the coprime rows before and after any attempt.
+Reproducible to a tenth of a microsecond across runs, and dweight comes out bit
+for bit what the old plain reduce produced, because the summation order now
+matches it.
+
+## The plain path is gone
+
+The feature builder was always a strict superset -- plain is `has_weight=True`
+with every other flag off -- so `build_rmsnorm_module`,
+`build_rmsnorm_bwd_two_stage_module`, `_RMSNormFunction` and the
+`plain_optimized` predicate were a second implementation of a subset, and the
+three sources of truth for what the backend supports were down to one.
+
+This file used to say the blocker was coprime rows, where the feature forward
+lost 2.3x on 131072x257. That was the wrong measurement to gate on: every
+official shape vectorizes, because `MN_PAIRS` is powers of two and
+`COMPACT_SHAPES` adds only (4096, 3000), where `gcd(3000, 8) == 8`. On the
+shapes the benchmark reports, the feature forward was already within 0.96x-1.04x
+of plain across all 21 shape/dtype cells. The real blocker was the backward,
+which this file had never compared path against path -- 1.3x-4.8x behind at
+every n up to 3000, all of it the reduce above.
+
+What the merge cost, official harness, bf16, medians of alternating runs:
+
+| case | plain | feature |
+| --- | --- | --- |
+| fwd 32768x4096 | 94.7us | 96.0us |
+| bwd 32768x4096 | 196.3us | 164.7us |
+| fwd 32768x256 | 11.6us | 13.9us |
+| bwd 32768x256 | 46.6us | 39.9us |
+
+The backward is 1.16x-1.19x faster and the long-row forward is parity. The one
+regression is the forward on the shortest official row, and it is in the kernel
+rather than around it: 7.1us of device time against roughly 5.7us, with the
+adapter measured at zero overhead either way. It is not chased down. That is
+the standing price of one implementation instead of two.
 
 ## Measuring this backend
 

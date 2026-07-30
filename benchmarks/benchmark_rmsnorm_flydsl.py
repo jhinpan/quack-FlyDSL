@@ -390,16 +390,27 @@ class _FlyDSLProvider:
                 weight = inputs["weight"].clone()
                 out = torch.empty_like(x)
                 rstd = torch.empty(0, device=x.device, dtype=torch.float32)
+                absent = torch.empty(0, device=x.device, dtype=x.dtype)
                 tensor_sets.append((out,))
 
-                def call(x=x, weight=weight, out=out, rstd=rstd):
-                    self.impl._launch_rmsnorm_fwd(
+                def call(x=x, weight=weight, out=out, rstd=rstd, absent=absent):
+                    self.impl._launch_rmsnorm_feature_fwd(
                         x,
                         weight,
+                        absent,
+                        absent,
                         out,
+                        absent,
                         rstd,
                         eps,
-                        False,
+                        0.0,
+                        has_weight=True,
+                        has_bias=False,
+                        has_residual=False,
+                        store_residual=False,
+                        store_rstd=False,
+                        per_head=False,
+                        num_heads=1,
                     )
 
                 calls.append(call)
@@ -443,6 +454,8 @@ class _FlyDSLProvider:
             rstd = reference[2].clone()
             dx = torch.empty_like(x)
             dweight = torch.empty_like(weight)
+            absent = torch.empty(0, device=x.device, dtype=x.dtype)
+            dbias = torch.empty(1, device=x.device, dtype=weight.dtype)
             tensor_sets.append((dx, dweight))
 
             # The launcher allocates its own partials, so that allocation is
@@ -454,8 +467,29 @@ class _FlyDSLProvider:
                 rstd=rstd,
                 dx=dx,
                 dweight=dweight,
+                absent=absent,
+                dbias=dbias,
             ):
-                self.impl._launch_rmsnorm_bwd(x, weight, dout, rstd, dx, dweight)
+                self.impl._launch_rmsnorm_feature_bwd(
+                    x,
+                    weight,
+                    dout,
+                    x,
+                    rstd,
+                    dx,
+                    absent,
+                    dweight,
+                    dbias,
+                    0.0,
+                    has_weight=True,
+                    has_bias=False,
+                    compute_dweight=True,
+                    compute_dbias=False,
+                    has_residual=False,
+                    has_dresidual_out=False,
+                    per_head=False,
+                    num_heads=1,
+                )
 
             calls.append(call)
 
