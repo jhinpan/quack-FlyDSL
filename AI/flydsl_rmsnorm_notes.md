@@ -385,6 +385,40 @@ rather than around it: 7.1us of device time against roughly 5.7us, with the
 adapter measured at zero overhead either way. It is not chased down. That is
 the standing price of one implementation instead of two.
 
+## Native forward autotuning
+
+The first autotuning stage is forward-only and opt-in through
+`quack.rmsnorm_flydsl.rmsnorm_autotuned`. The existing `rmsnorm` entry and its
+`_FWD_CACHE` keep the analytical heuristic unchanged. A normal call to the
+tuned entry also serves that heuristic without searching; set
+`FLYDSL_AUTOTUNE=1` to force FlyDSL's native search. FlyDSL stores scratch
+winners under `FLYDSL_AUTOTUNE_CACHE_DIR` (default `~/.flydsl/autotune`) and
+portable artifacts under `FLYDSL_AUTOTUNE_CONFIG_DIR`.
+
+The direct `@flyc.jit` entry injects the per-row thread count as a Constexpr and
+passes `waves_per_eu` as a compiler option. Candidates are the legal subset of
+the heuristic width, its half/double, and 64/128/256 threads, crossed with the
+default occupancy and 1/2/4 waves per EU. Generation removes duplicates and
+rejects widths that exceed the wave/block limit or the existing 32-elements per
+thread register budget. The key includes M/N, all operand dtypes, feature flags,
+per-head mode/count, target architecture, and a schema version. Runtime `eps`
+and `weight_offset` deliberately do not split winners.
+
+Each timing sample wraps 100 launches in one HIP event pair and divides the
+elapsed time by 100; the tuner takes the median of seven samples after an
+untimed compile and one warmup batch. Outputs are complete stores, so tuning
+does not zero `output`, `residual_out`, or `rstd`.
+
+Validation on gfx950 with FlyDSL 0.3.0 used BF16 `16 x 4096` with FP32 weight.
+All eight candidates compiled and ran; the measured winner was 256 threads at
+0.073 ms per launch, the emitted artifact recorded the full key, and a fresh
+process served the persisted winner with benchmarking replaced by a hard
+failure. Both the search result and a cache hit with different `eps` and
+`weight_offset` matched the FP32 reference after BF16 rounding exactly in that
+run. Tests also cover residual+bias+prenorm+rstd on a non-default stream and a
+`torch.compile(fullgraph=True, dynamic=True)` row-count change. Backward remains
+on its existing deterministic heuristic and is not tuned in this stage.
+
 ## Measuring this backend
 
 `AI/probe_rmsnorm_flydsl_bandwidth.py` backs the throughput numbers here and

@@ -152,6 +152,23 @@ def test_unsupported_element_width_is_rejected():
         config(4096, 24)
 
 
+@pytest.mark.parametrize(
+    ("N", "dtype_width", "threads"), [(128, 16, 8), (4096, 16, 128), (2048, 32, 256)]
+)
+def test_explicit_thread_configs_cover_the_row(N, dtype_width, threads):
+    c = RmsNormRowConfig.with_num_threads(N, dtype_width, threads)
+
+    assert c.num_threads == threads
+    assert c.num_tiles * c.num_threads * c.vecsize >= N
+    assert c.elems_per_thread <= 32
+
+
+@pytest.mark.parametrize("threads", [0, 3, 512])
+def test_explicit_thread_configs_reject_illegal_blocks(threads):
+    with pytest.raises(ValueError, match="num_threads"):
+        RmsNormRowConfig.with_num_threads(4096, 16, threads)
+
+
 @pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
 @pytest.mark.parametrize("N", (8, 16, 24, 64, 128, 192))
 def test_tiny_rows_are_batched_several_to_a_block(N, dtype_width):

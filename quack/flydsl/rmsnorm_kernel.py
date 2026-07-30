@@ -54,6 +54,7 @@ def build_rmsnorm_module(
     per_head: bool,
     num_heads: int,
     arch: str | None = None,
+    row_config: RmsNormRowConfig | None = None,
 ):
     """Build the RMSNorm forward, specialized by shape, dtypes and feature flags.
 
@@ -82,11 +83,13 @@ def build_rmsnorm_module(
     residual_bits = dtype_to_elem_bits(residual_dtype_str)
     residual_out_bits = dtype_to_elem_bits(residual_out_dtype_str)
     batched = batch_short_rows(n, input_bits)
-    config = (
-        RmsNormRowConfig.for_lane_group(n, input_bits)
-        if batched
-        else RmsNormRowConfig.from_analytical_heuristic(n, input_bits)
-    )
+    config = row_config
+    if config is None:
+        config = (
+            RmsNormRowConfig.for_lane_group(n, input_bits)
+            if batched
+            else RmsNormRowConfig.from_analytical_heuristic(n, input_bits)
+        )
     threads_per_row = config.num_threads
     rows_per_block = multi_row_block_rows(threads_per_row) if batched else 1
     block_threads = rows_per_block * threads_per_row
@@ -404,3 +407,73 @@ def build_rmsnorm_module(
         )
 
     return launch_rmsnorm
+
+
+@flyc.jit
+def rmsnorm_direct(
+    input_tensor: fx.Tensor,
+    weight_tensor: fx.Tensor,
+    bias_tensor: fx.Tensor,
+    residual_tensor: fx.Tensor,
+    output_tensor: fx.Tensor,
+    residual_out_tensor: fx.Tensor,
+    rstd_tensor: fx.Tensor,
+    m: fx.Int32,
+    eps: fx.Float32,
+    weight_offset: fx.Float32,
+    n: fx.Constexpr[int],
+    input_dtype_str: fx.Constexpr[str],
+    output_dtype_str: fx.Constexpr[str],
+    weight_dtype_str: fx.Constexpr[str],
+    bias_dtype_str: fx.Constexpr[str],
+    residual_dtype_str: fx.Constexpr[str],
+    residual_out_dtype_str: fx.Constexpr[str],
+    has_weight: fx.Constexpr[bool],
+    has_bias: fx.Constexpr[bool],
+    has_residual: fx.Constexpr[bool],
+    store_residual: fx.Constexpr[bool],
+    store_rstd: fx.Constexpr[bool],
+    per_head: fx.Constexpr[bool],
+    num_heads: fx.Constexpr[int],
+    arch: fx.Constexpr[str],
+    schema_version: fx.Constexpr[int],
+    threads_per_row: fx.Constexpr[int],
+    stream: fx.Stream = fx.Stream(None),
+):
+    """Specialize the existing forward builder through autotunable Constexpr inputs."""
+    row_config = RmsNormRowConfig.with_num_threads(
+        n,
+        dtype_to_elem_bits(input_dtype_str),
+        threads_per_row,
+    )
+    launch = build_rmsnorm_module(
+        n,
+        input_dtype_str,
+        output_dtype_str,
+        weight_dtype_str=weight_dtype_str,
+        bias_dtype_str=bias_dtype_str,
+        residual_dtype_str=residual_dtype_str,
+        residual_out_dtype_str=residual_out_dtype_str,
+        has_weight=has_weight,
+        has_bias=has_bias,
+        has_residual=has_residual,
+        store_residual=store_residual,
+        store_rstd=store_rstd,
+        per_head=per_head,
+        num_heads=num_heads,
+        arch=arch,
+        row_config=row_config,
+    )
+    launch(
+        input_tensor,
+        weight_tensor,
+        bias_tensor,
+        residual_tensor,
+        output_tensor,
+        residual_out_tensor,
+        rstd_tensor,
+        m,
+        eps,
+        weight_offset,
+        stream,
+    )

@@ -122,6 +122,30 @@ class RmsNormRowConfig:
             min_num_threads=1,
         )
 
+    @classmethod
+    def with_num_threads(
+        cls,
+        N: int,
+        dtype_width: int,
+        num_threads: int,
+    ) -> "RmsNormRowConfig":
+        """Build a legal row config with an explicitly selected lane count."""
+        if dtype_width not in SUPPORTED_DTYPE_WIDTHS:
+            raise ValueError(f"unsupported element width: {dtype_width} bits")
+        if num_threads < 1 or num_threads > MAX_NUM_THREADS:
+            raise ValueError(f"num_threads must be between 1 and {MAX_NUM_THREADS}")
+        if num_threads & (num_threads - 1):
+            raise ValueError("num_threads must be a power of two")
+        vecsize = math.gcd(N, ACCESS_BITS // dtype_width)
+        num_vecs = N // vecsize
+        return cls(
+            vecsize=vecsize,
+            num_threads=num_threads,
+            num_tiles=-(-num_vecs // num_threads),
+            num_vecs=num_vecs,
+            dtype_width=dtype_width,
+        )
+
 
 def next_power_of_two(value: int) -> int:
     return 1 << (value - 1).bit_length() if value > 1 else 1

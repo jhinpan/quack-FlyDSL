@@ -17,7 +17,7 @@ pytest.importorskip("flydsl")
 
 import quack.rmsnorm_flydsl as rmsnorm_flydsl_impl  # noqa: E402
 from quack.flydsl.rmsnorm_config import next_power_of_two  # noqa: E402
-from quack.rmsnorm_flydsl import rmsnorm  # noqa: E402
+from quack.rmsnorm_flydsl import rmsnorm, rmsnorm_autotuned  # noqa: E402
 
 
 def _reference(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
@@ -791,6 +791,8 @@ def _clear_caches():
     rmsnorm_flydsl_impl._BWD_CACHE.clear()
     rmsnorm_flydsl_impl._BWD_CU_COUNT_CACHE.clear()
     rmsnorm_flydsl_impl._DEVICE_ARCH_CACHE.clear()
+    rmsnorm_flydsl_impl._rmsnorm_fwd_tuner.cache.clear()
+    rmsnorm_flydsl_impl._rmsnorm_fwd_tuner._artifact_cache.clear()
 
 
 def test_custom_ops_are_unique_mutation_only_and_fake_safe():
@@ -987,6 +989,118 @@ def test_forward_cache_identity_is_shape_and_dtype_only():
     assert len(rmsnorm_flydsl_impl._FWD_CACHE) == 3
 
 
+def test_default_and_autotuned_forward_use_independent_caches(tmp_path, monkeypatch):
+    _clear_caches()
+    tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
+    monkeypatch.setattr(tuner, "_cache_file", tmp_path / "winner.json")
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    x = torch.randn((8, 4096), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(4096, device="cuda", dtype=torch.float32)
+
+    expected = _reference(x, weight, 1e-6)
+    _assert_close(rmsnorm(x, weight), expected)
+    assert len(rmsnorm_flydsl_impl._FWD_CACHE) == 1
+    assert not tuner.cache
+
+    _assert_close(rmsnorm_autotuned(x, weight), expected)
+    assert len(rmsnorm_flydsl_impl._FWD_CACHE) == 1
+    assert not tuner.cache  # The default heuristic does not pretend to be a searched winner.
+
+
+def test_autotuned_forward_searches_all_candidates_then_hits_cache(tmp_path, monkeypatch):
+    _clear_caches()
+    tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
+    monkeypatch.setattr(tuner, "_cache_file", tmp_path / "winner.json")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CONFIG_DIR", str(tmp_path / "artifacts"))
+    completed = 0
+    candidate_count = 0
+    real_configs = tuner.configs
+
+    def counted_configs(*args, **kwargs):
+        nonlocal candidate_count
+        configs = real_configs(*args, **kwargs)
+        candidate_count = len(configs)
+        return configs
+
+    def bench_once(call, warmup, rep):
+        nonlocal completed
+        call()
+        torch.cuda.synchronize()
+        completed += 1
+        return float(completed)
+
+    monkeypatch.setattr(tuner, "configs", counted_configs)
+    monkeypatch.setattr(tuner, "_do_bench", bench_once)
+    x = torch.randn((16, 4096), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(4096, device="cuda", dtype=torch.float32)
+
+    first = rmsnorm_autotuned(x, weight, eps=1e-5)
+    _assert_close(first, _reference(x, weight, 1e-5))
+    assert completed == candidate_count > 1
+    assert len(tuner.cache) == 1
+    assert tuner.cache[next(iter(tuner.cache))].to_dict() in [
+        config.to_dict() for config in real_configs(n=4096, input_dtype_str="bf16")
+    ]
+    artifacts = list((tmp_path / "artifacts").glob("*.json"))
+    assert len(artifacts) == 1
+    assert "eps" not in tuner.key and "weight_offset" not in tuner.key
+
+    monkeypatch.delenv("FLYDSL_AUTOTUNE")
+    monkeypatch.setattr(
+        tuner,
+        "_do_bench",
+        lambda *args, **kwargs: pytest.fail("cache hit unexpectedly benchmarked"),
+    )
+    cached = rmsnorm_autotuned(x, weight, eps=0.5, weight_offset=1.0)
+    _assert_close(cached, _reference(x, weight + 1.0, 0.5))
+    assert completed == candidate_count
+
+
+def test_autotuned_feature_outputs_on_non_default_stream(tmp_path, monkeypatch):
+    _clear_caches()
+    tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
+    monkeypatch.setattr(tuner, "_cache_file", tmp_path / "winner.json")
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    observed = []
+    real_run_config = tuner._run_config
+
+    def checked_run_config(config, args, kwargs):
+        observed.append(
+            (
+                kwargs["has_bias"],
+                kwargs["has_residual"],
+                kwargs["store_residual"],
+                kwargs["store_rstd"],
+                kwargs["stream"],
+            )
+        )
+        return real_run_config(config, args, kwargs)
+
+    monkeypatch.setattr(tuner, "_run_config", checked_run_config)
+    x = torch.randn((8, 760), device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    residual = torch.randn_like(x)
+    weight = torch.randn(760, device="cuda", dtype=torch.float32)
+    bias = torch.randn(760, device="cuda", dtype=torch.float32)
+    stream = torch.cuda.Stream(device=x.device)
+    stream.wait_stream(torch.cuda.current_stream(x.device))
+
+    with torch.cuda.stream(stream):
+        actual, residual_out = rmsnorm_autotuned(
+            x,
+            weight,
+            bias=bias,
+            residual=residual,
+            prenorm=True,
+        )
+    stream.synchronize()
+
+    expected, expected_residual = _full_reference(x, weight, bias, residual)
+    _assert_close(actual, expected)
+    _assert_close(residual_out, expected_residual)
+    assert observed == [(True, True, True, True, stream.cuda_stream)]
+
+
 def test_a_runtime_eps_still_reaches_the_kernel():
     """A cached kernel must honour a new eps rather than the one it was built with."""
     _clear_caches()
@@ -1017,6 +1131,21 @@ def test_fullgraph_with_dynamic_shapes():
         out.sum().backward()
         _assert_close(out, _reference(x, weight, 1e-5))
         assert x.grad is not None
+
+
+def test_autotuned_fullgraph_with_dynamic_rows(tmp_path, monkeypatch):
+    _clear_caches()
+    tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
+    monkeypatch.setattr(tuner, "_cache_file", tmp_path / "winner.json")
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    torch._dynamo.reset()
+    compiled = torch.compile(rmsnorm_autotuned, fullgraph=True, dynamic=True)
+    weight = torch.randn(512, device="cuda", dtype=torch.float32)
+
+    for rows in (8, 16):
+        x = torch.randn((rows, 512), device="cuda", dtype=torch.bfloat16)
+        out = compiled(x, weight, eps=1e-5)
+        _assert_close(out, _reference(x, weight, 1e-5))
 
 
 def test_non_default_stream_forward_backward():

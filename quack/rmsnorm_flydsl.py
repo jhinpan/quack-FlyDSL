@@ -16,11 +16,15 @@ from quack.flydsl.rmsnorm_bwd_kernel import (
     build_rmsnorm_bwd_two_stage_module,
     rmsnorm_bwd_two_stage_config,
 )
+from quack.flydsl.rmsnorm_autotune import (
+    RMSNORM_AUTOTUNE_SCHEMA_VERSION,
+    _rmsnorm_fwd_tuner,
+)
 from quack.flydsl.rmsnorm_common import EPS, FLYDSL_BUILD_LOCK, run_compiled
 from quack.flydsl.rmsnorm_config import MAX_N, N_ALIGNMENT, next_power_of_two
 from quack.flydsl.rmsnorm_kernel import build_rmsnorm_module
 
-__all__ = ["rmsnorm"]
+__all__ = ["rmsnorm", "rmsnorm_autotuned"]
 
 _SUPPORTED_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 # gfx950 is the only architecture this backend has been built and run on.
@@ -337,6 +341,60 @@ def _launch_rmsnorm_fwd(
         )
 
 
+def _launch_rmsnorm_fwd_autotuned(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    residual: torch.Tensor,
+    out: torch.Tensor,
+    residual_out: torch.Tensor,
+    rstd: torch.Tensor,
+    eps: float,
+    weight_offset: float,
+    *,
+    has_weight: bool,
+    has_bias: bool,
+    has_residual: bool,
+    store_residual: bool,
+    store_rstd: bool,
+    per_head: bool,
+    num_heads: int,
+) -> None:
+    """Launch through FlyDSL's native tuner without consulting ``_FWD_CACHE``."""
+    m, n = x.shape[0], x.shape[-1]
+    arch = _validate_arch(x.device)
+    with torch.cuda.device(x.device):
+        _rmsnorm_fwd_tuner(
+            x,
+            weight,
+            bias,
+            residual,
+            out,
+            residual_out,
+            rstd,
+            m,
+            eps,
+            weight_offset,
+            n=n,
+            input_dtype_str=_dtype_to_str(x.dtype),
+            output_dtype_str=_dtype_to_str(out.dtype),
+            weight_dtype_str=_dtype_to_str(weight.dtype),
+            bias_dtype_str=_dtype_to_str(bias.dtype),
+            residual_dtype_str=_dtype_to_str(residual.dtype),
+            residual_out_dtype_str=_dtype_to_str(residual_out.dtype),
+            has_weight=has_weight,
+            has_bias=has_bias,
+            has_residual=has_residual,
+            store_residual=store_residual,
+            store_rstd=store_rstd,
+            per_head=per_head,
+            num_heads=num_heads,
+            arch=arch,
+            schema_version=RMSNORM_AUTOTUNE_SCHEMA_VERSION,
+            stream=_current_raw_stream(x.device),
+        )
+
+
 @torch.library.custom_op(
     "quack::_rmsnorm_flydsl_fwd",
     mutates_args=("out", "residual_out", "rstd"),
@@ -388,6 +446,59 @@ def _rmsnorm_flydsl_fwd_op(
 
 
 _rmsnorm_flydsl_fwd_op.register_fake(_noop_fake)
+
+
+@torch.library.custom_op(
+    "quack::_rmsnorm_flydsl_fwd_autotuned",
+    mutates_args=("out", "residual_out", "rstd"),
+    device_types="cuda",
+    schema=(
+        "(Tensor x, Tensor weight, Tensor bias, Tensor residual, "
+        "Tensor(a4!) out, Tensor(a5!) residual_out, Tensor(a6!) rstd, "
+        "float eps, float weight_offset, bool has_weight, bool has_bias, "
+        "bool has_residual, bool store_residual, bool store_rstd, "
+        "bool per_head, int num_heads) -> ()"
+    ),
+)
+def _rmsnorm_flydsl_fwd_autotuned_op(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    residual: torch.Tensor,
+    out: torch.Tensor,
+    residual_out: torch.Tensor,
+    rstd: torch.Tensor,
+    eps: float,
+    weight_offset: float,
+    has_weight: bool,
+    has_bias: bool,
+    has_residual: bool,
+    store_residual: bool,
+    store_rstd: bool,
+    per_head: bool,
+    num_heads: int,
+) -> None:
+    _launch_rmsnorm_fwd_autotuned(
+        x,
+        weight,
+        bias,
+        residual,
+        out,
+        residual_out,
+        rstd,
+        eps,
+        weight_offset,
+        has_weight=has_weight,
+        has_bias=has_bias,
+        has_residual=has_residual,
+        store_residual=store_residual,
+        store_rstd=store_rstd,
+        per_head=per_head,
+        num_heads=num_heads,
+    )
+
+
+_rmsnorm_flydsl_fwd_autotuned_op.register_fake(_noop_fake)
 
 
 def _launch_rmsnorm_bwd(
@@ -579,6 +690,7 @@ class _RMSNormFunction(torch.autograd.Function):
         has_residual: bool,
         per_head: bool,
         num_heads: int,
+        autotuned: bool,
     ):
         programs = x.shape[0] * num_heads
         needs_grad = any(ctx.needs_input_grad[:4])
@@ -598,8 +710,8 @@ class _RMSNormFunction(torch.autograd.Function):
             dtype=torch.float32,
         )
         _dispatch(
-            _rmsnorm_flydsl_fwd_op,
-            _launch_rmsnorm_fwd,
+            _rmsnorm_flydsl_fwd_autotuned_op if autotuned else _rmsnorm_flydsl_fwd_op,
+            _launch_rmsnorm_fwd_autotuned if autotuned else _launch_rmsnorm_fwd,
             x,
             weight,
             bias,
@@ -706,10 +818,11 @@ class _RMSNormFunction(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
-def rmsnorm(
+def _rmsnorm_impl(
     x: torch.Tensor,
     weight: torch.Tensor | None = None,
     bias: torch.Tensor | None = None,
@@ -719,6 +832,8 @@ def rmsnorm(
     eps: float = EPS,
     prenorm: bool = False,
     weight_offset: float = 0.0,
+    *,
+    autotuned: bool,
 ) -> torch.Tensor:
     """Apply RMSNorm over the last dimension using the FlyDSL backend."""
     m, n, num_heads, per_head, eps, weight_offset = _validate_inputs(
@@ -780,7 +895,60 @@ def rmsnorm(
         residual is not None,
         per_head,
         num_heads,
+        autotuned,
     )
     if isinstance(result, tuple):
         return tuple(tensor.reshape(x.shape) for tensor in result)
     return result.reshape(x.shape)
+
+
+def rmsnorm(
+    x: torch.Tensor,
+    weight: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+    residual: torch.Tensor | None = None,
+    out_dtype: torch.dtype | None = None,
+    residual_dtype: torch.dtype | None = None,
+    eps: float = EPS,
+    prenorm: bool = False,
+    weight_offset: float = 0.0,
+) -> torch.Tensor:
+    """Apply RMSNorm with the stable analytical forward heuristic."""
+    return _rmsnorm_impl(
+        x,
+        weight,
+        bias,
+        residual,
+        out_dtype,
+        residual_dtype,
+        eps,
+        prenorm,
+        weight_offset,
+        autotuned=False,
+    )
+
+
+def rmsnorm_autotuned(
+    x: torch.Tensor,
+    weight: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+    residual: torch.Tensor | None = None,
+    out_dtype: torch.dtype | None = None,
+    residual_dtype: torch.dtype | None = None,
+    eps: float = EPS,
+    prenorm: bool = False,
+    weight_offset: float = 0.0,
+) -> torch.Tensor:
+    """Apply RMSNorm through FlyDSL's native forward autotuner."""
+    return _rmsnorm_impl(
+        x,
+        weight,
+        bias,
+        residual,
+        out_dtype,
+        residual_dtype,
+        eps,
+        prenorm,
+        weight_offset,
+        autotuned=True,
+    )
