@@ -9,9 +9,10 @@ torch 2.9.1+rocm7.2.0 unless stated otherwise.
 The FlyDSL entry point implements the upstream `quack.rmsnorm` signature,
 including optional weight and bias, `weight_offset`, independent output dtype,
 residual/prenorm output, residual dtype override, and per-head parameters.
-The original plain weighted path keeps its vectorized/small-N kernels; feature
-combinations use a descriptor-safe kernel specialized by compile-time feature
-flags.
+One descriptor-safe kernel serves every case, specialized by compile-time
+feature flags; the plain weighted case is that kernel with `has_weight=True`
+and every other flag off. There is no separate plain path -- see "The plain
+path is gone" below for what merging the two cost.
 
 Backward has one weight-gradient reduction at every row count: a persistent
 kernel writing one partial per block, then a final reduce. It is a fixed
@@ -291,7 +292,8 @@ each measured out. Both shapes that exposed it are unaligned and no longer
 admitted, so this is recorded rather than chased.
 
 Rows of 64 remain at 0.79x of inductor, and the plain path sat at the same
-2.99 TB/s there while it existed, so that gap is older than the batching.
+2.99 TB/s there while it existed, so that gap is older than the batching and
+survived the merge below.
 
 ## The tail block's guard depends on how deep the tile loop is
 
