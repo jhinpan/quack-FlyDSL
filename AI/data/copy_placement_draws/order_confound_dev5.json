@@ -11,7 +11,7 @@
   "assembler": "AI/assemble_order_confound.py",
   "input_manifest": {
     "n_inputs": 22,
-    "source_dir": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_order_dev5",
+    "source_dir": "AI/data/copy_placement_draws/raw_order_dev5",
     "source_dir_inside_repo": true,
     "source_dir_note": "inputs are versioned alongside the artifact, so the hashes below can be rechecked by anyone with the commit",
     "entries": [
@@ -122,23 +122,18 @@
       },
       {
         "path": "AI/assemble_order_confound.py",
-        "sha256": "e8e43d5ccb8a3a456a9614410d48a8d61fd4bea7bbe3baf8c5d2b6195597dfdc",
-        "bytes": 24228
+        "sha256": "6d93341692d753dfab46cc854ed01cc7bac43bc816517748a942145259e97b9b",
+        "bytes": 24677
       }
     ],
     "what_this_proves": "the assembler read exactly these bytes. It does not prove they came from a GPU, and a manifest cannot: it is a binding between artifact and raw runs, not an attestation."
   },
-  "commit": "df13d9e",
+  "commit": "134802e",
   "worktree_dirty": true,
   "worktree_dirty_paths": [
     "AI/assemble_copy_axes.py",
     "AI/assemble_order_confound.py",
-    "AI/data/copy_placement_draws/copy_axes_dev5.json",
-    "AI/data/copy_placement_draws/order_confound_dev5.json",
-    "AI/data/copy_placement_draws/raw_dev5/_peak_sweep.json",
-    "AI/flydsl_rmsnorm_notes.md",
-    "AI/probe_copy_size_draws.py",
-    "AI/probe_rmsnorm_roofline.py"
+    "AI/data/copy_placement_draws/copy_axes_dev5.json"
   ],
   "worktree_dirty_note": "a dirty ancestor means the commit above does not pin the code that produced this artifact. The paths are listed so a reader can see whether the difference touches the probe or the assembler.",
   "by_alloc_ordinal": {

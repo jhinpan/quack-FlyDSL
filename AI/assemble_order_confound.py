@@ -339,7 +339,12 @@ def _manifest(src, paths, extra):
     inside = str(src).startswith(str(REPO))
     return {
         "n_inputs": len(entries),
-        "source_dir": str(src),
+        # Relative when inside the repo, so a reader regenerating from their own
+        # clone gets a byte-identical artifact and "did this regenerate cleanly?"
+        # is answerable by diffing. Absolute is kept when the source is outside
+        # the tree, because there the path is the only record of where the bytes
+        # came from and `source_dir_inside_repo` is already false.
+        "source_dir": str(Path(src).resolve().relative_to(REPO)) if inside else str(src),
         "source_dir_inside_repo": inside,
         "source_dir_note": (
             "inputs are versioned alongside the artifact, so the hashes below can be "

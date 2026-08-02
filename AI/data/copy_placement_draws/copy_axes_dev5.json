@@ -144,87 +144,87 @@
     "n_inputs": 19,
     "entries": [
       {
-        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/_peak_sweep.json",
+        "path": "AI/data/copy_placement_draws/raw_dev5/_peak_sweep.json",
         "sha256": "e220f0d49e045299f219c4a816211725662ea2ed953c259fc08d31ff4c4d5b64",
         "bytes": 132771
       },
       {
-        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak0_1.json",
+        "path": "AI/data/copy_placement_draws/raw_dev5/peak0_1.json",
         "sha256": "8630f4c8a7c067fc2df0708e3690dc0c886a204318cab99c49e4817d7d97c83d",
         "bytes": 11412
       },
       {
-        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak0_2.json",
+        "path": "AI/data/copy_placement_draws/raw_dev5/peak0_2.json",
         "sha256": "eab6edac2918749d1daec98439316eefa4ec41a130610a7c6e496d8af2c79cbe",
         "bytes": 11409
       },
       {
-        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak0_3.json",
+        "path": "AI/data/copy_placement_draws/raw_dev5/peak0_3.json",
         "sha256": "69b2ded0d1e3851ce42b79f8fc4ca85481116772a2bf173486c339db4915d9f6",
         "bytes": 11381
       },
       {
-        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak0_4.json",
+        "path": "AI/data/copy_placement_draws/raw_dev5/peak0_4.json",
         "sha256": "0a1841315419946514345406736327b6390af1aa47de0afc6cb40301bdbc14a1",
         "bytes": 11402
       },
       {
-        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak14_1.json",
+        "path": "AI/data/copy_placement_draws/raw_dev5/peak14_1.json",
         "sha256": "c78bd29ea7ccde15d024e63401bd78cd91b657a696ab99af34443a0a5362f743",
         "bytes": 11426
       },
       {
-        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak14_2.json",
+        "path": "AI/data/copy_placement_draws/raw_dev5/peak14_2.json",
         "sha256": "4121703e1900ac49c288b3b4a7c02f2239ee493a227c24ee83cb7dd4094d3ae3",
         "bytes": 11418
       },
       {
-        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak14_3.json",
+        "path": "AI/data/copy_placement_draws/raw_dev5/peak14_3.json",
         "sha256": "c324d8582282733136bc4ce8da3a0135900a105779923ef3666ec64534674c55",
         "bytes": 11425
       },
       {
-        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak14_4.json",
+        "path": "AI/data/copy_placement_draws/raw_dev5/peak14_4.json",
         "sha256": "a46548f25ef7cf50cb3792223a1601e1f5172ca12307bd0d445d5476ff0d3756",
         "bytes": 11406
       },
       {
-        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak20_1.json",
+        "path": "AI/data/copy_placement_draws/raw_dev5/peak20_1.json",
         "sha256": "8eb5757ad1d1553c877b44413201e8d2a8bfd4a19cdc7b32884b2c89fcfecf98",
         "bytes": 11435
       },
       {
-        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak20_2.json",
+        "path": "AI/data/copy_placement_draws/raw_dev5/peak20_2.json",
         "sha256": "30e52ec1fce7afdc3a3fdc64f23569d6443cf0b6f3a0382d1d8f1512f36556ee",
         "bytes": 11430
       },
       {
-        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak20_3.json",
+        "path": "AI/data/copy_placement_draws/raw_dev5/peak20_3.json",
         "sha256": "96d88c2c269f173818247463a74b7db52b4129b4e097bfc50668fddb3cfa1a55",
         "bytes": 11426
       },
       {
-        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak20_4.json",
+        "path": "AI/data/copy_placement_draws/raw_dev5/peak20_4.json",
         "sha256": "57dc7b5766aaafd83aeafb24d0b9848df7d528a5d6967f5a4ad01ec28e1ddfbf",
         "bytes": 11398
       },
       {
-        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak6_1.json",
+        "path": "AI/data/copy_placement_draws/raw_dev5/peak6_1.json",
         "sha256": "65f17ad2fdc11c35e25ac6a7a92f285dadf37fcb4e01a2e5a79ffd5ba9553939",
         "bytes": 11413
       },
       {
-        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak6_2.json",
+        "path": "AI/data/copy_placement_draws/raw_dev5/peak6_2.json",
         "sha256": "922fc3e8f8b32165ba756b3da60e20907f46a718baff6c4341be3dd14a0dfe48",
         "bytes": 11401
       },
       {
-        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak6_3.json",
+        "path": "AI/data/copy_placement_draws/raw_dev5/peak6_3.json",
         "sha256": "04c5a5ab9ef245d56801de1b258a84a311eb156402b34f634d81b2df28bb69b1",
         "bytes": 11426
       },
       {
-        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak6_4.json",
+        "path": "AI/data/copy_placement_draws/raw_dev5/peak6_4.json",
         "sha256": "b65fecbba5ec753011d1521297999e73a9e7abd91328b6f42e7295ecef32ce69",
         "bytes": 11403
       },
@@ -235,13 +235,13 @@
       },
       {
         "path": "AI/assemble_copy_axes.py",
-        "sha256": "17df133b5ebbdf1524d10abc84cae43d9a3861d3003afa415cb2ee6cd8877609",
-        "bytes": 65615
+        "sha256": "61b1cb5c44ebfd57993c1b54b932af5def303f97e5940fd1d057aaab5e2447b5",
+        "bytes": 66395
       }
     ],
     "what_this_proves": "the assembler read exactly these bytes. It does not prove they came from a GPU, and a manifest cannot: it is a binding between artifact and raw runs, not an attestation."
   },
-  "commit": "df13d9e",
+  "commit": "134802e",
   "worktree_dirty": true,
   "historical_table": {
     "source": "AI/flydsl_rmsnorm_notes.md:869",

@@ -1130,12 +1130,26 @@ def _input_manifest(src_dir, extra):
     buys is that a reader who still has the raw runs can verify the artifact was
     built from them, and that a regeneration which silently picks up a different
     input set stops matching.
+
+    Paths are recorded RELATIVE to the repo when the input is inside it. They
+    were absolute, which quietly cost the manifest the property it exists for: a
+    reader regenerating from their own clone gets a byte-different artifact even
+    though every hash matches, so "did this regenerate cleanly?" could not be
+    answered by comparing files. Found by regenerating in a throwaway clone
+    before handing the commit to @Reviewer. The tell was in this same function --
+    the two code entries below were already relative while the data entries above
+    them were not, in a manifest whose whole job is to be checkable by somebody
+    else.
     """
     entries = []
     for path in sorted(Path(src_dir).glob("*.json")) + [Path(p) for p in extra if Path(p).exists()]:
+        try:
+            name = str(path.resolve().relative_to(REPO))
+        except ValueError:
+            name = str(path.resolve())
         entries.append(
             {
-                "path": str(path),
+                "path": name,
                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                 "bytes": path.stat().st_size,
             }
