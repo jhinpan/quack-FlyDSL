@@ -371,7 +371,8 @@ def main() -> None:
           "(per-XCD; MALL not reported)")
     print(f"MALL assumed       : {MALL_BYTES / 2**20:.0f} MiB "
           "(32 MiB/stack x 8, per ROCm Kernel Wiki hw-chiplet-xcd)")
-    print(f"rocminfo L3        : {env['rocminfo_l3']}")
+    print(f"rocminfo L3        : {env['rocminfo_l3_lines']} "
+          f"(agrees with assumed MALL: {env.get('rocminfo_l3_agrees_with_assumed')})")
     print(f"torch              : {env['torch_version']} "
           f"(hip {env['torch_hip']})")
     print()
