@@ -225,14 +225,23 @@ def _last_level_cache_bytes(torch: Any, properties: Any) -> int:
                     props = dict(line.split()[:2] for line in handle if len(line.split()) >= 2)
             except OSError:
                 continue
-            if int(props.get("gfx_target_version", 0)) == 0:
-                continue  # CPU node
-            location = int(props.get("location_id", 0))
-            if (
-                int(props.get("domain", 0)) != domain
-                or ((location >> 8) & 0xFF) != bus
-                or ((location >> 3) & 0x1F) != device
-            ):
+            # Skip a node whose numeric fields do not parse, rather than letting
+            # the exception escape. Scanning the whole tree means an unrelated
+            # malformed node -- one that is not even a candidate match -- would
+            # otherwise abort the benchmark instead of falling back. @Reviewer
+            # raised this against the autotuner's copy of this parser; it is
+            # equally true here, and here the blast radius is a crashed run.
+            try:
+                if int(props.get("gfx_target_version", 0)) == 0:
+                    continue  # CPU node
+                location = int(props.get("location_id", 0))
+                if (
+                    int(props.get("domain", 0)) != domain
+                    or ((location >> 8) & 0xFF) != bus
+                    or ((location >> 3) & 0x1F) != device
+                ):
+                    continue
+            except ValueError:
                 continue
             matches.append(base)
     except OSError:
@@ -248,8 +257,11 @@ def _last_level_cache_bytes(torch: Any, properties: Any) -> int:
                     cprops = dict(line.split()[:2] for line in handle if len(line.split()) >= 2)
             except OSError:
                 continue
-            if int(cprops.get("level", 0)) >= 2:
-                best = max(best, int(cprops.get("size", 0)) * 1024)  # KFD reports KB
+            try:
+                if int(cprops.get("level", 0)) >= 2:
+                    best = max(best, int(cprops.get("size", 0)) * 1024)  # KFD reports KB
+            except ValueError:
+                continue  # unparseable cache entry: skip it, do not abort the run
     except OSError:
         return properties.L2_cache_size
     return max(best, properties.L2_cache_size)
