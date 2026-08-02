@@ -555,17 +555,49 @@ rejected. Against `two_read_one_write` the same four shapes read 98.9 / 95.3 /
 about copies: **a roofline violation indicts the denominator as readily as the
 numerator, and the denominator is the cheaper half to check first.**
 
-**Below about 26 us of device work, the public API measures Python, not the
-kernel.** One `rmsnorm(x, w)` costs ~26 us of *host* time at `256x4096`, against
-~6.4 us for `torch.nn.functional.rms_norm` (regenerated: 30.14 vs 5.73 us,
-sidecar `AI/data/rmsnorm_call_decomposition.json`, generator
-`AI/probe_rmsnorm_call_decomposition.py`). It is genuinely asynchronous -- the
+**Below about 30 us of device work, the public API measures Python, not the
+kernel.** One `rmsnorm(x, w)` costs ~30 us of *host* time at `256x4096`, against
+~7 us for `torch.nn.functional.rms_norm` (`AI/data/rmsnorm_call_decomposition.json`:
+31.30 vs 6.93 us). **Two sidecars now time this same call and disagree: 31.30
+there against 28.22 as rung L4 of the ladder below** — 11% apart, on one machine,
+same shape, both host-side. The ladder holds five other configurations warm in
+the same process and the other probe does not, which is the obvious suspect and
+is *not* something either probe establishes. The threshold above is therefore
+written as ~30 rather than the ~26 it used to say, and the honest reading is
+"about 30, ±3 depending on process state" — a figure with a 3 µs process-dependence
+should not be quoted to three digits, which the earlier "~26 us / 26.1 total"
+pairing did. It is genuinely asynchronous -- the
 cost does not move when ~1.2 ms of device work is queued ahead of it -- so it is
-host dispatch, not a stall. Localized by stubbing each stage in situ: the cached
-launcher is 11.3 us, the four `torch.empty*` allocations bring it to 16.3, the
-`autograd.Function.apply` to 19.4, and `_validate_inputs` adds 2.9 for 26.1
-total. (**Still unbacked**: the stage split needs in-situ stubbing of quack
-internals and is not in the sidecar. The 26 us total it sums to *is* backed.)
+host dispatch, not a stall. Localized by building a six-rung ladder over the real
+call path, each rung adding exactly one stage and every rung asserted
+bit-identical to the public API before timing (sidecar
+`AI/data/rmsnorm_stage_stubs.json`, generator `AI/probe_rmsnorm_stage_stubs.py`):
+
+| rung | what it adds | median host µs | Δ |
+| --- | --- | --- | --- |
+| L0 | `run_compiled` — FlyDSL dispatch alone | 6.55 | — |
+| L1 | + key tuple, cache lookup, dtype strings | 11.35 | 4.79 |
+| L2 | + the three output allocations | 15.12 | 3.77 |
+| L3 | + `autograd.Function.apply` | 19.17 | 4.05 |
+| L3b | + reshapes, `_packed_rows`, absent `empty(0)` | 24.67 | 5.50 |
+| L4 | + `_validate_inputs` — the public API | 28.22 | 3.55 |
+
+**This replaces an unbacked chain that did not add up.** The previous text read
+*"the cached launcher is 11.3, the four `torch.empty*` allocations bring it to
+16.3, the `autograd.Function.apply` to 19.4, and `_validate_inputs` adds 2.9 for
+26.1 total"* — but **19.4 + 2.9 = 22.3, not 26.1**. The last rung's stated
+increment disagreed with its own two stated endpoints by 3.8 µs. It survived
+because it was labelled unbacked, so nothing ever regenerated it and no reader
+summed a chain already marked unverified — a number flagged *unconfirmed* still
+gets read as *approximately right*, and this one was not even internally
+consistent.
+
+The measurement explains the gap: that last step was never one stage. It lumped
+`_validate_inputs` together with the reshapes and the absent-tensor
+`torch.empty(0)`s, which is why L3b is separated here. Split apart,
+**`_validate_inputs` alone is 3.55 µs** — consistent with both the old 2.9 and
+the ~3.3 quoted further down — and the wrapper's reshape/alloc work is **5.50
+µs**, the part the old chain dropped from its own arithmetic.
 
 **The "roughly 2x kernel advantage" was a ratio taken across a floor, and it is
 K-dependent.** The published figures were 2.11 us for FlyDSL against torch's
@@ -623,8 +655,12 @@ FlyDSL wrapper is behind, and that the harness reports only the first.
 **Most of that 26 us is not ours to remove, and the ceiling is worth knowing
 before anyone tries.** Calling the cached compiled function directly -- no
 validation, no allocation, no autograd, no key construction, stream hoisted --
-still costs **6.38 us** (**unbacked**: not regenerated in the sidecar, which
-covers the host total and the graph series but not the stubbed-stage figures),
+still costs **6.55 us** (backed: `AI/data/rmsnorm_stage_stubs.json`, rung L0,
+validated bit-identical to the public call before timing; the previously
+published **6.38** lands 2.6% low, which is **1.7 round-to-round stdevs** at this
+rung's 0.102 µs and therefore *consistent* with it — I first wrote that it sat
+"well outside" the scatter, quoting a stdev from an earlier run of the same probe
+and turning ordinary noise into a discrepancy),
 and that is FlyDSL's own dispatch: the profile at that
 level is all `<flydsl-dispatch>`, `ptr_fill` and `pack_into`, with no frame of
 ours in it. For scale, `torch.nn.functional.rms_norm` end-to-end is 6.27 us and
@@ -632,10 +668,14 @@ a bare `out.add_(1.0)` launch is 4.52. So **the framework's launch floor alone
 already equals torch's entire call**, and no amount of tightening the Quack
 wrapper reaches parity at small shapes.
 
-What *is* recoverable, measured by neutralizing each in situ: ~3.3 us from
-`_validate_inputs` and ~3.0 us from the per-call `torch.empty(0)` absent-tensor
-allocations, taking 26.5 us to 20.3. Real, worth doing eventually, and about a
-third of the gap. The rest is `autograd.Function.apply` plus the FlyDSL floor.
+What *is* recoverable: **3.55 us** from `_validate_inputs` (L4 − L3b) and part of
+the **5.50 us** L3b step, which is the reshapes and `_packed_rows` as well as the
+absent-tensor `torch.empty(0)`s — the earlier text credited ~3.0 us to the
+`empty(0)`s alone, and this probe does not separate them within L3b, so that
+share stays unattributed rather than being carried forward. Removing validation
+outright takes 28.22 to 24.67, and the rest is `autograd.Function.apply` (4.05)
+plus the FlyDSL floor (6.55). The old "26.5 to 20.3" is superseded; it was
+arithmetic on the chain that did not sum.
 
 This is the part that decides what to do about it: the finding is a **property
 of the FlyDSL dispatch path, not a Quack defect**, so it belongs upstream or in

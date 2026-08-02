@@ -36,11 +36,14 @@ sweep's sidecar, on the same reasoning that keeps the ceiling probe local: a
 constant shared between processes is how four different copy roofline values
 got into these notes.
 
-The stage decomposition is measured by neutralising one stage at a time in
-situ, and every stage records what it patched, so a reader can see that the
-attribution is a difference of two measured configurations rather than a guess
-at where the time went. Stages are restored in a finally block and the
-restoration is asserted.
+This probe does NOT measure the stage decomposition. An earlier draft of this
+docstring said it was "measured by neutralising one stage at a time in situ,
+and every stage records what it patched" -- describing, in the present tense, a
+method this file never implemented; `not_covered` in the payload said the
+opposite, correctly, 290 lines further down. There is no stubbing code here
+(`grep -c setattr` = 0). The stage split and the dispatch floor are measured by
+`AI/probe_rmsnorm_stage_stubs.py` instead, and this file covers the host total,
+the graph series and torch.compile.
 
 Run:  HIP_VISIBLE_DEVICES=<idle> python AI/probe_rmsnorm_call_decomposition.py
 Writes AI/data/rmsnorm_call_decomposition.json.
