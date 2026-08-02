@@ -254,7 +254,12 @@ def fine_boundary(record):
     }
     for ws in (268435456, 268437504, 268439552, 268443648, 268500992,
                268697600, 269484032, 288 * 2**20, 384 * 2**20):
-        elem_bytes = (ws // 2 // 4096) * 4096   # 2 buffers, page-aligned
+        # working_set = 2 * elem_bytes * n_buffers (each buffer is a src+dst
+        # pair), so elem_bytes = ws/4. Do NOT round to a page here: the steps
+        # being probed are 2 KiB apart and page-rounding collapses
+        # 256.00195/256.00391 back onto 256.0, silently measuring the wrong
+        # working set. 4-byte alignment is all float32 needs.
+        elem_bytes = (ws // 4 // 4) * 4
         gbps, real_ws, samples, round_ms = bench_rotation(elem_bytes, 2)
         record.append({
             "block": "fine_boundary",
