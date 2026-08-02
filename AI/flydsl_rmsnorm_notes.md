@@ -519,7 +519,7 @@ pure launch path, where the CuTe kernel is about 2.2x ahead (6.1 us against
 > a rotation working set of 256 MiB or less stays resident in the MALL, and the
 > `use_evictor` gate compares against a 12 MiB target derived from the 4 MiB
 > per-XCD L2 that torch reports, so on these shapes no eviction runs at all.
-> A `copy_` probe measures **~1.3x** inflation at the boundary (1.298–1.354x
+> A `copy_` probe measures **~1.3x** inflation at the boundary (1.289–1.354x
 > across runs and both buffer sizes; the third digit does not reproduce),
 > confirmed by a
 > second reviewer re-running the committed probe. **That ~1.3x is a property of

@@ -305,8 +305,8 @@ sides of every boundary step were sampled unequally, and the *high* buffer
 count side, which is where the post-boundary rows live, always got less data.
 `ROUNDS` is now a constant 15 (75 rounds per point) regardless of buffer count.
 
-Across runs the same step measures **1.298x, 1.318x, 1.324x, 1.328x, 1.334x,
-1.341x, 1.344x, 1.345x, 1.349x, 1.354x**. Each is recomputable from a JSON
+Across runs the same step measures **1.289x, 1.298x, 1.308x, 1.318x, 1.324x,
+1.328x, 1.334x, 1.341x, 1.344x, 1.345x, 1.349x, 1.354x**. Each is recomputable from a JSON
 sidecar committed in this repo's history. Sidecar-holding commit → the script
 commit that generated it (`environment.git_commit`), which are *different
 commits* and which an earlier version of this list conflated:
@@ -319,6 +319,7 @@ commits* and which an earlier version of this list conflated:
 | `250502a` | `2bd5624` | 1.341131 | **1.345494** |
 | `d853d7b`, `1b53896` | `250502a` | 1.343588 | 1.333958 |
 | `c9c10fc` | `1b53896` | 1.323130 | 1.349374 |
+| (this commit) | `21e91f6` | 1.288916 | 1.307976 |
 
 > **Retraction of a retraction, 2026-08-02.** I previously "withdrew" `1.345x`
 > as appearing in no committed artifact. **That withdrawal was wrong** —
@@ -523,15 +524,15 @@ the `ws <= MALL` test excludes them, yet a copy probe at those exact working
 sets still shows the contract failing. The
 fine-boundary block measures those exact working sets:
 
-    268435456   256.000000 MiB   6391 GB/s
-    268437504   256.001953 MiB   6237
-    268439552   256.003906 MiB   6129   <- 32768x1024 fwd, 16-bit weight
-    268443648   256.007812 MiB   6157   <- 32768x1024 fwd, fp32 weight
-    268500992   256.062500 MiB   5723
-    301989888   288.000000 MiB   4880
+    268435456   256.000000 MiB   6397 GB/s
+    268437504   256.001953 MiB   6295
+    268439552   256.003906 MiB   6391   <- 32768x1024 fwd, 16-bit weight
+    268443648   256.007812 MiB   6367   <- 32768x1024 fwd, fp32 weight
+    268500992   256.062500 MiB   5584
+    301989888   288.000000 MiB   4871
 
-Against this run's 4961 GB/s HBM reference the **copy probe** at both working
-sets reads high (6129 and 6157 GB/s, i.e. 1.24x and 1.24x). That is a statement
+Against this run's 4992 GB/s HBM reference the **copy probe** at both working
+sets reads high (6391 and 6367 GB/s, i.e. 1.28x and 1.28x). That is a statement
 about copy traffic at those sizes, and it establishes only that a set a few KiB
 past capacity is not self-evicting. It is **not** a measurement of the RMSNorm
 cells, whose direction and magnitude are unknown until they are re-collected.
@@ -542,18 +543,19 @@ The first claimed the interquartile ranges "overlap almost completely" while
 quoting 6019–6191 against 6254–6453 — intervals that are *disjoint*, as
 @Reviewer caught. Per-run IQRs, recomputed from all 75 raw rounds:
 
-| WS | run `1b53896` median / IQR | run `742196f` median / IQR |
-| --- | --- | --- |
-| 256.000000 MiB | 6446.6 / 6421.7–6465.2 | 6391.3 / 6379.0–6409.5 |
-| 256.001953 MiB | 6331.1 / 6266.0–6391.4 | 6236.9 / 6179.4–6354.9 |
-| 256.003906 MiB | 6078.7 / 6018.8–6190.9 | 6128.8 / 6045.9–6173.9 |
-| 256.007812 MiB | 6379.4 / 6254.4–6453.0 | 6156.8 / 6089.9–6214.0 |
+| WS | run `1b53896` | run `742196f` | run `21e91f6` |
+| --- | --- | --- | --- |
+| 256.000000 MiB | 6446.6 / 6421.7–6465.2 | 6391.3 / 6379.0–6409.5 | 6415.6 / 6379.2–6428.1 |
+| 256.001953 MiB | 6331.1 / 6266.0–6391.4 | 6236.9 / 6179.4–6354.9 | 6248.5 / 6202.3–6331.1 |
+| 256.003906 MiB | 6078.7 / 6018.8–6190.9 | 6128.8 / 6045.9–6173.9 | 6391.3 / 6373.2–6422.0 |
+| 256.007812 MiB | 6379.4 / 6254.4–6453.0 | 6156.8 / 6089.9–6214.0 | 6367.3 / 6289.7–6391.5 |
 
-Within either single run the last two IQRs are disjoint, so neither run can call
-the difference noise on its own. **Across** runs the gap reverses in size
-(+300 GB/s then +28 GB/s) and the 256.003906 point moves by more than its own
-IQR width, which is what actually shows the ordering is not a stable property —
-run-to-run variation exceeds within-run spread. That is a claim about
+Within any single run the last two IQRs are disjoint, so no run can call the
+difference noise on its own. **Across** runs the comparison inverts outright:
+256.003906 reads *below* 256.007812 by 300 and by 28 GB/s in the first two runs
+and *above* it in the third, having moved 262 GB/s — many times its own ~50 GB/s
+IQR width — between runs taken minutes apart on an otherwise idle card. Whatever
+orders these four points is not the working set. That is a claim about
 reproducibility, not a statistical test, and it is the strongest one available
 here: back-to-back blocks cannot separate a working-set effect from drift.
 Interleaved repeats would be needed. The only claim these four points support is
