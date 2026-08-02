@@ -1,0 +1,166 @@
+{
+  "achievable_bandwidth": {
+    "best_probe": "write",
+    "median_gbps": 6560.006172,
+    "median_us": 81.840001,
+    "probe_bytes": 536870912,
+    "probes": {
+      "copy": {
+        "gbps": 5472.662227,
+        "median_us": 196.201004
+      },
+      "two_read_one_write": {
+        "gbps": 5921.348621,
+        "median_us": 272.000998
+      },
+      "write": {
+        "gbps": 6560.006172,
+        "median_us": 81.840001
+      }
+    },
+    "samples": 30
+  },
+  "architecture_overrides": {
+    "ARCH": null,
+    "FLYDSL_GPU_ARCH": null
+  },
+  "artifact_directory": "/tmp/gate_before_B.json",
+  "command": [
+    "/opt/venv/bin/python",
+    "benchmarks/_bench_pre_gate_tmp.py",
+    "--providers",
+    "torch",
+    "--operations",
+    "fwd",
+    "--activation-dtypes",
+    "bfloat16",
+    "--shape",
+    "512x4096",
+    "--shape",
+    "4096x4096",
+    "--shape",
+    "32768x1024",
+    "--shape",
+    "32768x2048",
+    "--output-dir",
+    "/tmp/gate_before_B.json"
+  ],
+  "comparison_scope": "same-device providers. RMSNorm is memory bound, so a cross-vendor comparison of microseconds mostly reports the HBM bandwidth ratio; compare peak_bw_pct instead",
+  "completed_at_utc": "2026-08-02T01:53:13.417407+00:00",
+  "contention_canary": {
+    "closing_gbps": 6689.063372,
+    "closing_over_opening": 1.019673,
+    "opening_gbps": 6560.006172,
+    "quiet": true
+  },
+  "correctness_gate": "required",
+  "generated_at_utc": "2026-08-02T01:53:13.016450+00:00",
+  "git_commit": "d167701c7d18803773b3633ea2c42c77950ce993",
+  "gpu": {
+    "arch": "gfx950",
+    "compute_units": 256,
+    "l2_cache_bytes_reported": 4194304,
+    "name": "AMD Instinct MI355X",
+    "total_memory_bytes": 309220868096,
+    "visible_count": 1,
+    "visible_index": 0
+  },
+  "host": {
+    "hostname": "mia1-p02-g23",
+    "platform": "Linux-6.8.0-60-generic-x86_64-with-glibc2.35"
+  },
+  "matrix": {
+    "dtype_weight_modes": [
+      [
+        "bfloat16",
+        "same"
+      ],
+      [
+        "bfloat16",
+        "float32"
+      ]
+    ],
+    "eps": 1e-06,
+    "operations": [
+      "fwd"
+    ],
+    "providers": [
+      "torch"
+    ],
+    "shapes": [
+      [
+        512,
+        4096
+      ],
+      [
+        4096,
+        4096
+      ],
+      [
+        32768,
+        1024
+      ],
+      [
+        32768,
+        2048
+      ]
+    ]
+  },
+  "methodology": {
+    "cache": "round-robin cloned tensor sets; when their logical working set is below the L2 target, a device copy evicts cache between individually timed calls",
+    "l2_target_ratio": 3,
+    "logical_bytes": {
+      "bwd": "read x + dout + weight + fp32 rstd; write dx + dweight",
+      "fwd": "read x + weight; write y"
+    },
+    "max_rotation_buffers": 4,
+    "peak_bandwidth": "best of a same-device copy, a two-read one-write elementwise, and a pure write; a copy alone understates the memory system",
+    "sample_rounds": 40,
+    "steady_state": "per-call torch.cuda device events after provider warmup; FlyDSL first-launch JIT is synchronized, recorded separately, and excluded",
+    "warmup_rounds": 3
+  },
+  "result_rows": 8,
+  "result_schema": [
+    "schema_version",
+    "provider",
+    "provider_detail",
+    "operation",
+    "m",
+    "n",
+    "activation_dtype",
+    "weight_dtype",
+    "weight_mode",
+    "eps",
+    "cold_compile_ms",
+    "cold_compile_reused",
+    "median_us",
+    "p10_us",
+    "p90_us",
+    "logical_bytes",
+    "logical_gbps",
+    "peak_bw_gbps",
+    "peak_bw_pct",
+    "rotation_buffers",
+    "rotation_working_set_bytes",
+    "l2_target_bytes",
+    "l2_eviction_between_calls",
+    "timed_samples"
+  ],
+  "runtime_scope": "AMD Instinct MI355X / gfx950",
+  "schema_version": 2,
+  "status": "passed",
+  "versions": {
+    "cuda": null,
+    "flydsl": "0.3.0.dev765",
+    "hip": "7.2.26015-fc0010cf6a",
+    "python": "3.10.12",
+    "quack": null,
+    "torch": "2.9.1+rocm7.2.0.git7e1940d4"
+  },
+  "visibility": {
+    "CUDA_VISIBLE_DEVICES": null,
+    "HIP_VISIBLE_DEVICES": "0",
+    "ROCR_VISIBLE_DEVICES": null
+  },
+  "working_directory": "/root/quack-FlyDSL-review"
+}

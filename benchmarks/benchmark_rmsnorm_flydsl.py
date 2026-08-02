@@ -876,8 +876,10 @@ def _environment(torch: Any, args: argparse.Namespace, output_dir: Path) -> dict
                 "JIT is synchronized, recorded separately, and excluded"
             ),
             "cache": (
-                "round-robin cloned tensor sets; when their logical working set is below "
-                "the L2 target, a device copy evicts cache between individually timed calls"
+                "round-robin cloned tensor sets; when their logical working set is at "
+                "most 2x the last-level cache (the MALL on gfx950, not the L2 torch "
+                "reports), a device copy evicts the cache once per timed rotation, "
+                "outside the event window"
             ),
             "logical_bytes": {
                 "fwd": "read x + weight; write y",

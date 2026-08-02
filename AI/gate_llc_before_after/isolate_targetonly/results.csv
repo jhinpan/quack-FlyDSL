@@ -1,0 +1,5 @@
+schema_version,provider,provider_detail,operation,m,n,activation_dtype,weight_dtype,weight_mode,eps,cold_compile_ms,cold_compile_reused,median_us,p10_us,p90_us,logical_bytes,logical_gbps,peak_bw_gbps,peak_bw_pct,rotation_buffers,rotation_working_set_bytes,l2_target_bytes,l2_eviction_between_calls,timed_samples
+2,torch,torch.nn.functional.rms_norm,fwd,512,4096,bfloat16,bfloat16,same,1e-06,,False,8.015125,7.848,8.259,8396800,1047.619337,6641.113352,15.774755,4,33587200,805306368,True,40
+2,torch,torch.nn.functional.rms_norm,fwd,4096,4096,bfloat16,bfloat16,same,1e-06,,False,22.230125,21.958224,22.62425,67117056,3019.193815,6641.113352,45.462164,4,268468224,805306368,True,40
+2,torch,torch.nn.functional.rms_norm,fwd,32768,1024,bfloat16,bfloat16,same,1e-06,,False,50.205249,49.821251,50.940252,134219776,2673.421161,6641.113352,40.255617,4,536879104,805306368,True,40
+2,torch,torch.nn.functional.rms_norm,fwd,32768,2048,bfloat16,bfloat16,same,1e-06,,False,84.147001,83.352334,85.189665,268439552,3190.126182,6641.113352,48.036015,3,805318656,805306368,False,40
