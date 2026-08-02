@@ -92,6 +92,11 @@ four (`reload_wdy`, `reload_x`, `use_tma`, `smem_stages`), H200 six (those plus
 `use_tma`/`smem_stages` is a selection, not a measurement. A one-knob-at-a-time
 ablation would be needed.
 
+*Coverage.* Each JSON holds **4 cells only**: `32768x2048` and `32768x8192`,
+fwd and bwd, **bfloat16 only**. No other shape, no fp16, no fp32, no
+weight-mode variation. Any statement drawn from these files is a statement
+about those four cells.
+
 *Not a mechanism boundary.* The probe sampled only N=2048 and N=8192, so it
 cannot speak to N=4096. In the No.001 archive H200 `32768x4096` bwd bf16/same
 goes 241.44 -> 219.57 us, a 9.06% gain. The gain therefore falls off gradually

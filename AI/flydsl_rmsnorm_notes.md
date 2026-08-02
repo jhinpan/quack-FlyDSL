@@ -515,6 +515,17 @@ Large shapes are decided by HBM; mid shapes by the kernel; small batches are
 pure launch path, where the CuTe kernel is about 2.2x ahead (6.1 us against
 13.0 us at M=1, against a ~3.5 us Python/FFI floor).
 
+> **The MI355X column's two lower rows are known to be measured wrong.** On
+> gfx950 the harness does not produce cold reads below `m=32768`: rotation
+> working sets under 256 MiB stay resident in the MALL, and the evictor is
+> sized from the 4 MiB per-XCD L2 that torch reports, so it is both too small
+> and gated off. Measured inflation is 1.33x at the boundary. The `M=4096` row
+> (71% / 64%) is therefore optimistic; `M<=512` is launch-bound so bandwidth is
+> not the binding constraint there, and `M=32768` is unaffected (working sets
+> >=512 MiB). Full analysis and measurements in
+> [`gfx950_mall_evictor_defect.md`](gfx950_mall_evictor_defect.md). These rows
+> should be re-measured before being cited.
+
 **Provenance of the two Quack columns** (added 2026-08-01 after this table was
 challenged as unsourced, then verified and cleared). Both halves come from the
 schema-v1 sweep of 2026-07-26, not from Experiment No.001:
