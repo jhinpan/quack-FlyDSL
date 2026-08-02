@@ -2363,7 +2363,7 @@ third was neither.
 
 The mapping task asks how the FlyDSL backend lines up with `quack/rmsnorm.py`
 on features, not just speed. A token-count diff of the two modules is the
-obvious first cut and it is wrong in four of fourteen rows, all in the same
+obvious first cut and it is wrong in four of the ten rows below, all in the same
 direction -- reporting a gap where there is only a different spelling. Recorded
 because the naive table is the one that would have been sent.
 
@@ -2372,13 +2372,13 @@ because the naive table is the one that would have been sent.
 | bias, residual (fused add), prenorm | yes | yes | parity |
 | weight_offset (`w+1` fusion) | yes | yes | parity |
 | per-head affine | yes | yes | parity |
-| store_rstd | yes | yes | parity |
+| store_rstd | yes | kernel only | **wrong, see re-audit**: no public way in |
 | autotune | yes | yes | `quack/flydsl/rmsnorm_autotune.py` |
 | persistent backward | yes | yes | different knob name |
 | split parameter reduce | `dw_partial` | yes | two-stage, no atomic variant |
-| dual dx dtype | yes | partial | narrower |
+| dual dx dtype | yes | kernel only | absent from the API, not "partial" |
 | **layernorm / mean** | **yes** | **no** | **real gap** |
-| cluster / multicast | yes | n/a | SM90+ DSMEM, no gfx950 analogue |
+| cluster / multicast | yes | n/a | **hides a 32x N ceiling**, see re-audit |
 
 The four rows a grep gets wrong: `autotune` and `persistent` live in
 `quack/flydsl/`, not in `rmsnorm_flydsl.py`, so a module-scoped grep reads 0 on
@@ -2395,17 +2395,134 @@ hardware lacks.
 **The one genuine feature gap is layernorm.** `quack/rmsnorm.py` carries
 `is_layernorm` through the whole stack, forward and backward, with `mean`
 alongside `rstd` and a `layernorm_fwd` / `layernorm_bwd` / `layernorm_ref`
-surface. FlyDSL has none of it. It is not exported from `quack/__init__.py`, so
-nothing in-tree consumes it today, but it is the item to name when asked what
-the backend does not yet do.
+surface. FlyDSL has none of it. It is not exported from `quack/__init__.py`.
+~~so nothing in-tree consumes it today~~ -- **false**, corrected in the
+re-audit below: `tests/test_layernorm.py` and `benchmarks/benchmark_layernorm.py`
+both consume it, and the tests run N up to 262144. Not exported is not the same
+set as not consumed, which is this file's recurring mistake in miniature.
 
 Second, smaller: cutedsl exposes `rmsnorm_fwd` and `rmsnorm_bwd` as public
-entry points and FlyDSL exposes only `rmsnorm`. The top-level `rmsnorm()`
+entry points and FlyDSL exposes ~~only `rmsnorm`~~ **`rmsnorm` and
+`rmsnorm_autotuned`** (`rmsnorm_flydsl.py:1145`). The top-level `rmsnorm()`
 signatures are argument-for-argument identical, so callers of the public API
-are unaffected; only the archived probes under `AI/archive/` reach for the
-lower-level pair. Worth noting because the benchmark harness times quack at
+are unaffected; ~~only the archived probes under `AI/archive/` reach for the
+lower-level pair~~ -- **also false**: `benchmarks/benchmark_rmsnorm.py:12` and
+`tests/test_async_compile.py:123` are live in-tree consumers. Worth noting because the benchmark harness times quack at
 `rmsnorm_fwd` and FlyDSL at `_launch_rmsnorm_fwd` -- different levels, which
 this file already flags as a measurement hazard elsewhere.
+
+### Re-audit of that table: 3 of 10 rows survive, and the denominator was wrong too
+
+The table above was written by reading. Re-checked row by row against source,
+with a second reader working independently, it holds on three rows, is
+imprecise on five and is wrong on two. Both wrong rows fail in the same
+direction the rest of this file keeps documenting: a label that is accurate
+about a smaller set than it names.
+
+Start with the prose. It says the naive diff is "wrong in four of fourteen
+rows." The table has **ten** rows and has had ten since `7cb9478`, the commit
+that introduced it. The four wrong rows are real; the denominator was never
+right, and it flatters the result -- 4/14 reads as 29%, 4/10 is 40%.
+
+**Row 4, `store_rstd | yes | yes | parity`, is wrong.** On cutedsl it is a
+caller-facing keyword that returns rstd (`quack/rmsnorm.py:481,489,506`, plus
+`layernorm_fwd(return_rstd=)` at `:1746`). On FlyDSL every `store_rstd` is
+internal and `rmsnorm_flydsl.py:728` hard-wires it to `needs_grad`; the public
+`rmsnorm()` returns `out` or `(out, residual_out)` and rstd never escapes. The
+kernels are at parity. The APIs are not, and a caller cannot obtain rstd from
+FlyDSL at all.
+
+**Row 10, `cluster / multicast | n/a`, is wrong, and it is the one that
+matters.** The row is defensible as written -- gfx950 really has no DSMEM, and
+the ROCm Kernel Wiki states the general form of it: "There is no TMA/mbarrier
+equivalent on CDNA; completion is gated by the generic VMCNT counter, not a
+dedicated barrier object" (`wiki/hardware/async-copy-lds.md`). But writing
+`n/a` there closes a question the row is not entitled to close, because
+`cluster_n` is not decoration: `quack/reduction_base.py:28` says in its own
+words that "a clustered launch splits the row across `cluster_n` CTAs." That
+is a row-length mechanism, and behind it sits a **32x ceiling** --
+`MAX_N = 8192` (`quack/flydsl/rmsnorm_config.py:33`, enforced at
+`rmsnorm_flydsl.py:138`) against cutedsl tested at N=262144
+(`tests/test_rmsnorm.py:38`).
+
+The second reader concluded the ceiling *is* the cluster gap. That is also
+wrong, and checking it is what makes the row finally legible. Cutedsl sets
+`cluster_n = 1` on SM8x (`quack/rmsnorm.py:97-101`, "SM8x (Ampere/Ada) lacks
+cluster support") and still serves N=262144. So wide rows do not require
+clusters on any hardware. The real mechanism is `smem_stages`
+(`quack/rmsnorm.py:772,845`): cutedsl stages a wide row through shared memory,
+so the row length is bounded by LDS and a loop rather than by registers.
+FlyDSL's `MAX_N` is explicitly a register budget -- "a thread keeps
+`num_tiles * vecsize` elements in registers, so this is the register budget
+expressed as a row length. Every other cap on N derives from it" -- and its
+shared memory holds only cross-wave reduction slots
+(`quack/flydsl/rmsnorm_kernel.py:104`), never the row.
+
+So the honest row is: **the ceiling is real and large, it is a
+staging-strategy gap, and it has nothing to do with DSMEM.** The original row
+excused it with hardware FlyDSL does not need; the re-audit blamed hardware
+cutedsl does not need. Both named the wrong cause, which is worth recording,
+because the wrong cause here is what decides whether the gap is closeable on
+gfx950 -- and it is: LDS staging is available.
+
+**Row 8, `dual dx dtype | partial | narrower`, understates a total absence.**
+The FlyDSL *kernel* is dual-dtype capable -- it reads `dx.dtype` off a
+caller-allocated tensor (`quack/flydsl/rmsnorm_bwd_kernel.py:69`). The
+narrowing is one line in the wrapper: `rmsnorm_flydsl.py:762` forces
+`dx = torch.empty_like(source, dtype=ctx.x_dtype)`, and an exhaustive AST
+search over the module finds no entry point of any visibility accepting
+`dx_dtype`. Cutedsl exposes it as a parameter (`quack/rmsnorm.py:1480`) and
+emits a gemm-ready narrow dx beside a wider dresidual. "Partial" was the wrong
+word in the safe direction; the capability is absent from the API and present
+in the kernel.
+
+**Rows 3, 5, 6, 7 are imprecise, all in the same shape**: the mechanism claim
+is right and the reachability claim is not. `per_head` differs in validation
+(cutedsl ORs over ranks, FlyDSL rejects mixed ranks at
+`rmsnorm_flydsl.py:126`); autotune covers forward *and backward* over 5-7 knobs
+on cutedsl (`quack/rmsnorm_config.py:405,442`) against forward-only over two on
+FlyDSL (`quack/flydsl/rmsnorm_autotune.py:40`); persistent backward is genuine
+on both but `sm_count` is a settable parameter (`quack/rmsnorm.py:1476`) while
+FlyDSL's `num_programs` is derived and unsettable (`rmsnorm_flydsl.py:227`);
+and the split reduce differs in that cutedsl's second stage is a host-side
+`.sum(dim=0)` (`quack/rmsnorm.py:1417` for dw, `:1418` for db) where FlyDSL
+launches a real second kernel. I first cited `:1418` alone for that, which is
+the bias partial, not the weight one -- the citation was one line off the thing
+it named, in a paragraph about citations being one set off the thing they name.
+
+**Rows 1, 2, 9 survive.** Public signatures are argument-for-argument
+identical, including `eps`, where FlyDSL's `EPS` constant
+(`quack/flydsl/rmsnorm_common.py:20`) is `1e-6`, the same value cutedsl spells
+literally. The layernorm gap is real: FlyDSL's only `mean` is
+`.square().mean()` in a reference path, which is the RMS denominator and not
+layernorm's mean subtraction -- a grep for "mean" finds it and means nothing.
+
+**What the table has no row for at all, which is where the divergence
+actually lives: the accepted input domain.** N ceiling (8192 vs 262144); N
+alignment (FlyDSL requires a multiple of `N_ALIGNMENT`, cutedsl is tested at
+192, 760, 1128); output dtype (FlyDSL admits fp16/bf16/fp32 only,
+`rmsnorm_flydsl.py:29`, while cutedsl never asserts `out`'s dtype and its map
+includes fp8 and fp4); and architecture (`frozenset({"gfx950"})` at
+`rmsnorm_flydsl.py:33` against sm80-sm120). Ten rows of feature checkboxes
+said nothing about any of it, and a caller hits these before hitting any
+feature.
+
+Three corrections this forced to text elsewhere in this file. "Nothing in-tree
+consumes layernorm" is false -- `tests/test_layernorm.py` and
+`benchmarks/benchmark_layernorm.py` both do. "Only the archived probes reach
+`rmsnorm_fwd`/`rmsnorm_bwd`" is false -- `benchmarks/benchmark_rmsnorm.py:12`
+and `tests/test_async_compile.py:123` are live consumers. And FlyDSL exposes
+`rmsnorm_autotuned` (`rmsnorm_flydsl.py:1145`) as well as `rmsnorm`, so
+"exposes only `rmsnorm`" undercounts its own public surface by half.
+
+One unlisted item worth a line because it is dead weight, not a gap:
+`resolve_rmsnorm_weight_dtype` (`quack/flydsl/rmsnorm_common.py:304`) has zero
+call sites repo-wide, so the dtype contract its docstring describes is not
+enforced anywhere.
+
+The whole audit is source-only and needed no GPU. None of it is a claim about
+speed; the performance half of the mapping still needs the H200/H100 time that
+is not mine to schedule.
 
 ### The harness times the two backends at different levels, and it matters below ~8192 rows
 
