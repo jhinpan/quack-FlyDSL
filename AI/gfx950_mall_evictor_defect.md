@@ -19,6 +19,26 @@ anything measurable on this access pattern. Defect 2 is still a real
 mis-derivation and should be fixed, but it should not be credited with the
 inflation.
 
+### Scope of what has been measured
+
+Everything quantitative in this note comes from a **`torch.Tensor.copy_`
+bandwidth probe**. No RMSNorm kernel has been run before and after a fix, and
+no MI355X 90-cell matrix has been re-collected. The consequences:
+
+- The **1.32x is a property of the copy probe at one working set**. It is not a
+  per-cell correction factor and must not be applied to the 37 exposed cells,
+  to the six regime values in `flydsl_rmsnorm_notes.md`, or to any roofline
+  percentage. Doing that would report an inferred number as a measured one.
+- **37 of 90** is an exposure count — cells where the gate provably does not
+  fire and the working set provably fits the MALL. It says nothing about how
+  far any of those cells is off.
+- What the probe does establish is that the *measurement method* is unsound on
+  MALL-resident shapes, which is sufficient to justify fixing the gate and
+  re-collecting. It is not sufficient to restate existing numbers.
+
+Closing this gap needs an RMSNorm before/after on the exposed cells, which is
+Experiment No.002 and has not been run.
+
 The cache hierarchy on this part (ROCm Kernel Wiki `hw-chiplet-xcd`):
 
     per-CU L1D -> per-XCD 4 MiB L2 (x8 XCDs in SPX) -> 256 MiB MALL -> HBM
@@ -38,8 +58,9 @@ eviction happens, and 128 MiB fits comfortably in the 256 MiB MALL.
 The evictor is also only 12 MiB, which on the face of it cannot flush a 256 MiB
 cache even when it does run. That reasoning turns out not to survive
 measurement: forcing a 12 MiB evictor to run at the boundary recovers almost
-all of the gap (4891 GB/s against a 4964 GB/s HBM reference), within ~2% of
-what a 256 MiB evictor achieves. A copy-based evictor evidently disturbs MALL
+all of the gap — 4891 GB/s against a 4964 GB/s HBM reference, 1.47% below it,
+and in fact 3.49% *above* the 4726 GB/s that a 256 MiB evictor reaches. A
+copy-based evictor evidently disturbs MALL
 residency out of proportion to its own footprint. The binding problem is the
 gate, not the size.
 
@@ -123,14 +144,24 @@ Two earlier claims are withdrawn outright: "only `m<=4096` is affected" /
 "`m=32768` is unaffected", and the "11 of 18" count.
 
 
-That earlier version also carried an off-by-one in a "buffers needed" table
-(`ceil(MALL/bytes)+1`, which overshoots whenever the division is exact): it
-listed 7/5 for `4096x3000` where the correct values are 6/4, and 5/4 for
-`4096x4096` where they are 5/3. The table above avoids the issue by simulating
-the actual selection rather than computing a requirement.
+That earlier version also carried an off-by-one in a "buffers needed" table,
+and my first correction of it stated the condition backwards. The requirement
+is the smallest `n` with `n*B > C` for per-buffer bytes `B` and MALL capacity
+`C`, i.e. `floor(C/B)+1`. Writing `ceil(C/B)+1` overshoots by one whenever
+`C/B` is **not** an integer — the common case — and is correct only when the
+division happens to be exact. I had it the other way round.
 
-Rotation count still is not a usable lever at small `m` — `256x4096` would need
-65 forward buffers and `1x4096` over 16000 — so **the evictor remains the only
+Recomputed with the real per-buffer bytes (input + output + weight + rstd),
+`C = 256 MiB`:
+
+| cell | B | C/B | buffers to exceed |
+| --- | --- | --- | --- |
+| `4096x4096` fwd bf16/same | 67117056 | 3.9995 | **4** (not 5) |
+| `256x4096` fwd | 4202496 | 63.875 | **64** (not 65) |
+| `1x4096` fwd | 24576 | 10922.67 | **10923** (not >16000) |
+
+Rotation count still is not a usable lever at small `m` — 64 buffers at
+`256x4096` and 10923 at `1x4096` — so **the evictor remains the only
 practical fix**. But the reason is the size of the requirement, not an
 `m=32768` cutoff.
 
@@ -157,11 +188,21 @@ window covers one whole rotation and the evictor runs *outside* it.
 
 The honest figure is the **boundary step between adjacent rotation counts**:
 2 buffers (256 MiB) = 6453 GB/s vs 3 buffers (384 MiB) = 4896 GB/s, one
-rotation apart, same kernel — **1.32x inflation**. The 16 MiB sweep steps at
-the same place (8 bufs = 256 MiB, 5309 GB/s → 12 bufs = 384 MiB, 4008 GB/s)
-and gives **1.32x**, independently.
+rotation apart, same kernel — **1.32x inflation**.
 
-**Independently reproduced by @Autotune**, with a cleaner control than mine:
+The 16 MiB sweep crosses at the same working set (8 bufs = 256 MiB, 5309 GB/s
+→ 12 bufs = 384 MiB, 4008 GB/s, also 1.32x), but **8 → 12 is four rotations
+apart, not one**, so that pair does not meet the adjacency standard the 64 MiB
+figure is quoted under. Worse, the script never computed it: `bench_rotation`
+looks for `lo + 1 = 9`, which was not in `ROTATIONS`, so the 16 MiB sweep
+contributed nothing to the printed verdict and the 1.32x above it was computed
+by hand. `ROTATIONS` now samples 9, and the script says so explicitly when no
+adjacent pair spans the boundary instead of silently omitting the line. The
+16 MiB confirmation should be treated as pending that re-run.
+
+**Corroborating diagnostic from @Autotune** — not an independent confirmation
+until a script, raw samples and environment are committed alongside it, which
+they are not yet. The design is a cleaner control than mine:
 bytes moved *per iteration* held constant at 32 MiB while only the buffer count
 varies, so iteration cost cannot co-vary with working set. MI355X, bf16 copy,
 7 repeats, median (min/max spread <1.5% at every point):
@@ -190,7 +231,8 @@ A correctly-sized evictor recovers the HBM number:
 
 Evicting at all is what matters here: with no evictor the boundary cell reads
 6403 GB/s against a 4964 GB/s HBM reference, and *any* of the evictor sizes
-brings it to 4335–4891 GB/s, i.e. to within about 12% of that reference. The
+brings it to 4335–4891 GB/s. The worst of those, the 1024 MiB evictor, is
+12.67% below the reference; the best, the 12 MiB one, is 1.47% below it. The
 12 MiB evictor is not obviously worse than the 256–1024 MiB ones on this
 access pattern, so the measured defect is **defect 1** — the `ws < 12 MiB`
 gate means no evictor runs on these shapes at all. Defect 2 (the evictor being
@@ -287,7 +329,8 @@ agent, and it parses cleanly:
    The gate is the part the measurement actually indicts. `use_evictor =
    ws < l2_target_bytes` switches eviction off precisely where it is needed, and
    the evictor-control block shows that *running an evictor at all* is what
-   recovers the HBM number — 12 MiB gets within ~2% of the 256/512 MiB results.
+   recovers the HBM number — the 12 MiB evictor lands 3.49% above the 256 MiB
+   one and 1.47% below the HBM reference.
    So the gate should be driven by whether the working set fits the effective
    LLC, not by whether it is smaller than a multiple of the per-XCD L2.
 
@@ -300,10 +343,10 @@ agent, and it parses cleanly:
 2. **Force the rotation working set past the MALL.** Still rejected for the
    *harness*, where the evictor solves the problem directly — but my original
    reason was wrong and should not be reused. I wrote that raising
-   `max_rotation_buffers` to 65 for `256x4096` "would allocate absurd amounts of
+   `max_rotation_buffers` to 64 for `256x4096` "would allocate absurd amounts of
    memory". It would not: the working set at the crossing point is 256 MiB by
    construction, so the allocation is ~0.26 GiB regardless of buffer count. What
-   is awkward at small `m` is the *count* (65 buffers at `256x4096`, ~16k at
+   is awkward at small `m` is the *count* (64 buffers at `256x4096`, 10923 at
    `1x4096`), not the bytes. For the autotuner path, which has no evictor, this
    is the only available lever and the memory cost is not an objection to it.
 

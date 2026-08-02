@@ -519,11 +519,17 @@ pure launch path, where the CuTe kernel is about 2.2x ahead (6.1 us against
 > a rotation working set of 256 MiB or less stays resident in the MALL, and the
 > `use_evictor` gate compares against a 12 MiB target derived from the 4 MiB
 > per-XCD L2 that torch reports, so on these shapes no eviction runs at all.
-> Measured inflation is 1.32x at the boundary, reproduced independently at two
-> buffer sizes and by a second person with a different probe design.
+> A `copy_` probe measures 1.32x inflation at the boundary, reproduced by a
+> second reviewer re-running the committed probe. **That 1.32x is a property of
+> the probe, not a correction factor for this table.** It was measured on a
+> pure `copy_` stream, not on RMSNorm, and no before/after RMSNorm run exists
+> yet; it says the measurement method is unsound on MALL-resident shapes, not
+> how much any particular cell moves. Do not multiply or divide these regime
+> values by it.
 > Computing from the harness's real `logical_bytes` and actual buffer selection,
 > **37 of 90 cells** are both un-evicted and MALL-resident (8 of 18 per 16-bit
-> mode; 5 of 18 for fp32/same). The `M=4096` row (71% / 64%) is therefore
+> mode; 5 of 18 for fp32/same) — i.e. 37 cells are *exposed to* the defect, with
+> the per-cell magnitude unmeasured. The `M=4096` row (71% / 64%) is therefore
 > optimistic; `M<=512` is launch-bound so bandwidth is not the binding
 > constraint there; and `M=32768` is clean except for `32768x1024` forward,
 > which sits at 256.004 MiB and was measured directly at that exact working set

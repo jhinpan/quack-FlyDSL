@@ -44,7 +44,10 @@ import torch
 
 
 MALL_BYTES = 256 * 2**20
-ROTATIONS = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32]
+# 9 is sampled so the 16 MiB sweep has a true adjacent pair across the MALL
+# boundary (8 -> 9); without it the nearest sampled step is 8 -> 12, which is
+# four rotations apart and cannot be quoted as an adjacent-rotation step.
+ROTATIONS = [1, 2, 3, 4, 6, 8, 9, 12, 16, 24, 32]
 WARMUP = 5
 ITERS = 30
 REPEATS = 5
@@ -108,8 +111,11 @@ def bench_rotation(elem_bytes, n_buffers, iters=ITERS, repeats=None,
 
     moved = 2 * elem_bytes  # a copy moves the buffer twice: one read + one write
     samples = []
+    # Every individual round latency is kept, not just the per-repeat median,
+    # so the sidecar carries the same granularity the harness records.
+    all_round_ms = []
     for _ in range(repeats):
-        round_us = []
+        round_ms = []
         for _ in range(rounds):
             if evictor is not None:
                 evictor()  # outside the timed window, as in _time_rotating_calls
@@ -120,15 +126,15 @@ def bench_rotation(elem_bytes, n_buffers, iters=ITERS, repeats=None,
                 dsts[i].copy_(srcs[i])
             end.record()
             end.synchronize()
-            round_us.append(start.elapsed_time(end) / n_buffers)
-        ms = _median(round_us)
-        samples.append(moved / (ms * 1e-3) / 1e9)
+            round_ms.append(start.elapsed_time(end) / n_buffers)
+        all_round_ms.append(round_ms)
+        samples.append(moved / (_median(round_ms) * 1e-3) / 1e9)
 
     working_set = 2 * elem_bytes * n_buffers
 
     del srcs, dsts, evictor
     torch.cuda.empty_cache()
-    return _median(samples), working_set, samples
+    return _median(samples), working_set, samples, all_round_ms
 
 
 def sweep(elem_mib, record):
@@ -141,7 +147,7 @@ def sweep(elem_mib, record):
         ws = 2 * elem_bytes * nb
         if ws > 24 * 2**30:
             break
-        gbps, ws, samples = bench_rotation(elem_bytes, nb)
+        gbps, ws, samples, round_ms = bench_rotation(elem_bytes, nb)
         rows.append((nb, ws, gbps))
         record.append({
             "block": "rotation_sweep",
@@ -152,6 +158,7 @@ def sweep(elem_mib, record):
             "evictor_bytes": 0,
             "gbps_median": gbps,
             "gbps_samples": samples,
+            "round_ms_per_call": round_ms,
         })
         print(f"{nb:>8}  {ws / 2**20:>10.0f} MiB  "
               f"{ws / MALL_BYTES:>7.2f}x  {gbps:>8.0f}")
@@ -167,6 +174,12 @@ def sweep(elem_mib, record):
               f"({2 * elem_bytes * lo / 2**20:.0f} MiB) {by_nb[lo]:.0f} GB/s vs "
               f"{lo + 1} bufs ({2 * elem_bytes * (lo + 1) / 2**20:.0f} MiB) "
               f"{by_nb[lo + 1]:.0f} GB/s -> {step:.3f}x")
+    elif lo is not None:
+        # Do not silently fall back to a wider pair: a non-adjacent step is a
+        # different claim. Say so rather than omitting the line entirely.
+        print(f"  boundary step: NOT COMPUTED -- {lo} bufs is the last one at or "
+              f"below MALL, but {lo + 1} is not in ROTATIONS, so no "
+              f"adjacent-rotation pair spans the boundary in this sweep.")
     return step
 
 
@@ -188,8 +201,8 @@ def evictor_control(record, elem_mib=64, n_buffers=2, hbm_buffers=8):
         12: "current evictor size (4 MiB L2 x 3)",
     }
     for mib in EVICTOR_MIB:
-        gbps, _, samples = bench_rotation(elem_bytes, n_buffers,
-                                          evictor_bytes=mib * 2**20)
+        gbps, _, samples, round_ms = bench_rotation(elem_bytes, n_buffers,
+                                                    evictor_bytes=mib * 2**20)
         record.append({
             "block": "evictor_control",
             "buffer_mib": elem_mib,
@@ -198,10 +211,11 @@ def evictor_control(record, elem_mib=64, n_buffers=2, hbm_buffers=8):
             "evictor_bytes": mib * 2**20,
             "gbps_median": gbps,
             "gbps_samples": samples,
+            "round_ms_per_call": round_ms,
         })
         print(f"{mib:>9} MiB  {gbps:>8.0f}   {notes.get(mib, '')}")
 
-    ref, ref_ws, ref_samples = bench_rotation(elem_bytes, hbm_buffers)
+    ref, ref_ws, ref_samples, ref_round_ms = bench_rotation(elem_bytes, hbm_buffers)
     record.append({
         "block": "hbm_reference",
         "buffer_mib": elem_mib,
@@ -210,6 +224,7 @@ def evictor_control(record, elem_mib=64, n_buffers=2, hbm_buffers=8):
         "evictor_bytes": 0,
         "gbps_median": ref,
         "gbps_samples": ref_samples,
+        "round_ms_per_call": ref_round_ms,
     })
     print(f"{'none':>9}      {ref:>8.0f}   HBM reference "
           f"({hbm_buffers} bufs, WS = {ref_ws / 2**20:.0f} MiB)")
