@@ -110,11 +110,26 @@ def check_fwd(M, N, dtype, alias_residual):
 
 
 def check_bwd(M, N, dtype):
-    """The backward is where accumulation would actually be plausible.
+    """Replay the backward on the same INPUTS. Fresh outputs each time.
 
-    dw_partial is the accumulator-shaped tensor. The source claims it is
-    STORED via copy(tXrdW, tXgdW) (:1175/:1200), not read-modify-written. If
-    that reading is wrong, replaying on the same dw_partial buffer drifts.
+    Read the scoping carefully, because an earlier version of this docstring
+    claimed a test this function does not perform. It said "replaying on the
+    same dw_partial buffer drifts" -- but ``rmsnorm_bwd`` allocates dx and
+    dw_partial internally on every call (:1382, :1395, and on the fast path
+    inside ``quack::rmsnorm_bwd_f`` at :1443-1444). So no ``dw_partial``
+    buffer is ever reused here and this check CANNOT see a read-modify-write
+    of one. What it does establish is the weaker, still necessary condition:
+    the backward does not mutate x / dout / rstd, and produces bit-identical
+    dx / dw from identical inputs.
+
+    That weaker statement is the one ``restore_value`` actually turns on:
+    restore exists to undo mutation of the arguments the autotuner passes
+    across config evaluations. If x, dout and rstd survive a replay unchanged,
+    there is nothing for it to restore at this level.
+
+    The dw_partial question is separate and stays where @Reviewer (b3053d0a)
+    put it -- source-level, conditional on no aliasing. ``check_bwd_shared``
+    below closes the part of it that a caller-side probe can close.
     """
     from quack.rmsnorm import rmsnorm_bwd
 
@@ -138,9 +153,75 @@ def check_bwd(M, N, dtype):
         "shape": [M, N],
         "dtype": str(dtype).replace("torch.", ""),
         "replays": N_REPLAYS,
+        "outputs_are_freshly_allocated_each_call": True,
+        "so_this_does_not_test": (
+            "reuse of a dw_partial buffer across calls -- rmsnorm_bwd "
+            "allocates one per call, so no such reuse occurs here"
+        ),
         "all_replays_bit_identical": stable,
         "tensors_that_drifted": drifted,
         "restore_value_would_be_a_noop": stable,
+        "first_replay_fingerprints": first,
+    }
+
+
+def check_bwd_shared(M, N, dtype):
+    """Drive _rmsnorm_bwd directly, reusing ONE dw_partial across replays.
+
+    This is the check the previous docstring described but did not run. It
+    calls the custom op underneath the wrapper, so the output buffers are
+    mine and I can hand it the same dw_partial / dx every time. If
+    ``copy(tXrdW, tXgdW)`` at :1175/:1200 were a read-modify-write rather than
+    a store, dw_partial would drift across replays from the same inputs.
+
+    It also pre-fills dw_partial and dx with a recognisable sentinel. A pure
+    store overwrites every element it owns; an accumulate would carry the
+    sentinel into the result. So this distinguishes "wrote all of it" from
+    "added to what was there", which replay-stability alone cannot.
+    """
+    from quack.rmsnorm import _rmsnorm_bwd, get_sm_count
+
+    torch.manual_seed(0)
+    x = torch.randn(M, N, device="cuda", dtype=dtype)
+    w = torch.randn(N, device="cuda", dtype=dtype)
+    dout = torch.randn(M, N, device="cuda", dtype=dtype)
+    rstd = torch.rsqrt(x.float().pow(2).mean(-1) + 1e-6)
+
+    sm_count = get_sm_count(N, x.device)
+    dx = torch.empty_like(x)
+    dw_partial = torch.empty((sm_count, N), device=x.device, dtype=torch.float32)
+
+    SENTINEL = 12345.0
+    prints = []
+    for _ in range(N_REPLAYS):
+        dw_partial.fill_(SENTINEL)
+        dx.fill_(0)
+        _rmsnorm_bwd(x, w, dout, rstd, dx, dw_partial, None, None, None, sm_count)
+        torch.cuda.synchronize()
+        prints.append(
+            {
+                "dx": fp(dx),
+                "dw_partial": fp(dw_partial),
+                "x": fp(x),
+                "dout": fp(dout),
+                "rstd": fp(rstd),
+            }
+        )
+    first = prints[0]
+    stable = all(p == first for p in prints[1:])
+    drifted = sorted({k for p in prints[1:] for k in first if p[k] != first[k]})
+    sentinel_survived = bool((dw_partial == SENTINEL).any().item())
+    return {
+        "kernel": "quack.rmsnorm._rmsnorm_bwd (cutedsl, caller-owned buffers)",
+        "shape": [M, N],
+        "dtype": str(dtype).replace("torch.", ""),
+        "replays": N_REPLAYS,
+        "dw_partial_buffer_reused_across_replays": True,
+        "dw_partial_prefilled_with_sentinel": SENTINEL,
+        "sentinel_survives_anywhere_in_dw_partial": sentinel_survived,
+        "all_replays_bit_identical": stable,
+        "tensors_that_drifted": drifted,
+        "dw_partial_is_stored_not_accumulated": stable and not sentinel_survived,
         "first_replay_fingerprints": first,
     }
 
@@ -152,11 +233,15 @@ def main():
     fwd_plain = [check_fwd(M, N, torch.bfloat16, False) for M, N in SHAPES]
     fwd_alias = [check_fwd(M, N, torch.bfloat16, True) for M, N in SHAPES]
     bwd = [check_bwd(M, N, torch.bfloat16) for M, N in SHAPES]
+    bwd_shared = [check_bwd_shared(M, N, torch.bfloat16) for M, N in SHAPES]
 
     control_worked = all(not r["all_replays_bit_identical"] for r in fwd_alias)
-    main_stable = all(r["all_replays_bit_identical"] for r in fwd_plain) and all(
-        r["all_replays_bit_identical"] for r in bwd
+    main_stable = (
+        all(r["all_replays_bit_identical"] for r in fwd_plain)
+        and all(r["all_replays_bit_identical"] for r in bwd)
+        and all(r["all_replays_bit_identical"] for r in bwd_shared)
     )
+    dw_is_stored = all(r["dw_partial_is_stored_not_accumulated"] for r in bwd_shared)
 
     out = {
         "probe": Path(__file__).name,
@@ -199,10 +284,12 @@ def main():
         ),
         "check1_idempotence_fwd": fwd_plain,
         "check1_idempotence_bwd": bwd,
+        "check1b_bwd_shared_dw_partial": bwd_shared,
         "check2_aliased_control_fwd": fwd_alias,
         "verdict": {
             "control_can_fail": control_worked,
             "kernels_are_idempotent": main_stable,
+            "dw_partial_is_stored_not_accumulated": dw_is_stored,
             "restore_value_needed_for_cutedsl_rmsnorm": not main_stable,
             "interpretation": (
                 "check 1 stable AND check 2 drifting means the probe is "
@@ -212,6 +299,21 @@ def main():
                 "vacuous and this result must then be discarded."
                 if control_worked
                 else "CONTROL DID NOT DRIFT -- check 1 proves nothing here."
+            ),
+            "what_this_still_does_not_establish": (
+                "Aliasing. @Reviewer (b3053d0a) is right that every call site "
+                "checked so far hands these kernels freshly allocated, "
+                "non-aliased outputs, and that _clone_l2_rotate_inputs "
+                "(bench_utils.py:174-176) clones each tensor arg "
+                "INDEPENDENTLY, which destroys any alias graph the real call "
+                "had. This probe inherits that limitation exactly: check 2 "
+                "aliases residual onto residual_out through the public "
+                "wrapper, but nothing here exercises out-is-x or "
+                "overlapping-view arguments to the tuned entry points. So the "
+                "no-restore result is conditional on no aliasing, and that "
+                "condition belongs in the design boundary of any future "
+                "production tuned wrapper rather than being extrapolated from "
+                "today's fresh-allocation habit."
             ),
         },
     }

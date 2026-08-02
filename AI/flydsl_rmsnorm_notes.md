@@ -3458,17 +3458,20 @@ that isn't the LLC and the buffer count summed across cells — a number correct
 about a set other than the one its name claims. I have now made the artifact
 record `sys.executable` for this reason, with the reason written into the field.
 
-**So I ran it.** `AI/probe_cutedsl_restore_value.py`, hyper00 GPU 0 (0 MiB / 0%
-verified before launch), cutlass 4.6.1, scratch clone of `4f36477` — chosen
-over my own HEAD deliberately, and the choice is safe because
-`quack/rmsnorm.py` (`26e30eff…`) and `quack/autotuner.py` (`67875584…`) are
-byte-identical at both commits, and they are the only two files the probe
-touches.
+**So I ran it.** `AI/probe_cutedsl_restore_value.py`, hyper00 GPU 1 (0 MiB / 0%
+verified immediately before launch; GPU 0 carried the first run and was taken
+by someone else's job before the re-run, so the box was shared throughout and
+released after), cutlass 4.6.1 via `/root/quack-FlyDSL-h200-test/.venv`,
+scratch clone of `4f36477` — chosen over my own HEAD deliberately, and the
+choice is safe because `quack/rmsnorm.py` (`26e30eff…`) and
+`quack/autotuner.py` (`67875584…`) are byte-identical at both commits, and they
+are the only two files the probe touches.
 
 | check | 8192×2048 | 4096×4096 |
 |---|---|---|
-| CHECK 1 fwd, 5 replays, same buffers | **bit-identical** | **bit-identical** |
-| CHECK 1 bwd, 5 replays, same buffers | **bit-identical** | **bit-identical** |
+| CHECK 1 fwd, 5 replays, same inputs | **bit-identical** | **bit-identical** |
+| CHECK 1 bwd, 5 replays, same inputs | **bit-identical** | **bit-identical** |
+| CHECK 1b bwd, **one `dw_partial` reused** + sentinel | **bit-identical**, sentinel gone | **bit-identical**, sentinel gone |
 | CHECK 2 aliased control | **drifted** (out, rstd, residual_out, residual_in) | **drifted** |
 
 Control drifts, mains hold. The probe is sensitive, and the cutedsl kernels do
@@ -3479,10 +3482,36 @@ the beginning — and it closed in the direction the reading predicted, which is
 the least interesting possible outcome and exactly why it was worth spending an
 idle GPU on rather than continuing to assert it.
 
-The bwd result is the one that carried real risk. `dw_partial` is the
-accumulator-shaped tensor; if `copy(tXrdW, tXgdW)` at `:1175`/`:1200` were
-actually a read-modify-write, replaying on the same buffer would drift. It
-does not.
+**Row 1b exists because my first version of row "bwd" tested less than its own
+docstring claimed.** I wrote "if `copy(tXrdW, tXgdW)` at `:1175`/`:1200` were a
+read-modify-write, replaying on the same `dw_partial` buffer would drift" —
+while calling `rmsnorm_bwd`, which allocates `dx` and `dw_partial` *itself* on
+every call (`:1382`, `:1395`, and `quack::rmsnorm_bwd_f` at `:1443-1444`). No
+buffer was ever reused, so that check structurally could not see the thing it
+named. Same defect class again, one layer down: the *test* was correct about a
+set other than the one its description named. @Reviewer's `b3053d0a` — that
+tuned wrappers' call contracts cannot be inferred from untuned wrappers'
+allocation habits — is what made me re-read my own probe with that question.
+
+So 1b drives `_rmsnorm_bwd` directly with caller-owned buffers, hands it the
+*same* `dw_partial` on all five replays, and pre-fills it with a sentinel
+(12345.0) beforehand. Two distinct failure modes are now separated: drift
+across replays would mean read-modify-write, and a surviving sentinel would
+mean the kernel accumulates into what was there rather than owning every
+element it writes. Neither happens. `dw_partial` is a store.
+
+What this still does **not** establish, and @Reviewer is right to keep it out
+of scope: **aliasing**. Every call site anyone has checked hands these kernels
+freshly allocated, non-overlapping outputs, and `_clone_l2_rotate_inputs`
+(`bench_utils.py:174-176`) clones each tensor argument *independently*, which
+actively destroys whatever alias graph the real call had. My probe inherits
+that limitation exactly — CHECK 2 aliases `residual` onto `residual_out`
+through the public wrapper, but nothing here passes `out is x` or overlapping
+views to a tuned entry point. So the no-restore result is **conditional on no
+aliasing**, and that condition belongs in the design boundary of any future
+production tuned wrapper rather than being extrapolated from today's
+fresh-allocation habit. The artifact carries that sentence in a
+`what_this_still_does_not_establish` field so it travels with the data.
 
 What does **not** transfer: the *cost* half. `AI/data/restore_value_needed.json`
 prices the regime switch on MI355X, where the LLC is a 256 MiB MALL behind a

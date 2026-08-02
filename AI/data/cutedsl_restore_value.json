@@ -1,6 +1,6 @@
 {
   "probe": "probe_cutedsl_restore_value.py",
-  "source_sha256_16": "53c108b56650a360",
+  "source_sha256_16": "9a3aa51b9d473b31",
   "what_this_is": "The cutedsl half of the restore_value verdict, measured on Hopper hardware instead of argued from the schema. MI355X cannot import quack.rmsnorm at all (cuda.bindings.driver at :7).",
   "env": {
     "gpu": "NVIDIA H200",
@@ -66,6 +66,8 @@
       ],
       "dtype": "bfloat16",
       "replays": 5,
+      "outputs_are_freshly_allocated_each_call": true,
+      "so_this_does_not_test": "reuse of a dw_partial buffer across calls -- rmsnorm_bwd allocates one per call, so no such reuse occurs here",
       "all_replays_bit_identical": true,
       "tensors_that_drifted": [],
       "restore_value_would_be_a_noop": true,
@@ -85,12 +87,60 @@
       ],
       "dtype": "bfloat16",
       "replays": 5,
+      "outputs_are_freshly_allocated_each_call": true,
+      "so_this_does_not_test": "reuse of a dw_partial buffer across calls -- rmsnorm_bwd allocates one per call, so no such reuse occurs here",
       "all_replays_bit_identical": true,
       "tensors_that_drifted": [],
       "restore_value_would_be_a_noop": true,
       "first_replay_fingerprints": {
         "dx": "8c8984c257730ae5",
         "dw": "55f9fe1fd0131ce6",
+        "x": "d5e19685c071dc86",
+        "dout": "d87ea3f0c52cada5",
+        "rstd": "7c44caf1077157d6"
+      }
+    }
+  ],
+  "check1b_bwd_shared_dw_partial": [
+    {
+      "kernel": "quack.rmsnorm._rmsnorm_bwd (cutedsl, caller-owned buffers)",
+      "shape": [
+        8192,
+        2048
+      ],
+      "dtype": "bfloat16",
+      "replays": 5,
+      "dw_partial_buffer_reused_across_replays": true,
+      "dw_partial_prefilled_with_sentinel": 12345.0,
+      "sentinel_survives_anywhere_in_dw_partial": false,
+      "all_replays_bit_identical": true,
+      "tensors_that_drifted": [],
+      "dw_partial_is_stored_not_accumulated": true,
+      "first_replay_fingerprints": {
+        "dx": "708016e9c5317f58",
+        "dw_partial": "05b77ba1b74e7469",
+        "x": "d5e19685c071dc86",
+        "dout": "d87ea3f0c52cada5",
+        "rstd": "5052a9553d4d0094"
+      }
+    },
+    {
+      "kernel": "quack.rmsnorm._rmsnorm_bwd (cutedsl, caller-owned buffers)",
+      "shape": [
+        4096,
+        4096
+      ],
+      "dtype": "bfloat16",
+      "replays": 5,
+      "dw_partial_buffer_reused_across_replays": true,
+      "dw_partial_prefilled_with_sentinel": 12345.0,
+      "sentinel_survives_anywhere_in_dw_partial": false,
+      "all_replays_bit_identical": true,
+      "tensors_that_drifted": [],
+      "dw_partial_is_stored_not_accumulated": true,
+      "first_replay_fingerprints": {
+        "dx": "8c8984c257730ae5",
+        "dw_partial": "22bfa0875e0faa8a",
         "x": "d5e19685c071dc86",
         "dout": "d87ea3f0c52cada5",
         "rstd": "7c44caf1077157d6"
@@ -154,7 +204,9 @@
   "verdict": {
     "control_can_fail": true,
     "kernels_are_idempotent": true,
+    "dw_partial_is_stored_not_accumulated": true,
     "restore_value_needed_for_cutedsl_rmsnorm": false,
-    "interpretation": "check 1 stable AND check 2 drifting means the probe is sensitive and the cutedsl kernels still do not mutate their inputs -- the source reading of schema :367/:1210 is confirmed on hardware. check 2 stable would make check 1 vacuous and this result must then be discarded."
+    "interpretation": "check 1 stable AND check 2 drifting means the probe is sensitive and the cutedsl kernels still do not mutate their inputs -- the source reading of schema :367/:1210 is confirmed on hardware. check 2 stable would make check 1 vacuous and this result must then be discarded.",
+    "what_this_still_does_not_establish": "Aliasing. @Reviewer (b3053d0a) is right that every call site checked so far hands these kernels freshly allocated, non-aliased outputs, and that _clone_l2_rotate_inputs (bench_utils.py:174-176) clones each tensor arg INDEPENDENTLY, which destroys any alias graph the real call had. This probe inherits that limitation exactly: check 2 aliases residual onto residual_out through the public wrapper, but nothing here exercises out-is-x or overlapping-view arguments to the tuned entry points. So the no-restore result is conditional on no aliasing, and that condition belongs in the design boundary of any future production tuned wrapper rather than being extrapolated from today's fresh-allocation habit."
   }
 }
