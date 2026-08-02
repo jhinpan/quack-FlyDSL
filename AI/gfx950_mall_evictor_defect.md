@@ -2,9 +2,17 @@
 
 Status: **confirmed by measurement**, fix not yet written. Blocks Experiment
 No.002 (MI355X flydsl-vs-torch matrix) — any MI355X numbers taken before this
-is fixed overstate bandwidth on 11 of the 18 benchmarked cells, including one
-`m=32768` cell. A second code path (`quack/autotuner.py`, 8 of 18) shares the
-root cause; see below.
+is fixed overstate bandwidth on **37 of the 90 benchmarked cells**, including
+one `m=32768` cell. (An earlier "11 of 18" here was computed from approximate
+bytes and ignored the `use_evictor` gate; withdrawn — see below.) A second code
+path, `_pick_l2_rotate_count` in `quack/bench/bench_utils.py`, shares the root
+cause but **has no live consumer on this box**: the FlyDSL autotune path uses
+`flydsl.autotune` with `batched_event_bench`, which neither rotates nor evicts,
+and the only in-repo consumers of `_pick_l2_rotate_count` are the CuTe and GEMM
+paths, which cannot even import here (`cuda.bindings.driver`). @Reviewer
+established this. The gate documented below is the *harness's own*
+`use_evictor` (`benchmarks/benchmark_rmsnorm_flydsl.py:960`), a separate
+implementation that is live and produced the 90-cell matrix.
 
 ## Summary
 
@@ -108,7 +116,11 @@ rather than one dtype:
 - so **37 of 90** are both un-evicted and MALL-resident
 
 Per mode that is **8 of 18** for each of the four 16-bit modes and **5 of 18**
-for `float32/same`. The previously published "11 of 18" was produced by the
+for `float32/same`. These are recomputed from the harness's real `logical_bytes`
+and actual buffer selection. A separate "8 of 18" figure quoted earlier in this
+thread was @Autotune's, derived from a synthetic single-tensor model of
+`_pick_l2_rotate_count`; the agreement is coincidental and the two should not be
+cited as corroborating each other. The previously published "11 of 18" was produced by the
 approximate byte count and by ignoring `use_evictor`; it is withdrawn.
 
 **`32768x1024` forward: measured, not inferred.** @Reviewer was right that the
@@ -313,8 +325,11 @@ cell counts: with the target at `3 x 256 MiB = 768 MiB`, any call whose cloned
 tensor set is under 48 MiB wants more than 16 buffers and is clipped by
 `max_buffers=16` — and the smallest shapes have the smallest sets, so the
 clipping lands exactly where the most rotation is needed. Memory is not the
-obstacle: the working set at the crossing point is 256 MiB by construction
-(~0.26 GiB), so the awkward part is the buffer *count*, not the bytes.
+obstacle *for crossing the MALL*: the working set at that crossing point is
+256 MiB by construction, so the awkward part is the buffer *count*, not the
+bytes. Note this is not the same as the autotuner's own target — at
+`target_ratio=3` against a 256 MiB LLC the target is 768 MiB, so a clone sized
+to reach it is ~0.75 GiB, not 0.26 GiB. @Reviewer flagged the conflation.
 
 Scope note: `quack/autotuner.py` is not in PR #4's diff (that PR touches
 `quack/flydsl/rmsnorm_autotune.py`), so this is not blocked by the PR #4 fence.
@@ -373,8 +388,10 @@ agent, and it parses cleanly:
    *harness*, where the evictor solves the problem directly — but my original
    reason was wrong and should not be reused. I wrote that raising
    `max_rotation_buffers` to 64 for `256x4096` "would allocate absurd amounts of
-   memory". It would not: the working set at the crossing point is 256 MiB by
-   construction, so the allocation is ~0.26 GiB regardless of buffer count. What
+   memory". It would not: the working set needed to *cross the MALL* is 256 MiB
+   by construction, so that allocation is ~0.26 GiB regardless of buffer count.
+   (Reaching the autotuner's own `3 * LLC` target is a different and larger
+   number, ~0.75 GiB.) What
    is awkward at small `m` is the *count* (64 buffers at `256x4096`, 10923 at
    `1x4096`), not the bytes. For the autotuner path, which has no evictor, this
    is the only available lever and the memory cost is not an objection to it.
