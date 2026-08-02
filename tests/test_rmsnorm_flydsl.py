@@ -1961,6 +1961,23 @@ def test_a_compiled_singleton_backward_does_not_poison_later_gradients():
     by 0.719 between a run that follows a singleton and the same run on a clean
     cache. So this test is compiled only, and the eager case is deliberately
     not parametrized rather than silently included as if it were evidence.
+
+    The channel is the **forward** cache, not backward launcher reuse. An
+    earlier version of this docstring claimed the latter; @Reviewer showed it
+    cannot happen, and separating the two caches on the guard-removed mutant
+    confirms it:
+
+        after singleton bwd: FWD keys = 1  BWD keys = 1   (num_programs = 1)
+        after ordinary  bwd: FWD keys = 1  BWD keys = 2   (num_programs = 1, 8)
+        clear FWD only : dx equal = False
+        clear BOTH     : dx equal = False  maxdiff = 0.46875
+
+    The BWD key ends with ``num_programs`` (``rmsnorm_flydsl.py:247-256``,
+    ``min(next_power_of_two(m), num_cus)``), so the singleton (m=1) and the
+    ordinary call (m=8) get 1 and 8 -- two distinct entries, never shared. The
+    FWD cache has no such term: one key serves both row counts, dx depends on
+    the forward's rstd and output, and that is the whole path. Clearing FWD
+    alone still reproduces the failure, which is the discriminating result.
     """
     torch.manual_seed(0)
     n = 64
@@ -1985,10 +2002,12 @@ def test_a_compiled_singleton_backward_does_not_poison_later_gradients():
     dx_clean, dweight_clean = gradients(ordinary)
 
     assert torch.equal(dx_after_singleton, dx_clean), (
-        "the backward launcher built for the singleton was reused for the ordinary call"
+        "the forward launcher built for the singleton was reused for the ordinary call "
+        "and poisoned dx through rstd; the BWD cache cannot be the channel, its key "
+        "carries num_programs (1 for the singleton, 8 here)"
     )
     assert torch.equal(dweight_after_singleton, dweight_clean), (
-        "the singleton poisoned the weight gradient"
+        "the singleton poisoned the weight gradient, again through the shared forward entry"
     )
 
     _, dx_reference, dweight_reference = _reference_with_grads(
