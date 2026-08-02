@@ -237,6 +237,41 @@ def evictor_control(record, elem_mib=64, n_buffers=2, hbm_buffers=8):
     return ref
 
 
+def fine_boundary(record):
+    """Walk the 256 MiB crossing in small steps, hitting real harness cells.
+
+    The 90-cell matrix puts four `32768x1024` forward cells at 256.003906 and
+    256.007812 MiB -- a few KiB *past* the MALL, because of the weight row.
+    Classifying them from a threshold is exactly the kind of inference this
+    note is trying to stop doing, so the probe measures those working sets
+    directly. Two buffers, matching what `_rotation_count` picks there.
+    """
+    print("\n### fine boundary sweep (2 buffers, working set stepped in KiB)")
+    print(f"{'WS bytes':>12}  {'WS MiB':>12}  {'GB/s':>8}   note")
+    notes = {
+        268439552: "32768x1024 fwd, 16-bit weight (256.003906 MiB)",
+        268443648: "32768x1024 fwd, fp32 weight  (256.007812 MiB)",
+    }
+    for ws in (268435456, 268437504, 268439552, 268443648, 268500992,
+               268697600, 269484032, 288 * 2**20, 384 * 2**20):
+        elem_bytes = (ws // 2 // 4096) * 4096   # 2 buffers, page-aligned
+        gbps, real_ws, samples, round_ms = bench_rotation(elem_bytes, 2)
+        record.append({
+            "block": "fine_boundary",
+            "buffer_bytes": elem_bytes,
+            "n_buffers": 2,
+            "working_set_bytes": real_ws,
+            "working_set_vs_mall": real_ws / MALL_BYTES,
+            "evictor_bytes": 0,
+            "gbps_median": gbps,
+            "gbps_samples": samples,
+            "round_ms_per_call": round_ms,
+            "note": notes.get(real_ws, ""),
+        })
+        print(f"{real_ws:>12}  {real_ws / 2**20:>12.6f}  {gbps:>8.0f}   "
+              f"{notes.get(real_ws, '')}")
+
+
 def environment():
     props = torch.cuda.get_device_properties(0)
     env = {
@@ -254,17 +289,40 @@ def environment():
         "warmup_rounds": WARMUP_ROUNDS,
         "rounds_per_repeat": ROUNDS,
         "repeats": REPEATS,
-        "visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES")
-        or os.environ.get("HIP_VISIBLE_DEVICES"),
+        # Record both masks separately and under their own names: OR-ing them
+        # into one nameless field cannot show which variable was actually set,
+        # and the mask value is an *index into the visible set*, not a physical
+        # GPU id -- so pin identity with UUID/BDF instead.
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "hip_visible_devices": os.environ.get("HIP_VISIBLE_DEVICES"),
+        "torch_device_index": torch.cuda.current_device(),
+        "device_pci_bus_id": getattr(props, "pci_bus_id", None),
+        "device_uuid": str(getattr(props, "uuid", "")) or None,
     }
     # MALL is discoverable rather than hardcoded; record what the machine says.
     try:
         out = subprocess.run(["rocminfo"], capture_output=True, text=True,
                              timeout=30).stdout
-        env["rocminfo_l3"] = [ln.strip() for ln in out.splitlines()
-                              if "L3:" in ln][:1]
+        # Every L3 line, not just the first: one line cannot show whether the
+        # agents agree, and a single unvalidated sample does not make MALL_BYTES
+        # "discovered". MALL_BYTES below is still a hardcoded assumption; this
+        # field only records what the machine reports next to it.
+        l3 = sorted({ln.strip() for ln in out.splitlines() if "L3:" in ln})
+        env["rocminfo_l3_lines"] = l3
+        env["rocminfo_l3_agrees_with_assumed"] = bool(l3) and all(
+            str(MALL_BYTES // 1024) in ln for ln in l3
+        )
+        env["mall_bytes_is_hardcoded"] = True
     except Exception as exc:  # noqa: BLE001 - provenance only, never fatal
-        env["rocminfo_l3"] = f"unavailable: {exc}"
+        env["rocminfo_l3_lines"] = f"unavailable: {exc}"
+    for tool, flag, key in (("rocm-smi", "--showcomputepartition", "compute_partition"),
+                            ("rocm-smi", "--showmemorypartition", "memory_partition")):
+        try:
+            env[key] = [ln.strip() for ln in subprocess.run(
+                [tool, flag], capture_output=True, text=True, timeout=30
+            ).stdout.splitlines() if "SPX" in ln or "NPS" in ln or "DPX" in ln][:2]
+        except Exception as exc:  # noqa: BLE001
+            env[key] = f"unavailable: {exc}"
     # Provenance of the *script*, not just of the checkout. HEAD alone is
     # misleading: a probe run before committing records its parent commit, which
     # does not contain the code that produced the numbers.
@@ -329,6 +387,7 @@ def main() -> None:
             ratios.append(r)
 
     hbm_ref = evictor_control(record)
+    fine_boundary(record)
 
     payload = {"environment": env, "measurements": record}
     with open(args.json, "w") as fh:
