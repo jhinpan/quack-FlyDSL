@@ -645,10 +645,14 @@ the vendoring notes rather than in a wrapper micro-optimization.
 opposite here first, on the strength of "compiled paths don't pay Python", and
 measuring took one command: at `256x4096`, eager is **31.3 us** of host time and
 `torch.compile` is **59.3 us** -- 1.90x, i.e. twice as bad rather than zero.
-Both are now regenerated in `AI/data/rmsnorm_call_decomposition.json`
-(`host_cost.torch_compile`) with dynamo's frame counter read either side of the
-timed region: 4 frames before and after, zero graph breaks, so no compilation
-or recompile is hiding inside the measurement.
+**Both are medians over rounds** (min 30.8 / 58.9, max 31.9 / 60.9); the ratio
+is the same to two figures either way, but @Reviewer has already caught one
+place in this file where a min and a median were compared under the same name,
+so the statistic is stated rather than left to the reader. Both are regenerated
+in `AI/data/rmsnorm_call_decomposition.json` (`host_cost.torch_compile`) with
+dynamo's frame counter read either side of the timed region: 4 frames before
+and after, zero graph breaks, so no compilation or recompile is hiding inside
+the measurement.
 
 This **retires the previously unbacked 26.9 / 52.9 pair.** The *conclusion*
 survives -- the ratio was 1.97 and measures 1.90, agreeing to 4% -- but both
