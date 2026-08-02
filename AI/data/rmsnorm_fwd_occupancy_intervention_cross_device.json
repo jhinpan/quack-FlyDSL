@@ -1,236 +1,968 @@
 {
-  "what": "the occupancy intervention re-run twice on each of two MI355X dies, to separate run-to-run noise from a per-card difference",
-  "generator": "AI/probe_rmsnorm_occupancy_intervention.py, run 2x on HIP_VISIBLE_DEVICES=5 and 2x on 4; this file assembled from the four sidecars",
-  "commit": "6d4ab9c4a7279702f0132a95df2b36f17cfc261a",
-  "why": "I published, and told the team, that this intervention 'reproduces across two GPUs to within 0.2% on every bandwidth figure'. That was devices 6 and 5. Device 4 breaks it: every row is faster there, by 1.7% to 11.0%, reproducibly. Two runs per device separate the two candidate explanations and the answer is not noise -- worst within-device spread 1.08%, worst between-device gap 10.96%.",
-  "worst_within_device_spread_pct": 1.08,
-  "worst_between_device_gap_pct": 10.96,
-  "direction": "device 4 is faster on every row, despite a LOWER streaming ceiling than device 5",
-  "streaming_ceiling_tbps_two_read_one_write": {
-    "device4": 6.004,
-    "device5": 6.086,
-    "device6": 6.074,
-    "note": "same probe as the cliff sidecar's ceiling, 512 MiB, min of 10x20. Device 4 is the slowest of the three at pure streaming and the fastest at this kernel, so normalising by a per-device ceiling would WIDEN the gap, not close it. Whatever device 4 is doing better is not raw bandwidth."
-  },
-  "what_does_reproduce": {
-    "registers_and_spills": "identical on every row across all four runs -- the compiler output does not depend on which die runs it, as expected, which is why the register story is unaffected",
-    "occupancy": "within 0.6% on every row; see per-row occupancy_device4/5",
-    "relative_conclusions": {
-      "device5": {
-        "treatment_none_to_2_lift_pct": 38.44,
-        "control_none_to_2_change_pct": 0.37,
-        "equal_occupancy_bandwidth_ratio": 1.455
-      },
-      "device4": {
-        "treatment_none_to_2_lift_pct": 39.57,
-        "control_none_to_2_change_pct": 0.44,
-        "equal_occupancy_bandwidth_ratio": 1.453
-      }
+  "what": "the occupancy intervention run on three MI355X dies, two runs each, one generator revision, assembled by a script rather than by hand",
+  "generator": "AI/assemble_intervention_cross_device.py",
+  "inputs": [
+    {
+      "file": "AI/data/cross_device_runs/dev4_run0.json",
+      "sha256": "d68fa7272ea78aa56c6a7857bff9f52778d99dce146725e7d6c0d766ef55db35",
+      "device_index": "4",
+      "device_uuid": "65383563-6538-3064-3934-376234356562",
+      "device_name": "AMD Instinct MI355X",
+      "commit": "d7fe67aa5e32b5f7197dda4fb7574c8a8902f1b3",
+      "worktree_dirty": true,
+      "generator_sha256_16": "e293930850569705",
+      "timing_regime": "eager"
     },
-    "reading": "the claims this experiment makes are all ratios -- the none->2 lift, the flat control, the equal-occupancy pair -- and those agree across dies to about a percentage point. It is the ABSOLUTE pct_of_ceiling figures that are per-card."
+    {
+      "file": "AI/data/cross_device_runs/dev4_run1.json",
+      "sha256": "8441b2edcd47d152c911e6a7f5f7f49d0d3dc5ed68edd4ceca5fef2b92b6a188",
+      "device_index": "4",
+      "device_uuid": "65383563-6538-3064-3934-376234356562",
+      "device_name": "AMD Instinct MI355X",
+      "commit": "d7fe67aa5e32b5f7197dda4fb7574c8a8902f1b3",
+      "worktree_dirty": true,
+      "generator_sha256_16": "e293930850569705",
+      "timing_regime": "eager"
+    },
+    {
+      "file": "AI/data/cross_device_runs/dev5_run0.json",
+      "sha256": "3f6d28f25d0e82e77e7948d67fadbe2d23a5e9c06d647451ce30c7c34dee35e1",
+      "device_index": "5",
+      "device_uuid": "66353633-3535-3138-3838-643861663866",
+      "device_name": "AMD Instinct MI355X",
+      "commit": "d7fe67aa5e32b5f7197dda4fb7574c8a8902f1b3",
+      "worktree_dirty": true,
+      "generator_sha256_16": "e293930850569705",
+      "timing_regime": "eager"
+    },
+    {
+      "file": "AI/data/cross_device_runs/dev5_run1.json",
+      "sha256": "2ebac45f898dcf96b3b5d7beb64c844e3bbf994ca225f9effac995da6b11406f",
+      "device_index": "5",
+      "device_uuid": "66353633-3535-3138-3838-643861663866",
+      "device_name": "AMD Instinct MI355X",
+      "commit": "d7fe67aa5e32b5f7197dda4fb7574c8a8902f1b3",
+      "worktree_dirty": true,
+      "generator_sha256_16": "e293930850569705",
+      "timing_regime": "eager"
+    },
+    {
+      "file": "AI/data/cross_device_runs/dev6_run0.json",
+      "sha256": "b99d5afdac129bd04624f5abcb00523803f41496debf013403612fab2d574b41",
+      "device_index": "6",
+      "device_uuid": "66636163-3034-3537-3439-313935646234",
+      "device_name": "AMD Instinct MI355X",
+      "commit": "d7fe67aa5e32b5f7197dda4fb7574c8a8902f1b3",
+      "worktree_dirty": true,
+      "generator_sha256_16": "e293930850569705",
+      "timing_regime": "eager"
+    },
+    {
+      "file": "AI/data/cross_device_runs/dev6_run1.json",
+      "sha256": "53e6eb6ff79ae55e3a0373158425b8bd3a98cf2d2b5e9bf59ed27983c934b5a1",
+      "device_index": "6",
+      "device_uuid": "66636163-3034-3537-3439-313935646234",
+      "device_name": "AMD Instinct MI355X",
+      "commit": "d7fe67aa5e32b5f7197dda4fb7574c8a8902f1b3",
+      "worktree_dirty": true,
+      "generator_sha256_16": "e293930850569705",
+      "timing_regime": "eager"
+    }
+  ],
+  "supersedes": "a hand-assembled summary that @Reviewer requested changes on. Every structural objection was correct: no assembler, no hashes, no raw inputs, mixed generator provenance (device 5 run 0 came from generator 3fcf0041, a revision never committed to this repository), a reducer chosen after seeing the data, and ratios that silently selected run 0. See the module docstring.",
+  "reducers": {
+    "closest_endpoint_pct": "smallest gap between any dev-A estimate and any dev-B estimate; the most generous reading, and the one my '0.6%' claim silently used",
+    "mean_vs_mean_pct": "difference of per-die means, the ordinary summary",
+    "full_range_pct": "spread of all estimates from both dies together, the most conservative"
   },
-  "unexplained": "why device 4 is faster. Idle sclk/mclk/fclk/socclk are identical across 4/5/6 and junction temperatures are within 2C. Not investigated further: it does not bear on any conclusion here, and saying 'reproduces across GPUs' without checking a third die is what produced the wrong claim in the first place.",
-  "bonus": "this is a third, unplanned instance of the equal-occupancy argument. Occupancy matches across dies to 0.6% while bandwidth differs by up to 11%, so occupancy again fails to determine bandwidth -- this time with the kernel, the registers and the spills all held exactly fixed.",
+  "primary_reducer": "mean_vs_mean_pct",
+  "reducer_note": "Three are reported on every quantity because I previously published 'occupancy matches across dies to within 0.6%' without noticing that I had selected closest-endpoint. On means the same rows give 1.2214% and on full range 1.4668%. The claim was not wrong so much as unstated: a summary statistic with an unnamed reducer is not checkable.",
+  "occupancy_between_die_worst_by_reducer": {
+    "closest_endpoint_pct": 0.0567,
+    "mean_vs_mean_pct": 1.2214,
+    "full_range_pct": 1.4668
+  },
+  "bandwidth_worst_between_die_pct": 11.1127,
+  "bandwidth_worst_within_die_pct": 0.7577,
+  "bandwidth_finding": "under mean_vs_mean_pct, the worst between-die bandwidth gap is 11.1127% against a worst within-die range of 0.7577%. The dies differ by more than they scatter, so this is a device effect and not run-to-run noise. That is the one conclusion here that clears its own confound comfortably.",
+  "ratios": {
+    "control_none_to_2_change_pct": {
+      "units": "absolute, in the ratio's own units -- NOT a percentage of itself",
+      "per_device_estimates": {
+        "4": [
+          1.0961,
+          0.6371
+        ],
+        "5": [
+          0.0556,
+          -0.1584
+        ],
+        "6": [
+          0.5935,
+          -0.1947
+        ]
+      },
+      "per_device_mean": {
+        "4": 0.8666,
+        "5": -0.0514,
+        "6": 0.1994
+      },
+      "within_die_spread_abs": {
+        "4": 0.459,
+        "5": 0.2141,
+        "6": 0.7883
+      },
+      "worst_within_die_spread_abs": 0.7883,
+      "worst_between_die_mean_gap_abs": 0.918,
+      "separated_pairs": [
+        {
+          "dies": [
+            "4",
+            "5"
+          ],
+          "gap_abs": 0.918
+        }
+      ],
+      "indistinguishable_pairs": [
+        {
+          "dies": [
+            "4",
+            "6"
+          ],
+          "gap_abs": 0.6672
+        },
+        {
+          "dies": [
+            "5",
+            "6"
+          ],
+          "gap_abs": 0.2508
+        }
+      ],
+      "resolved": true,
+      "reading": "at least one pair of dies is separated by more than either die's own scatter (see separated_pairs); pairs in indistinguishable_pairs are not told apart by this quantity and should not be quoted as differing"
+    },
+    "equal_occupancy_bandwidth_ratio": {
+      "units": "absolute, in the ratio's own units -- NOT a percentage of itself",
+      "per_device_estimates": {
+        "4": [
+          1.4535,
+          1.4555
+        ],
+        "5": [
+          1.4551,
+          1.4544
+        ],
+        "6": [
+          1.448,
+          1.4554
+        ]
+      },
+      "per_device_mean": {
+        "4": 1.4545,
+        "5": 1.4547,
+        "6": 1.4517
+      },
+      "within_die_spread_abs": {
+        "4": 0.0019,
+        "5": 0.0007,
+        "6": 0.0074
+      },
+      "worst_within_die_spread_abs": 0.0074,
+      "worst_between_die_mean_gap_abs": 0.0031,
+      "separated_pairs": [],
+      "indistinguishable_pairs": [
+        {
+          "dies": [
+            "4",
+            "5"
+          ],
+          "gap_abs": 0.0002
+        },
+        {
+          "dies": [
+            "4",
+            "6"
+          ],
+          "gap_abs": 0.0028
+        },
+        {
+          "dies": [
+            "5",
+            "6"
+          ],
+          "gap_abs": 0.0031
+        }
+      ],
+      "resolved": false,
+      "reading": "no pair of dies is separated by more than the within-die scatter: this quantity does NOT distinguish any of these dies, and quoting one figure per die implies a resolution it does not have"
+    },
+    "highest_occ_vs_unhinted_margin_pct": {
+      "units": "absolute, in the ratio's own units -- NOT a percentage of itself",
+      "per_device_estimates": {
+        "4": [
+          1.8842,
+          2.0451
+        ],
+        "5": [
+          10.6953,
+          10.6682
+        ],
+        "6": [
+          10.6588,
+          10.7421
+        ]
+      },
+      "per_device_mean": {
+        "4": 1.9647,
+        "5": 10.6818,
+        "6": 10.7004
+      },
+      "within_die_spread_abs": {
+        "4": 0.1609,
+        "5": 0.0271,
+        "6": 0.0833
+      },
+      "worst_within_die_spread_abs": 0.1609,
+      "worst_between_die_mean_gap_abs": 8.7358,
+      "separated_pairs": [
+        {
+          "dies": [
+            "4",
+            "5"
+          ],
+          "gap_abs": 8.7171
+        },
+        {
+          "dies": [
+            "4",
+            "6"
+          ],
+          "gap_abs": 8.7358
+        }
+      ],
+      "indistinguishable_pairs": [
+        {
+          "dies": [
+            "5",
+            "6"
+          ],
+          "gap_abs": 0.0187
+        }
+      ],
+      "resolved": true,
+      "reading": "at least one pair of dies is separated by more than either die's own scatter (see separated_pairs); pairs in indistinguishable_pairs are not told apart by this quantity and should not be quoted as differing"
+    },
+    "treatment_none_to_2_lift_pct": {
+      "units": "absolute, in the ratio's own units -- NOT a percentage of itself",
+      "per_device_estimates": {
+        "4": [
+          39.6597,
+          39.6861
+        ],
+        "5": [
+          38.8682,
+          38.6974
+        ],
+        "6": [
+          38.8397,
+          38.5458
+        ]
+      },
+      "per_device_mean": {
+        "4": 39.6729,
+        "5": 38.7828,
+        "6": 38.6927
+      },
+      "within_die_spread_abs": {
+        "4": 0.0264,
+        "5": 0.1708,
+        "6": 0.2938
+      },
+      "worst_within_die_spread_abs": 0.2938,
+      "worst_between_die_mean_gap_abs": 0.9801,
+      "separated_pairs": [
+        {
+          "dies": [
+            "4",
+            "5"
+          ],
+          "gap_abs": 0.8901
+        },
+        {
+          "dies": [
+            "4",
+            "6"
+          ],
+          "gap_abs": 0.9801
+        }
+      ],
+      "indistinguishable_pairs": [
+        {
+          "dies": [
+            "5",
+            "6"
+          ],
+          "gap_abs": 0.0901
+        }
+      ],
+      "resolved": true,
+      "reading": "at least one pair of dies is separated by more than either die's own scatter (see separated_pairs); pairs in indistinguishable_pairs are not told apart by this quantity and should not be quoted as differing"
+    }
+  },
+  "ratio_note": "Each ratio reports, in its own absolute units, every die's estimates and spread, which PAIRS of dies it separates, and which it does not. I previously published these as one three-digit figure per die for two dies, which implied a resolution they do not have. Concretely: equal_occupancy_bandwidth_ratio, which I published as '1.455 (dev5) vs 1.453 (dev4)', separates NO pair of the three dies -- the largest between-die gap is 0.0031 against a within-die spread of 0.0074, so the third digit was never real and the honest statement is '1.45 on all three'. control_none_to_2_change_pct separates only 4-vs-5, and its estimates straddle zero (-0.19 to +1.10), so the claim it supports is a bound and not a value: every estimate on every die is under 1.1%, i.e. the control is flat. treatment_none_to_2_lift_pct and highest_occ_vs_unhinted_margin_pct do separate device 4 from devices 5 and 6, and 5 and 6 are indistinguishable on both.",
+  "high_occupancy_margin_note": "highest_occ_vs_unhinted_margin_pct is the claim that the highest-occupancy row in the treatment ladder (hint=4, 3.7 waves/SIMD) is also its WORST bandwidth, below the unhinted kernel at 1.0 wave/SIMD. @Autotune flagged that this margin is die-dependent and it is: ~10.7 points on devices 5 and 6, but 1.96 on device 4 -- a 5.4x collapse. The SIGN holds on all three dies, so the qualitative claim ('more occupancy is not always faster') survives everywhere. The MARGIN does not, and on device 4 it is the same order as the cross-die bandwidth gap itself, so on that die it should be read as directional only. It was previously emitted as a flat sentence in a field of its own, which read as a fixed fact.",
+  "static_note": "vgpr_count and vgpr_spill_count are identical across all dies and runs on every row. The compiler output does not depend on which die executes it, as expected; it is stated because it is what makes the timing comparison a comparison of silicon rather than of code.",
+  "equal_occupancy_bonus": "occupancy agrees across dies far more closely than bandwidth does -- worst 1.2214% against 11.1127% under mean_vs_mean_pct -- with kernel, registers and spills bit-identical. So this is a third instance of the experiment's main point, arrived at without designing for it: occupancy does not determine bandwidth, here not even across three copies of the same silicon running the same code object. Note this argument only needs occupancy to agree BETTER than bandwidth, which holds under all three reducers; it does not depend on the 0.6% figure I originally quoted, and that is why it survives the reducer being named.",
+  "unexplained": "why the dies differ. Not the streaming ceiling: two_read_one_write reads 6.004 TB/s on device 4 against 6.086 (dev5) and 6.074 (dev6), so device 4 is slowest at streaming and fastest here, and per-die normalisation widens the gaps rather than closing them. @Autotune notes the gap correlates with spill count (r=0.74) and is ~3% on register-resident rows against ~11% on scratch-heavy ones, which points at the scratch/memory path; recorded as a place to look, not as an explanation. Idle sclk/mclk/fclk/socclk identical across the three, junction temperatures within 2 C. Left unexplained on purpose: the last two things retracted in the notes were mechanisms attached without a control.",
   "rows": [
     {
       "sweep": "control_sweep",
       "n": 49152,
-      "waves_per_eu_hint": 2,
-      "pct_of_ceiling_device5": [
-        77.0,
-        77.08
-      ],
-      "pct_of_ceiling_device4": [
-        79.45,
-        79.4
-      ],
-      "worst_within_device_spread_pct": 0.1,
-      "between_device_gap_pct": 3.01,
-      "registers_identical_across_devices": true,
-      "spills_identical_across_devices": true,
-      "occupancy_device5": [
-        1.9518,
-        1.9545
-      ],
-      "occupancy_device4": [
-        1.9583,
-        1.9602
-      ]
+      "waves_per_eu_hint": "2",
+      "bandwidth_pct_of_ceiling": {
+        "4": [
+          80.01,
+          79.82
+        ],
+        "5": [
+          76.98,
+          76.76
+        ],
+        "6": [
+          77.0,
+          76.77
+        ]
+      },
+      "bandwidth_within_die_range_pct": {
+        "4": 0.238,
+        "5": 0.2866,
+        "6": 0.2996
+      },
+      "bandwidth_between_die": {
+        "closest_endpoint_pct": 0.013,
+        "mean_vs_mean_pct": 3.9612,
+        "full_range_pct": 4.234,
+        "dies_compared": [
+          "4",
+          "5",
+          "6"
+        ]
+      },
+      "occupancy_waves_per_simd": {
+        "4": [
+          1.9596,
+          1.9575
+        ],
+        "5": [
+          1.9562,
+          1.9531
+        ],
+        "6": [
+          1.9539,
+          1.9582
+        ]
+      },
+      "occupancy_between_die": {
+        "closest_endpoint_pct": 0.0358,
+        "mean_vs_mean_pct": 0.1995,
+        "full_range_pct": 0.3328,
+        "dies_compared": [
+          "4",
+          "5",
+          "6"
+        ]
+      },
+      "vgpr_count": {
+        "4": [
+          228
+        ],
+        "5": [
+          228
+        ],
+        "6": [
+          228
+        ]
+      },
+      "vgpr_spill_count": {
+        "4": [
+          0
+        ],
+        "5": [
+          0
+        ],
+        "6": [
+          0
+        ]
+      },
+      "static_identical_across_dies": true
     },
     {
       "sweep": "control_sweep",
       "n": 49152,
-      "waves_per_eu_hint": 3,
-      "pct_of_ceiling_device5": [
-        46.48,
-        46.06
-      ],
-      "pct_of_ceiling_device4": [
-        48.6,
-        48.77
-      ],
-      "worst_within_device_spread_pct": 0.91,
-      "between_device_gap_pct": 4.56,
-      "registers_identical_across_devices": true,
-      "spills_identical_across_devices": true,
-      "occupancy_device5": [
-        2.8195,
-        2.8199
-      ],
-      "occupancy_device4": [
-        2.7969,
-        2.8052
-      ]
+      "waves_per_eu_hint": "3",
+      "bandwidth_pct_of_ceiling": {
+        "4": [
+          48.58,
+          48.54
+        ],
+        "5": [
+          46.19,
+          46.54
+        ],
+        "6": [
+          46.37,
+          46.4
+        ]
+      },
+      "bandwidth_within_die_range_pct": {
+        "4": 0.0824,
+        "5": 0.7577,
+        "6": 0.0647
+      },
+      "bandwidth_between_die": {
+        "closest_endpoint_pct": 0.3017,
+        "mean_vs_mean_pct": 4.7342,
+        "full_range_pct": 5.1743,
+        "dies_compared": [
+          "4",
+          "5",
+          "6"
+        ]
+      },
+      "occupancy_waves_per_simd": {
+        "4": [
+          2.8113,
+          2.8093
+        ],
+        "5": [
+          2.8097,
+          2.8143
+        ],
+        "6": [
+          2.8207,
+          2.8048
+        ]
+      },
+      "occupancy_between_die": {
+        "closest_endpoint_pct": 0.0142,
+        "mean_vs_mean_pct": 0.0872,
+        "full_range_pct": 0.5669,
+        "dies_compared": [
+          "4",
+          "5",
+          "6"
+        ]
+      },
+      "vgpr_count": {
+        "4": [
+          168
+        ],
+        "5": [
+          168
+        ],
+        "6": [
+          168
+        ]
+      },
+      "vgpr_spill_count": {
+        "4": [
+          61
+        ],
+        "5": [
+          61
+        ],
+        "6": [
+          61
+        ]
+      },
+      "static_identical_across_dies": true
     },
     {
       "sweep": "control_sweep",
       "n": 49152,
-      "waves_per_eu_hint": 4,
-      "pct_of_ceiling_device5": [
-        43.22,
-        43.42
-      ],
-      "pct_of_ceiling_device4": [
-        47.01,
-        47.52
-      ],
-      "worst_within_device_spread_pct": 1.08,
-      "between_device_gap_pct": 8.27,
-      "registers_identical_across_devices": true,
-      "spills_identical_across_devices": true,
-      "occupancy_device5": [
-        3.8841,
-        3.9052
-      ],
-      "occupancy_device4": [
-        3.8987,
-        3.9134
-      ]
+      "waves_per_eu_hint": "4",
+      "bandwidth_pct_of_ceiling": {
+        "4": [
+          47.34,
+          47.44
+        ],
+        "5": [
+          43.49,
+          43.37
+        ],
+        "6": [
+          44.15,
+          44.09
+        ]
+      },
+      "bandwidth_within_die_range_pct": {
+        "4": 0.2112,
+        "5": 0.2767,
+        "6": 0.1361
+      },
+      "bandwidth_between_die": {
+        "closest_endpoint_pct": 1.3796,
+        "mean_vs_mean_pct": 9.1181,
+        "full_range_pct": 9.3844,
+        "dies_compared": [
+          "4",
+          "5",
+          "6"
+        ]
+      },
+      "occupancy_waves_per_simd": {
+        "4": [
+          3.9096,
+          3.915
+        ],
+        "5": [
+          3.9012,
+          3.9047
+        ],
+        "6": [
+          3.9046,
+          3.8936
+        ]
+      },
+      "occupancy_between_die": {
+        "closest_endpoint_pct": 0.0026,
+        "mean_vs_mean_pct": 0.3385,
+        "full_range_pct": 0.5496,
+        "dies_compared": [
+          "4",
+          "5",
+          "6"
+        ]
+      },
+      "vgpr_count": {
+        "4": [
+          128
+        ],
+        "5": [
+          128
+        ],
+        "6": [
+          128
+        ]
+      },
+      "vgpr_spill_count": {
+        "4": [
+          101
+        ],
+        "5": [
+          101
+        ],
+        "6": [
+          101
+        ]
+      },
+      "static_identical_across_dies": true
     },
     {
       "sweep": "control_sweep",
       "n": 49152,
       "waves_per_eu_hint": "none",
-      "pct_of_ceiling_device5": [
-        76.72,
-        76.81
-      ],
-      "pct_of_ceiling_device4": [
-        79.1,
-        79.09
-      ],
-      "worst_within_device_spread_pct": 0.12,
-      "between_device_gap_pct": 2.97,
-      "registers_identical_across_devices": true,
-      "spills_identical_across_devices": true,
-      "occupancy_device5": [
-        1.9595,
-        1.9617
-      ],
-      "occupancy_device4": [
-        1.9627,
-        1.9626
-      ]
+      "bandwidth_pct_of_ceiling": {
+        "4": [
+          79.14,
+          79.32
+        ],
+        "5": [
+          76.94,
+          76.88
+        ],
+        "6": [
+          76.55,
+          76.92
+        ]
+      },
+      "bandwidth_within_die_range_pct": {
+        "4": 0.2274,
+        "5": 0.078,
+        "6": 0.4833
+      },
+      "bandwidth_between_die": {
+        "closest_endpoint_pct": 0.026,
+        "mean_vs_mean_pct": 3.2514,
+        "full_range_pct": 3.6185,
+        "dies_compared": [
+          "4",
+          "5",
+          "6"
+        ]
+      },
+      "occupancy_waves_per_simd": {
+        "4": [
+          1.9579,
+          1.9613
+        ],
+        "5": [
+          1.9567,
+          1.9576
+        ],
+        "6": [
+          1.9572,
+          1.9585
+        ]
+      },
+      "occupancy_between_die": {
+        "closest_endpoint_pct": 0.0153,
+        "mean_vs_mean_pct": 0.1252,
+        "full_range_pct": 0.2351,
+        "dies_compared": [
+          "4",
+          "5",
+          "6"
+        ]
+      },
+      "vgpr_count": {
+        "4": [
+          230
+        ],
+        "5": [
+          230
+        ],
+        "6": [
+          230
+        ]
+      },
+      "vgpr_spill_count": {
+        "4": [
+          0
+        ],
+        "5": [
+          0
+        ],
+        "6": [
+          0
+        ]
+      },
+      "static_identical_across_dies": true
     },
     {
       "sweep": "treatment_sweep",
       "n": 57344,
-      "waves_per_eu_hint": 2,
-      "pct_of_ceiling_device5": [
-        52.72,
-        52.79
-      ],
-      "pct_of_ceiling_device4": [
-        54.42,
-        54.42
-      ],
-      "worst_within_device_spread_pct": 0.13,
-      "between_device_gap_pct": 3.09,
-      "registers_identical_across_devices": true,
-      "spills_identical_across_devices": true,
-      "occupancy_device5": [
-        1.9371,
-        1.9381
-      ],
-      "occupancy_device4": [
-        1.9372,
-        1.9389
-      ]
+      "waves_per_eu_hint": "2",
+      "bandwidth_pct_of_ceiling": {
+        "4": [
+          54.45,
+          54.5
+        ],
+        "5": [
+          52.88,
+          52.86
+        ],
+        "6": [
+          52.86,
+          52.85
+        ]
+      },
+      "bandwidth_within_die_range_pct": {
+        "4": 0.0918,
+        "5": 0.0378,
+        "6": 0.0189
+      },
+      "bandwidth_between_die": {
+        "closest_endpoint_pct": 0.0,
+        "mean_vs_mean_pct": 3.065,
+        "full_range_pct": 3.122,
+        "dies_compared": [
+          "4",
+          "5",
+          "6"
+        ]
+      },
+      "occupancy_waves_per_simd": {
+        "4": [
+          1.9397,
+          1.9332
+        ],
+        "5": [
+          1.9441,
+          1.946
+        ],
+        "6": [
+          1.9386,
+          1.9416
+        ]
+      },
+      "occupancy_between_die": {
+        "closest_endpoint_pct": 0.0567,
+        "mean_vs_mean_pct": 0.4441,
+        "full_range_pct": 0.6621,
+        "dies_compared": [
+          "4",
+          "5",
+          "6"
+        ]
+      },
+      "vgpr_count": {
+        "4": [
+          256
+        ],
+        "5": [
+          256
+        ],
+        "6": [
+          256
+        ]
+      },
+      "vgpr_spill_count": {
+        "4": [
+          8
+        ],
+        "5": [
+          8
+        ],
+        "6": [
+          8
+        ]
+      },
+      "static_identical_across_dies": true
     },
     {
       "sweep": "treatment_sweep",
       "n": 57344,
-      "waves_per_eu_hint": 3,
-      "pct_of_ceiling_device5": [
-        43.21,
-        43.26
-      ],
-      "pct_of_ceiling_device4": [
-        44.01,
-        44.09
-      ],
-      "worst_within_device_spread_pct": 0.18,
-      "between_device_gap_pct": 1.73,
-      "registers_identical_across_devices": true,
-      "spills_identical_across_devices": true,
-      "occupancy_device5": [
-        2.7963,
-        2.8068
-      ],
-      "occupancy_device4": [
-        2.7999,
-        2.8069
-      ]
+      "waves_per_eu_hint": "3",
+      "bandwidth_pct_of_ceiling": {
+        "4": [
+          44.09,
+          44.04
+        ],
+        "5": [
+          43.19,
+          43.25
+        ],
+        "6": [
+          43.1,
+          43.21
+        ]
+      },
+      "bandwidth_within_die_range_pct": {
+        "4": 0.1135,
+        "5": 0.1389,
+        "6": 0.2552
+      },
+      "bandwidth_between_die": {
+        "closest_endpoint_pct": 0.0463,
+        "mean_vs_mean_pct": 2.1087,
+        "full_range_pct": 2.297,
+        "dies_compared": [
+          "4",
+          "5",
+          "6"
+        ]
+      },
+      "occupancy_waves_per_simd": {
+        "4": [
+          2.8033,
+          2.8051
+        ],
+        "5": [
+          2.8046,
+          2.8008
+        ],
+        "6": [
+          2.8035,
+          2.8028
+        ]
+      },
+      "occupancy_between_die": {
+        "closest_endpoint_pct": 0.0071,
+        "mean_vs_mean_pct": 0.0535,
+        "full_range_pct": 0.1535,
+        "dies_compared": [
+          "4",
+          "5",
+          "6"
+        ]
+      },
+      "vgpr_count": {
+        "4": [
+          168
+        ],
+        "5": [
+          168
+        ],
+        "6": [
+          168
+        ]
+      },
+      "vgpr_spill_count": {
+        "4": [
+          97
+        ],
+        "5": [
+          97
+        ],
+        "6": [
+          97
+        ]
+      },
+      "static_identical_across_dies": true
     },
     {
       "sweep": "treatment_sweep",
       "n": 57344,
-      "waves_per_eu_hint": 4,
-      "pct_of_ceiling_device5": [
-        34.41,
-        34.38
-      ],
-      "pct_of_ceiling_device4": [
-        38.22,
-        38.18
-      ],
-      "worst_within_device_spread_pct": 0.1,
-      "between_device_gap_pct": 10.96,
-      "registers_identical_across_devices": true,
-      "spills_identical_across_devices": true,
-      "occupancy_device5": [
-        3.6874,
-        3.672
-      ],
-      "occupancy_device4": [
-        3.7086,
-        3.7188
-      ]
+      "waves_per_eu_hint": "4",
+      "bandwidth_pct_of_ceiling": {
+        "4": [
+          38.26,
+          38.23
+        ],
+        "5": [
+          34.4,
+          34.44
+        ],
+        "6": [
+          34.41,
+          34.45
+        ]
+      },
+      "bandwidth_within_die_range_pct": {
+        "4": 0.0785,
+        "5": 0.1163,
+        "6": 0.1162
+      },
+      "bandwidth_between_die": {
+        "closest_endpoint_pct": 0.029,
+        "mean_vs_mean_pct": 11.1127,
+        "full_range_pct": 11.2209,
+        "dies_compared": [
+          "4",
+          "5",
+          "6"
+        ]
+      },
+      "occupancy_waves_per_simd": {
+        "4": [
+          3.7122,
+          3.7217
+        ],
+        "5": [
+          3.6679,
+          3.6763
+        ],
+        "6": [
+          3.6843,
+          3.6679
+        ]
+      },
+      "occupancy_between_die": {
+        "closest_endpoint_pct": 0.0,
+        "mean_vs_mean_pct": 1.2214,
+        "full_range_pct": 1.4668,
+        "dies_compared": [
+          "4",
+          "5",
+          "6"
+        ]
+      },
+      "vgpr_count": {
+        "4": [
+          128
+        ],
+        "5": [
+          128
+        ],
+        "6": [
+          128
+        ]
+      },
+      "vgpr_spill_count": {
+        "4": [
+          137
+        ],
+        "5": [
+          137
+        ],
+        "6": [
+          137
+        ]
+      },
+      "static_identical_across_dies": true
     },
     {
       "sweep": "treatment_sweep",
       "n": 57344,
       "waves_per_eu_hint": "none",
-      "pct_of_ceiling_device5": [
-        38.08,
-        38.08
-      ],
-      "pct_of_ceiling_device4": [
-        38.99,
-        38.97
-      ],
-      "worst_within_device_spread_pct": 0.05,
-      "between_device_gap_pct": 2.34,
-      "registers_identical_across_devices": true,
-      "spills_identical_across_devices": true,
-      "occupancy_device5": [
-        1.0004,
-        1.0004
-      ],
-      "occupancy_device4": [
-        1.0004,
-        1.0004
-      ]
+      "bandwidth_pct_of_ceiling": {
+        "4": [
+          38.99,
+          39.01
+        ],
+        "5": [
+          38.08,
+          38.11
+        ],
+        "6": [
+          38.08,
+          38.15
+        ]
+      },
+      "bandwidth_within_die_range_pct": {
+        "4": 0.0513,
+        "5": 0.0788,
+        "6": 0.1838
+      },
+      "bandwidth_between_die": {
+        "closest_endpoint_pct": 0.0,
+        "mean_vs_mean_pct": 2.3756,
+        "full_range_pct": 2.4422,
+        "dies_compared": [
+          "4",
+          "5",
+          "6"
+        ]
+      },
+      "occupancy_waves_per_simd": {
+        "4": [
+          1.0004,
+          1.0004
+        ],
+        "5": [
+          1.0004,
+          1.0004
+        ],
+        "6": [
+          1.0004,
+          1.0004
+        ]
+      },
+      "occupancy_between_die": {
+        "closest_endpoint_pct": 0.0,
+        "mean_vs_mean_pct": 0.0,
+        "full_range_pct": 0.0,
+        "dies_compared": [
+          "4",
+          "5",
+          "6"
+        ]
+      },
+      "vgpr_count": {
+        "4": [
+          264
+        ],
+        "5": [
+          264
+        ],
+        "6": [
+          264
+        ]
+      },
+      "vgpr_spill_count": {
+        "4": [
+          0
+        ],
+        "5": [
+          0
+        ],
+        "6": [
+          0
+        ]
+      },
+      "static_identical_across_dies": true
     }
   ]
 }

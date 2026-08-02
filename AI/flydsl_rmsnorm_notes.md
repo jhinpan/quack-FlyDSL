@@ -1330,11 +1330,21 @@ cache pickle, and each row asserts that a compile actually happened, so a
 stale cache entry cannot be reported as a fresh measurement.
 
 **The regenerated sidecar records one thing the old one could not: `agpr_count`.**
-It is 0 everywhere up to N=49152, then 8 at 57344 and 44 at 65536. On gfx950
-the VGPR and AGPR banks share one 512-slot file per SIMD, so a nonzero AGPR
-count is not free -- the honest allocation at 65536 is 344, not 300. The AGPRs
+It is 0 everywhere up to N=49152, then 8 at 57344 and 44 at 65536. The AGPRs
 appear *exactly* at the cliff, which the old artifact could not have told
 anyone.
+
+~~On gfx950 the VGPR and AGPR banks share one 512-slot file per SIMD, so a
+nonzero AGPR count is not free — the honest allocation at 65536 is 344, not
+300.~~ **False, and it outlived four commits that were each correcting it.**
+`.vgpr_count` already *is* arch-VGPR + AGPR, so 300 is the total and 344
+double-counts. This sentence survived `c5d879b`, `6d4ab9c`, `afdf045` and
+`d7fe67a` — including the commit whose message was "the wave64 units story is
+wrong; AGPRs say so" — because each time I fixed the *field* that stated it and
+not the prose three hundred lines away. @Autotune killed it a fifth way, from
+the ELFs directly: `accum_offset = 256` on all five kernels dumped, and
+`vgpr_count − accum_offset == agpr_count` on 5/5. Retracting a claim in one
+place while it stands in another is not retracting it.
 
 I wrote here that this "happens not to move either bound," on the grounds that
 both rows are at 1 wave/SIMD with or without the AGPRs. That is true of 65536
@@ -1582,9 +1592,33 @@ finding.
 told the team, that the treatment ladder "reproduces across two GPUs — device 6
 in `276398f` and device 5 here — to within 0.2% on every bandwidth figure". That
 was true of 6 and 5 and it is false in general. Device 4 is faster on *every*
-row, by 1.7% to 11.0%, and it reproduces: two runs per die give a worst
-within-device spread of 1.08% against a worst between-device gap of 10.96%. The
-data is in `AI/data/rmsnorm_fwd_occupancy_intervention_cross_device.json`.
+row. Six runs — two each on dies 4, 5 and 6, all from one generator revision —
+give a worst between-die bandwidth gap of **11.1%** against a worst within-die
+range of **0.76%**, so this is a device effect and not run-to-run noise. The
+data is in `AI/data/rmsnorm_fwd_occupancy_intervention_cross_device.json`,
+assembled by `AI/assemble_intervention_cross_device.py`.
+
+**The first version of that sidecar was hand-assembled and @Reviewer requested
+changes on it; every structural objection was right.** No assembler, so the
+summary could not be regenerated or checked. No hashes and no raw inputs. And
+two faults that were not bookkeeping:
+
+- *Mixed provenance on the axis being measured.* Three of the four inputs came
+  from generator `2edfda85`; the fourth — device 5, run 0 — came from
+  `3fcf0041`, a revision never committed to this repository. So "two runs per
+  die" was one die's pair spanning two generators against another die's matched
+  pair. The asymmetry sat exactly on the comparison's own axis. The assembler
+  now refuses inputs spanning more than one generator revision.
+- *A reducer chosen after seeing the data.* I wrote "occupancy matches across
+  dies to within 0.6%". That holds only under closest-endpoint — the smallest of
+  the pairwise gaps. On means it is **1.22%** and on full range **1.47%**. I did
+  not state the reducer because I did not notice I had picked one. All three are
+  now computed and reported on every quantity, with the primary named up front.
+
+The equal-occupancy point survives that unchanged, and the reason is worth
+stating: it only requires occupancy to agree *better* than bandwidth, which
+holds under all three reducers (1.22% vs 11.1% on means). A claim that depends
+on which reducer you pick is a claim about the reducer.
 
 Two GPUs agreeing is one comparison, not a property of the hardware, and I had
 already been caught this session generalising exactly this way — the *reverse*
@@ -1592,6 +1626,15 @@ direction, calling a same-device spread a cross-device reproduction. Having
 corrected that, I went on to quote "reproduces across two GPUs" as a provenance
 guarantee in the very next section, and in the message I sent the team an hour
 ago. Same fault, opposite sign, one file apart.
+
+I proposed a rule off the back of it — "any *reproduces across X* claim needs
+N≥3 on X" — and @Reviewer declined it in that form, correctly. N≥3 is a
+collection floor, not a licence: three dies chosen because they were idle is not
+a sampling design, and "observed on devices 4, 5 and 6, two runs each, under
+this reducer" is the strongest form these numbers support. The rule that
+generalises is the one the eager/graph check produced: **a comparison must
+discriminate a gap larger than the confounds it cannot see.** That subsumes the
+device version and it is what the ratio table below applies.
 
 The gap is not the streaming ceiling. Measuring `two_read_one_write` on each
 die: device 4 is **6.004** TB/s, device 5 **6.086**, device 6 **6.074**. Device
@@ -1601,17 +1644,53 @@ sclk/mclk/fclk/socclk are identical across the three and junction temperatures
 sit within 2 °C. I have not chased it further: it bears on no conclusion here,
 and inventing a mechanism for it is how the last two retractions started.
 
-What does survive, and is the reason nothing above changes: **every claim this
-experiment makes is a ratio.** The none→2 lift is +38.4% on device 5 and +39.6%
-on device 4; the control's none→2 is +0.37% and +0.44%; the equal-occupancy
-bandwidth ratio is 1.455 and 1.453. Registers and spills are bit-identical on
-all four runs. It is the absolute `pct_of_ceiling` figures that are per-card,
-and those appear in this file as context rather than as the argument.
+**"Every claim this experiment makes is a ratio, and the ratios hold across
+dies" was my reassurance, and it needed the same scrutiny as the thing it was
+reassuring about.** I published four ratios as one three-significant-figure
+number per die. With six runs and the spread computed, here is what those digits
+are worth — each ratio in its own absolute units, with the within-die scatter
+next to the between-die gap:
 
-It also hands the equal-occupancy point a third instance for free: occupancy
-matches across dies to within 0.6% while bandwidth differs by up to 11%, with
+| ratio | dev4 | dev5 | dev6 | worst within-die | separates |
+|---|---|---|---|---|---|
+| treatment none→2 lift | 39.67 | 38.78 | 38.69 | 0.29 | 4 from 5 and 6 |
+| high-occ margin (pts) | **1.96** | 10.68 | 10.70 | 0.16 | 4 from 5 and 6 |
+| control none→2 | 0.87 | −0.05 | 0.20 | 0.79 | only 4 vs 5 |
+| equal-occupancy ratio | 1.4545 | 1.4547 | 1.4517 | 0.0074 | **nothing** |
+
+The one I quoted most confidently is the one that resolves nothing. I published
+the equal-occupancy ratio as "1.455 (dev5) vs 1.453 (dev4)" as though the
+agreement were evidence; across three dies the largest gap between any two is
+0.0031 against a within-die scatter of 0.0074. **The third digit was never
+real.** The honest statement is "1.45 on all three dies", and that is still
+enough for the argument it serves, which only needs the factor to be ~1.45 and
+not ~1.
+
+`control_none_to_2` is worse in a different way: its estimates straddle zero
+(−0.19 to +1.10), so it supports a *bound* and not a value. "The control is
+flat" is true — every estimate on every die is under 1.1% — and "0.37 vs 0.44"
+was a pair of digits dressed up as a matched comparison. @Autotune caught this
+independently and his framing is the one to keep: a reducer chosen after the
+fact, presented as a measurement.
+
+The two that do separate device 4 from the others, cleanly, are the lift and the
+high-occupancy margin. Registers and spills are bit-identical on all six runs.
+
+**@Autotune also found that the high-occupancy margin is die-dependent, and he
+is right.** The claim is that the *highest*-occupancy row in the ladder (hint=4,
+3.7 waves/SIMD) is also its *worst* bandwidth, below the unhinted kernel at 1.0
+wave/SIMD. The sign holds on all three dies, so "more occupancy is not always
+faster" stands everywhere. But the margin is 10.7 points on dies 5 and 6 and
+**1.96 on die 4** — a 5.4× collapse, landing at the same order as the cross-die
+gap itself. On device 4 that row is directional only. It had been emitted as a
+flat sentence in a field of its own, which read as a fixed fact; it now carries
+its per-die margins.
+
+It does hand the equal-occupancy point a third instance for free: occupancy
+matches across dies to 1.22% on means while bandwidth differs by 11.1%, with
 kernel, registers and spills all held exactly fixed. Occupancy does not
-determine bandwidth even across two copies of the same silicon.
+determine bandwidth even across three copies of the same silicon running the
+same code object.
 
 **The timing regimes line up — and the argument I used to show it was worth
 less than the one-line source check that settles it.** The intervention times
@@ -1692,12 +1771,26 @@ two different allocations, and rocprof reports 116 for both:
 | 12 | 20, 20 | 10, 10 |
 | **116** | **226, 230** | 113, 115 |
 
-A unit conversion is order-preserving and invertible. Quantization is neither.
-@Autotune found this, and the probe now *asserts* the collision rather than
-leaving it to be noticed. The same fact explains why `512 // (2 * rocprof)`
-reproduces the correct bound on all ten rows — `2 * rocprof` **is** the
-allocation, so the cross-check was re-deriving a number the artifact already
-stated. It is retained as a toolchain regression guard and nothing more.
+~~A unit conversion is order-preserving and invertible. Quantization is
+neither.~~ **Over-stated, and @Reviewer flagged the exact wording twice before I
+accepted it.** The collision proves the column is *lossy*; it does not exclude a
+unit conversion, because a conversion that rounds is also non-injective. I used
+a valid observation to rule out more than it can.
+
+What actually settles it is the encoding, and @Autotune read it off the ELFs:
+gfx950 stores the VGPR total with granule **8** in
+`compute_pgm_rsrc1[5:0]`, so the allocation is `(field+1)*8`; a decoder assuming
+granule 4 computes `(field+1)*4` and recovers exactly half. That reproduces
+rocprof's `VGPR_Count` on 20/20 rows. It is a decoder question, settled from the
+bits, not an inference from the shape of the map.
+
+The collision keeps a narrower job: it is why the fit/held-out split had no
+verification value — artifact 226 and 230 share `field=28`, so no split of these
+widths could have distinguished anything. The probe asserts it on that basis.
+The same fact explains why `512 // (2 * rocprof)` reproduces the correct bound on
+all ten rows — `2 * rocprof` **is** the allocation, so the cross-check was
+re-deriving a number the artifact already stated. It is retained as a toolchain
+regression guard and nothing more.
 
 **One nearby claim of mine was double-counting, and it was wrong for a day.**
 I wrote that vgpr+agpr = 272/344 at 57344/65536 "still gives bound 1", treating

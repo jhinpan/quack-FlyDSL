@@ -3,8 +3,8 @@
   "generator": "AI/probe_rmsnorm_occupancy_intervention.py",
   "note": "gfx950 MI355X, bf16 fwd, has_weight only, m=4096 (the bandwidth cliff's own m). This is the intervention the measured-occupancy sidecar said was still owed. The lever is NOT clean: it buys occupancy with spills (0 / 8 / 97 / 137 VGPR spills at hints none/2/3/4), so this is a two-variable change and is reported as directional evidence, not as a quantitative result. MAX_N was raised in-process for the probe only; the shipped cap is unchanged.",
   "device": "AMD Instinct MI355X",
-  "device_uuid": "66636163-3034-3537-3439-313935646234",
-  "HIP_VISIBLE_DEVICES": "6",
+  "device_uuid": "65383563-6538-3064-3934-376234356562",
+  "HIP_VISIBLE_DEVICES": "4",
   "torch": "2.9.1+rocm7.2.0.git7e1940d4",
   "hip": "7.2.26015-fc0010cf6a",
   "python": "3.10.12",
@@ -39,19 +39,19 @@
     "a": {
       "n": 57344,
       "hint": 2,
-      "waves_per_simd": 1.9416,
-      "pct_of_ceiling": 52.85
+      "waves_per_simd": 1.9397,
+      "pct_of_ceiling": 54.45
     },
     "b": {
       "n": 49152,
       "hint": "none",
-      "waves_per_simd": 1.9585,
-      "pct_of_ceiling": 76.92
+      "waves_per_simd": 1.9579,
+      "pct_of_ceiling": 79.14
     },
-    "occupancy_separation_pct": 0.86,
-    "bandwidth_ratio": 1.455,
-    "fraction_of_cliff_recovered_pct": 37.9,
-    "highest_occupancy_is_worst_bandwidth": "sharper still: the highest occupancy in the treatment ladder is hint=4 at 3.668 waves/SIMD, and its bandwidth (34.5 pct) is the WORST in the table -- below the unhinted 38.1 pct at 1.000 waves/SIMD"
+    "occupancy_separation_pct": 0.93,
+    "bandwidth_ratio": 1.453,
+    "fraction_of_cliff_recovered_pct": 38.5,
+    "highest_occupancy_is_worst_bandwidth": "sharper still: the highest occupancy in the treatment ladder is hint=4 at 3.712 waves/SIMD, and its bandwidth (38.3 pct) is the WORST in the table -- below the unhinted 39.0 pct at 1.000 waves/SIMD"
   },
   "reversal_control": "The control now runs the full none/2/3/4 ladder, and the reversal at 3 and 4 happens THERE TOO: at N=49152, hint=3 takes bandwidth from 76.7 to 46.5 pct and hint=4 to 43.2 pct, at 61 and 101 spills, while measured occupancy rises to 2.82 and 3.88. So the treatment's reversal is not specific to the width that was over the register boundary -- high settings of this flag are harmful at both widths. The earlier reading, that the reversal showed occupancy and spills trading off at the treatment width, was not supported: it had no control at those settings, and with one the effect is generic. This does not touch the main claim, which rests on the none->2 step, where the control IS flat (76.7 -> 77.0) and the treatment moves (38.1 -> 52.7). It does mean the 3/4 rows are evidence against 'more occupancy is always faster' and evidence for nothing else. @Reviewer asked for these rows.",
   "still_open": "Directional only. A clean lever would change occupancy at constant spills; none is available here. Restoring occupancy recovers part of the lost bandwidth, not all of it. Unexplained: why device 4 runs every row of this sweep 1.7-11.0 pct faster than device 5 with identical code and a lower streaming ceiling.",
@@ -71,9 +71,9 @@
       "waves_per_simd_register_limited": 1,
       "measured_waves_per_simd": 1.0004,
       "occupancy_dispatches": 3,
-      "us_per_call": 405.397,
-      "tbs": 2.3175,
-      "pct_of_ceiling": 38.15
+      "us_per_call": 396.697,
+      "tbs": 2.3684,
+      "pct_of_ceiling": 38.99
     },
     {
       "n": 57344,
@@ -87,11 +87,11 @@
       "private_segment_fixed_size": 36,
       "vgpr_alloc_wave64": 256,
       "waves_per_simd_register_limited": 2,
-      "measured_waves_per_simd": 1.9416,
+      "measured_waves_per_simd": 1.9397,
       "occupancy_dispatches": 3,
-      "us_per_call": 292.616,
-      "tbs": 3.2108,
-      "pct_of_ceiling": 52.85
+      "us_per_call": 284.04,
+      "tbs": 3.3077,
+      "pct_of_ceiling": 54.45
     },
     {
       "n": 57344,
@@ -105,11 +105,11 @@
       "private_segment_fixed_size": 392,
       "vgpr_alloc_wave64": 168,
       "waves_per_simd_register_limited": 3,
-      "measured_waves_per_simd": 2.8028,
+      "measured_waves_per_simd": 2.8033,
       "occupancy_dispatches": 3,
-      "us_per_call": 357.891,
-      "tbs": 2.6252,
-      "pct_of_ceiling": 43.21
+      "us_per_call": 350.735,
+      "tbs": 2.6787,
+      "pct_of_ceiling": 44.09
     },
     {
       "n": 57344,
@@ -123,11 +123,11 @@
       "private_segment_fixed_size": 552,
       "vgpr_alloc_wave64": 128,
       "waves_per_simd_register_limited": 4,
-      "measured_waves_per_simd": 3.6679,
+      "measured_waves_per_simd": 3.7122,
       "occupancy_dispatches": 3,
-      "us_per_call": 448.947,
-      "tbs": 2.0927,
-      "pct_of_ceiling": 34.45
+      "us_per_call": 404.169,
+      "tbs": 2.3246,
+      "pct_of_ceiling": 38.26
     }
   ],
   "control_sweep": [
@@ -143,11 +143,11 @@
       "private_segment_fixed_size": 0,
       "vgpr_alloc_wave64": 232,
       "waves_per_simd_register_limited": 2,
-      "measured_waves_per_simd": 1.9585,
+      "measured_waves_per_simd": 1.9579,
       "occupancy_dispatches": 3,
-      "us_per_call": 172.333,
-      "tbs": 4.673,
-      "pct_of_ceiling": 76.92
+      "us_per_call": 167.497,
+      "tbs": 4.8079,
+      "pct_of_ceiling": 79.14
     },
     {
       "n": 49152,
@@ -161,11 +161,11 @@
       "private_segment_fixed_size": 0,
       "vgpr_alloc_wave64": 232,
       "waves_per_simd_register_limited": 2,
-      "measured_waves_per_simd": 1.9582,
+      "measured_waves_per_simd": 1.9596,
       "occupancy_dispatches": 3,
-      "us_per_call": 172.669,
-      "tbs": 4.6639,
-      "pct_of_ceiling": 76.77
+      "us_per_call": 165.681,
+      "tbs": 4.8606,
+      "pct_of_ceiling": 80.01
     },
     {
       "n": 49152,
@@ -179,11 +179,11 @@
       "private_segment_fixed_size": 248,
       "vgpr_alloc_wave64": 168,
       "waves_per_simd_register_limited": 3,
-      "measured_waves_per_simd": 2.8048,
+      "measured_waves_per_simd": 2.8113,
       "occupancy_dispatches": 3,
-      "us_per_call": 285.694,
-      "tbs": 2.8188,
-      "pct_of_ceiling": 46.4
+      "us_per_call": 272.898,
+      "tbs": 2.9509,
+      "pct_of_ceiling": 48.58
     },
     {
       "n": 49152,
@@ -197,11 +197,11 @@
       "private_segment_fixed_size": 408,
       "vgpr_alloc_wave64": 128,
       "waves_per_simd_register_limited": 4,
-      "measured_waves_per_simd": 3.8936,
+      "measured_waves_per_simd": 3.9096,
       "occupancy_dispatches": 3,
-      "us_per_call": 300.642,
-      "tbs": 2.6786,
-      "pct_of_ceiling": 44.09
+      "us_per_call": 280.038,
+      "tbs": 2.8757,
+      "pct_of_ceiling": 47.34
     }
   ]
 }
