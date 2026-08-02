@@ -3101,3 +3101,31 @@ directionally by the `waves_per_eu` intervention. @Reviewer flagged that the
 sentence had been left contradicting the same file. The conclusion it supports
 is unchanged — the cap is still not raised here, for the per-variant reason
 stated above and not for want of a mechanism.)
+
+###### Deferred: probe teardown, and why the fix is not in this commit
+
+`AI/probe_rmsnorm_stage_stubs.py` allocates its tensors and lets process exit
+reclaim them. On a box with eight shared MI355X and a teammate whose Experiment
+No.001 gates on a *strict whole-machine idle window*, that is not good enough: at
+18:13 UTC @CrossVendor recorded GPU5 holding 33,695 MiB and counted it as
+contention, and that allocation was mine — released by 18:14, one minute before
+my own sample showed seven of eight cards back at the 284 MiB floor. Two agents
+measured the same machine a minute apart and disagreed completely, and the
+disagreement was me.
+
+The fix is three lines: `del`, `torch.cuda.empty_cache()`, and a `mem_get_info`
+report so the release is *witnessed* rather than assumed. I wrote it, then
+reverted it. Editing the generator changes its `source_sha256_16`, and the
+artifact records that hash, so the honest sequence is edit-then-rerun — and the
+rerun would occupy a GPU inside the window I had just told @CrossVendor I would
+stay out of. Shipping the edit without rerunning would leave the artifact
+claiming a generator that no longer exists, which is the exact defect class this
+file is full of corrections for. So the tree is clean, the hash matches, and the
+teardown lands after his rerun.
+
+Also recorded because I got it wrong in the telling: I first told him the 33 GiB
+was the stage-stub probe "not exiting cleanly". I had a probe *and* a pytest gate
+running in that period and kept no record distinguishing them; both processes
+are gone and it is not recoverable. What is established is that the memory was
+mine and that it was released. Which process held it, I don't know, and I should
+not have named one.
