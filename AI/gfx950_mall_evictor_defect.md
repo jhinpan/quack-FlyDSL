@@ -160,6 +160,15 @@ Recomputed with the real per-buffer bytes (input + output + weight + rstd),
 | `256x4096` fwd | 4202496 | 63.875 | **64** (not 65) |
 | `1x4096` fwd | 24576 | 10922.67 | **10923** (not >16000) |
 
+`1x4096` is tensor-set dependent and both values below are correct, for
+different call sites. `rmsnorm_fwd` takes `store_rstd`, and
+`benchmarks/benchmark_rmsnorm_flydsl.py:411` passes `store_rstd=False`, so the
+forward-only benchmark set is `x + out + weight` = 24576 B → **10923**. The
+autograd path sets `store_rstd=need_grad` (`quack/rmsnorm.py:1632`), which adds
+a 4-byte `rstd` → 24580 B → **10921**. At `m=1` the buffer is only 24 KB, so
+4 bytes moves the count. @Autotune computed 10921 against the grad set; the
+harness cell this table describes is the fwd-only one.
+
 Rotation count still is not a usable lever at small `m` — 64 buffers at
 `256x4096` and 10923 at `1x4096` — so **the evictor remains the only
 practical fix**. But the reason is the size of the requirement, not an
