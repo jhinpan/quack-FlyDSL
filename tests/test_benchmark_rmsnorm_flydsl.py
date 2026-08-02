@@ -5,6 +5,7 @@ import csv
 import hashlib
 import importlib.util
 import json
+import math
 import re
 import subprocess
 import sys
@@ -901,11 +902,13 @@ def test_the_methodology_string_points_at_evidence_instead_of_asserting_a_number
     # This comment used to gloss the measured per-call over-read as
     # "+52%/+18%/+6%". Those were mine and they were wrong: unprofiled event
     # medians divided by the per_rotation phase's hardware median, mixing
-    # profiler regimes and borrowing another run's baseline. The probe stores
-    # over_read_vs_hardware = +138%/+50%/+22% per-call and +103%/+14%/+5%
-    # per-rotation. A test comment is not machine-readable, but it is read by
-    # the next person deciding what the artifact says, so it gets the same
-    # standard as the string it is testing.
+    # profiler regimes and borrowing another run's baseline. It then quoted the
+    # stored field as +138%/+50%/+22% per-call, which was the right field but
+    # still a single run: with 5 repeats the probe records ranges, and the
+    # launch-bound cell spans +132..157%. See over_read_range in the sidecar.
+    # A test comment is not machine-readable, but it is read by the next person
+    # deciding what the artifact says, so it gets the same standard as the
+    # string it is testing.
     torch = types.SimpleNamespace(
         __version__="2.9.1",
         version=types.SimpleNamespace(hip="7.2", cuda=None),
@@ -1407,27 +1410,224 @@ def test_the_over_read_figures_match_the_field_the_probe_actually_stores():
     sidecar = json.loads(
         (BENCHMARK_PATH.parents[1] / "AI" / "probe_event_timing_calibration.json").read_text()
     )
+    # The first version of this test asserted the six percentages as an
+    # unordered bag -- `f"+{pct}%" in doc` for each, with no idea which shape
+    # or which mode it belonged to. @Reviewer demonstrated the hole by swapping
+    # the first two per-call values to `+50 / +138 / +22`; the test still
+    # passed 1/1. A set membership check cannot see a permutation, and a
+    # permutation here is the whole claim: the numbers are cited to show the
+    # over-read *shrinks as the kernel grows* and that per-rotation is smaller
+    # than per-call at every shape. Both of those are statements about order.
+    #
+    # So the mapping is reconstructed positionally from the docstring's own
+    # table and compared shape-by-shape against the sidecar.
     source = BENCHMARK_PATH.read_text()
     doc = source[source.index("def _time_rotating_calls") :]
     doc = doc[: doc.index('"""', doc.index('"""') + 3)]
 
+    shapes = re.search(r"at ``(\d+x\d+)`` / ``(\d+x\d+)`` / ``(\d+x\d+)``", doc)
+    assert shapes, "the docstring must name the shapes its table is ordered by"
+    order = list(shapes.groups())
+
+    # Ranges, not points. The probe now runs each phase 5 times, and the
+    # repeats showed the previous single figures were quoted to a precision
+    # the measurement does not have: `512x4096` per-call moves 132-157% run to
+    # run, so the `+138%` this test used to pin was one draw from a spread. A
+    # test that pins a single draw to the integer *enforces* that overclaim --
+    # it would fail on an honest re-run and pass only on a lucky one.
+    quoted: dict[tuple[str, str], tuple[int, int]] = {}
+    for mode, label in (("per_call", "per-call"), ("per_rotation", "per-rotation")):
+        row = re.search(rf"^\s*{label}\s+(.+)$", doc, re.MULTILINE)
+        assert row, f"the docstring must carry a {label} row"
+        values = re.findall(r"\+(\d+)\.\.(\d+)%", row.group(1))
+        assert len(values) == len(order), f"{label} row must cover every shape named"
+        for shape, (lo, hi) in zip(order, values):
+            quoted[(shape, mode)] = (int(lo), int(hi))
+
+    measured: dict[tuple[str, str], tuple[float, float]] = {}
     for record in sidecar["measurements"]:
+        shape = f"{record['m']}x{record['n']}"
         for mode in ("per_call", "per_rotation"):
             entry = record[mode]
             # The stored field is self-consistent: both halves come from the
             # same profiled phase of the same process.
             recomputed = entry["event_median_us_profiled"] / entry["hardware_median_us"] - 1.0
             assert recomputed == pytest.approx(entry["over_read_vs_hardware"], rel=1e-9)
-            assert f"+{round(entry['over_read_vs_hardware'] * 100):d}%" in doc
+            # And the range is the range of the repeats, not a wider band
+            # someone widened by hand to make a stale citation fit.
+            spread = [rep["over_read_vs_hardware"] for rep in entry["repeats"]]
+            assert len(spread) >= 2, (shape, mode, "a single run cannot show a range")
+            assert entry["over_read_range"] == [min(spread), max(spread)]
+            assert entry["over_read_vs_hardware"] == spread[0]
+            measured[(shape, mode)] = (min(spread), max(spread))
 
-    # And the ordering the function's design rests on, which is what the
-    # numbers are cited to support: one pair per rotation over-reads less than
-    # one pair per call, at every shape measured.
+    # Every quoted bound is that shape's and that mode's own measured bound,
+    # rounded outward. A swap still fails, because the key is what is asserted.
+    assert set(quoted) == set(measured)
+    for key, (lo, hi) in quoted.items():
+        m_lo, m_hi = measured[key]
+        assert lo == math.floor(m_lo * 100), key
+        assert hi == math.ceil(m_hi * 100), key
+
+    # And the two orderings the figures are cited to support, asserted rather
+    # than left to the reader to spot in the table. Against the *ranges*: the
+    # docstring claims these hold in every repeat, so overlapping bands would
+    # make that sentence false even if the medians were ordered correctly.
+    for shape in order:
+        assert measured[(shape, "per_rotation")][1] < measured[(shape, "per_call")][0], shape
+    kernel_order = sorted(order, key=lambda s: int(s.split("x")[0]) * int(s.split("x")[1]))
+    for mode in ("per_call", "per_rotation"):
+        for larger, smaller in zip(kernel_order, kernel_order[1:]):
+            assert measured[(larger, mode)][0] > measured[(smaller, mode)][1], (
+                mode,
+                larger,
+                smaller,
+            )
+
+
+def test_the_sidecar_names_the_code_and_the_card_that_produced_it():
+    # @Reviewer's last item on this artifact: it was *checkable* but not
+    # *authenticated*. He recomputed from it and refuted a figure I had quoted,
+    # which is exactly what it was written for -- and that worked without the
+    # file pinning a script, a commit, a torch build or a card. So the
+    # arithmetic inside could be verified while "is this a measurement of the
+    # tree in front of me?" stayed open.
+    #
+    # That is the recurring defect one level up: an artifact that cannot say
+    # which code produced it is indistinguishable from one that describes a
+    # different tree, in the same way an assumed field is indistinguishable
+    # from an observed one.
+    sidecar = json.loads(
+        (BENCHMARK_PATH.parents[1] / "AI" / "probe_event_timing_calibration.json").read_text()
+    )
+    env = sidecar["environment"]
+    probe = BENCHMARK_PATH.parents[1] / "AI" / "probe_event_timing_calibration.py"
+
+    # The hash is of the probe as committed. If the script is edited without
+    # re-running it, this fails -- which is the point: the sidecar would then
+    # be describing code that is no longer here.
+    assert env["script_path"] == "AI/probe_event_timing_calibration.py"
+    assert env["script_sha256"] == hashlib.sha256(probe.read_bytes()).hexdigest()
+
+    # A commit is only evidence if the tree was clean, so the flag travels with
+    # it rather than being inferred. `source_dirty` true is honest, not a
+    # failure -- the sidecar is regenerated before the commit that carries it,
+    # so the tree necessarily has uncommitted changes at that moment. What
+    # would be dishonest is a hash with no flag beside it.
+    assert re.fullmatch(r"[0-9a-f]{40}", env["source_commit"])
+    assert isinstance(env["source_dirty"], bool)
+
+    assert env["torch_version"] and env["torch_hip"]
+
+    # The physical card, not an ordinal a visibility mask renumbers -- the same
+    # identity the harness matches KFD nodes on, and the same shape rule.
+    gpu = env["gpu"]
+    assert benchmark._TORCH_UID_TEXT.match(gpu["uuid"]), gpu["uuid"]
+    assert re.fullmatch(r"[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}", gpu["bdf"]), gpu["bdf"]
+    assert gpu["name"] and gpu["arch"]
+
+    # And the reduction from trace to median is auditable rather than trusted.
+    # Every repeat records what the trace contained and what the window
+    # discarded, so a selection that silently dropped dispatches it should not
+    # have is visible instead of looking identical to a clean one.
     for record in sidecar["measurements"]:
-        assert (
-            record["per_rotation"]["over_read_vs_hardware"]
-            < record["per_call"]["over_read_vs_hardware"]
-        )
+        for mode in ("per_call", "per_rotation"):
+            for rep in record[mode]["repeats"]:
+                assert re.fullmatch(r"[0-9a-f]{64}", rep["trace"]["sha256"])
+                assert rep["trace"]["bytes"] > 0
+                census = rep["trace_census"]
+                # The window is a suffix of the selected kernel's dispatches,
+                # and what it dropped is a number rather than an assurance.
+                assert census["selected_kernel_dispatches"] >= census["window_requested"]
+                assert census["leading_dispatches_dropped"] == (
+                    census["selected_kernel_dispatches"] - census["window_requested"]
+                )
+                assert census["window_requested"] == rep["hardware_dispatches"]
+                assert census["window_requested"] == len(rep["hardware_samples_us"])
+                # Every dispatch row is attributed to some kernel name, so a
+                # second kernel appearing cannot hide inside the total.
+                assert sum(census["dispatches_by_kernel"].values()) == census["dispatch_rows"]
+                assert (
+                    census["dispatches_by_kernel"][rep["kernel"]]
+                    == census["selected_kernel_dispatches"]
+                )
+
+
+def test_the_withdrawn_hybrid_figures_are_gone_from_every_artifact_that_quoted_them():
+    # The blocker was fixed where it was reported and left standing where it
+    # was not. `AI/gate_llc_before_after/README.md` carried the same withdrawn
+    # arithmetic -- `+16%` at 512x4096 and `+1%` at 32768x1024, both the
+    # unprofiled numerator over the profiled denominator -- for as long as the
+    # docstring did, and no test read that file. @Reviewer's point: a
+    # correction scoped to the place the blocker pointed at is not a
+    # correction, and the prose artifact is the one a reader reaches for first.
+    sidecar = json.loads(
+        (BENCHMARK_PATH.parents[1] / "AI" / "probe_event_timing_calibration.json").read_text()
+    )
+    readme = (BENCHMARK_PATH.parents[1] / "AI" / "gate_llc_before_after" / "README.md").read_text()
+
+    stored = {
+        f"{r['m']}x{r['n']}": {
+            m: (
+                math.floor(r[m]["over_read_range"][0] * 100),
+                math.ceil(r[m]["over_read_range"][1] * 100),
+            )
+            for m in ("per_call", "per_rotation")
+        }
+        for r in sidecar["measurements"]
+    }
+    # The hybrid a reader could recompute by mixing the two regimes, which is
+    # exactly how both wrong versions were produced. Every repeat, since a
+    # stale figure only has to match *some* run to look plausible.
+    withdrawn = set()
+    for record in sidecar["measurements"]:
+        for mode in ("per_call", "per_rotation"):
+            for rep, denom in zip(record[mode]["repeats"], record["per_rotation"]["repeats"]):
+                hybrid = rep["event_median_us_unprofiled"] / denom["hardware_median_us"] - 1.0
+                withdrawn.add(f"+{round(hybrid * 100):d}%")
+
+    # Minus the ones that collide with a correct figure. A hybrid can round to
+    # the same integer as a legitimate bound -- when this test was written,
+    # `4096x4096`'s hybrid per-rotation value and `32768x1024`'s stored
+    # per-rotation value were both `+5%`, the same four characters, one wrong
+    # and one right. Banning the string outright would forbid the correct
+    # number, so for those the string carries no information and the keyed
+    # check below is what does the work. Worth naming rather than quietly
+    # excluding: a ban list that cannot tell two figures apart is exactly the
+    # conflation this suite keeps finding, and pretending otherwise would make
+    # the test look stronger than it is. The collision set is computed, not
+    # hard-coded, so it tracks whatever the current data happens to collide on.
+    legitimate = {
+        f"+{bound:d}%" for modes in stored.values() for bounds in modes.values() for bound in bounds
+    }
+    withdrawn -= legitimate
+
+    # The paragraph explaining the withdrawal is allowed to name them -- a
+    # correction that cannot say what it is correcting is not much of a record.
+    # Everything before that paragraph is the file's own claim, and the
+    # withdrawn figures must not appear there. The marker is the paragraph's
+    # opening `**`, not the phrase inside it, so the figures it quotes fall on
+    # the explanatory side of the split rather than the asserting side.
+    marker = "**The `+"
+    assert marker in readme, "the withdrawal has to stay on the record"
+    assert "were withdrawn on" in readme[readme.index(marker) :]
+    claim = readme[: readme.index(marker)]
+    for figure in withdrawn:
+        assert figure not in claim, figure
+
+    # And the figures it does quote are the stored ones, keyed by shape --
+    # which is what catches the collision case the ban list cannot. The
+    # paragraph must state each over-read *adjacent to the shape it belongs
+    # to*, so quoting one shape's figure while calling it another fails on the
+    # pairing even when the string is a legitimate figure somewhere in the file.
+    #
+    # Ranges, matching the sidecar's own `over_read_range`. A README that
+    # quotes a single number here would be asserting a reproducibility the
+    # probe now explicitly measures and contradicts.
+    paragraph = readme[readme.index("What the same probe") : readme.index(marker)]
+    for shape in ("512x4096", "32768x1024"):
+        lo, hi = stored[shape]["per_rotation"]
+        assert re.search(rf"\*\*\+{lo}\.\.{hi}%\*\*\s+at\s+`{shape}`", paragraph), shape
 
 
 def _scope_environment(

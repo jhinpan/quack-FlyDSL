@@ -1172,14 +1172,36 @@ def _time_rotating_calls(
     ``AI/probe_event_timing_calibration.py``, sidecar committed beside it.
     Quoting the field the probe defines and stores, ``over_read_vs_hardware``
     -- profiled event median over the hardware median of that same profiled
-    phase -- at ``512x4096`` / ``4096x4096`` / ``32768x1024``:
+    phase -- as the ``over_read_range`` across 5 independent runs of each
+    phase, at ``512x4096`` / ``4096x4096`` / ``32768x1024``:
 
-        per-call      +138% / +50% / +22%
-        per-rotation  +103% / +14% /  +5%
+        per-call      +135..144% / +50..52% / +21..23%
+        per-rotation  +104..127% / +14..16% /  +5..6%
 
     The over-read shrinks as the kernel grows, which is the expected shape for
     a fixed per-launch cost, and per-rotation is the smaller over-read at every
-    shape, which is the ordering this function's design rests on.
+    shape, which is the ordering this function's design rests on. Both hold in
+    every individual repeat, not just on the medians -- the ranges at adjacent
+    shapes do not overlap.
+
+    A third correction, and the reason these are ranges. The probe used to run
+    each phase once, so it could not show its own reproducibility, and this
+    docstring quoted single draws as ``+138% / +50% / +22%``. Adding repeats
+    showed that at ``512x4096`` the figure moves by tens of points run to run:
+    ``+138%`` was one sample of a spread, printed to a precision the
+    measurement does not have. The two larger shapes are stable to about a
+    point, so the error was not uniform -- which is exactly why one run could
+    not reveal it, and why "it reproduced once" is not evidence. Two repeats
+    were not enough either; the first 2-run check put that spread at 3.7pp and
+    only 5 exposed the tail.
+
+    Read the launch-bound row as "order 100% and unstable", not as its
+    endpoints. The *spread itself* varies between sets of five: successive
+    regenerations gave per-call spreads of 25.0pp, 7.7pp and per-rotation
+    21.5pp at that shape. Five runs bound this artifact, not the machine, and
+    the numbers above are exact for the committed sidecar and no more. The two
+    larger shapes are where the tight figures live, and the design claim rests
+    on the ordering, which holds in every repeat at every shape.
 
     Two corrections have now landed here, and the second is the more
     instructive. The original text asserted "178% high on a 6us kernel and 9%

@@ -182,19 +182,71 @@ positions on offer and it asserted both; @Reviewer's blocker 6.
 
 Measured rather than argued, by `AI/probe_event_timing_calibration.py` (sidecar
 committed beside it): 400 `elapsed_time` reads of a single `512x4096`
-`rms_norm` return **106 distinct values** with a typical spacing of 0.04 us,
+`rms_norm` return **110 distinct values** with a typical spacing of 0.04 us,
 not 1 us. There is no microsecond quantum here, so three identical 8.000 us
 medians are not a quantization artifact. They are three medians of 40 samples
 each landing on the same value, which is what a tight distribution does.
 
-What the same probe *does* support: this cell is launch-dominated. Its
-hardware kernel time is 5.7 us and one-pair-per-rotation event timing reads
-6.6 us (+16%), against +1% at `32768x1024`. So the after side is repeatable at
-~8 us, a meaningful fraction of which is not the kernel, and the before side
-(p90-p10 spreads of 24.8-92.2%) was not repeatable at all. Both of those are
-observations. The +24.7% is a ratio between a stable number and an unstable
-one and should still not be quoted as a speedup -- but the reason is the before
-side's instability and this cell's launch overhead, not a timer floor.
+What the same probe *does* support: this cell is launch-dominated. Under
+rocprofv3 the hardware kernel median at `512x4096` is 5.16 us while
+one-pair-per-rotation event timing reads 11.67 us -- an over-read of
+**+104..127%** at `512x4096`, against **+5..6%** at `32768x1024`. (Per-call,
+for scale: +135..144% and +21..23%.) These are ranges over five independent
+runs of each phase; see the withdrawal note below for why they are not single
+numbers, and why the launch-bound one should be read as "order 100% and
+unstable" rather than as its endpoints. So the after side is
+repeatable at ~8 us, a large fraction of which is not the kernel, and the
+before side (p90-p10 spreads of 24.8-92.2%) was not repeatable at all. Both of
+those are observations. The +24.7% is a ratio between a stable number and an
+unstable one and should still not be quoted as a speedup -- but the reason is
+the before side's instability and this cell's launch overhead, not a timer
+floor.
+
+**The `+16%` / `+1%` this paragraph used to quote were withdrawn on
+2026-08-02** and are the same arithmetic error @Reviewer blocked in the
+`_time_rotating_calls` docstring against `43ffc5b`: they divided the
+*unprofiled* event median (6.6001, 40.1601) by the *profiled* phase's hardware
+median (5.68, 39.58), crossing profiler regimes -- one number from a process
+with rocprofv3 attached, the other from a process without it. The sidecar
+stores `over_read_vs_hardware` as the profiled pair, which is the only pairing
+where both halves come from the same process. Fixing the docstring and leaving
+this file was itself an instance of the thing: the wrong figure survived in the
+artifact a reader is more likely to reach for, precisely because the fix was
+scoped to where the blocker pointed rather than to everywhere the number went.
+`tests/test_benchmark_rmsnorm_flydsl.py` now reads this file, so a stale
+recurrence fails rather than waiting for someone to notice.
+
+The direction of the correction is worth stating plainly, because it is not
+the flattering one: the over-read at this shape is not a 16% garnish on a
+kernel measurement, it is larger than the kernel. That does not change the
+conclusion -- launch-dominated is launch-dominated, more so now -- but the
+earlier figure understated it by a factor of six.
+
+**And the replacement was still quoted more precisely than it was measured.**
+The `+103%` / `+5%` that stood here until 2026-08-02 were single runs, because
+the probe ran each phase once and so could not show its own reproducibility.
+Repeats were added on 2026-08-02 to close @Reviewer's point that the sidecar
+was checkable but unauthenticated; they promptly showed the launch-bound cell
+moving by tens of points run to run. Two repeats were not enough to see it --
+the first two-run check put that spread at 3.7pp, and only five exposed the
+tail -- which is a useful thing to know about how many repeats "reproducible"
+needs. The figures above are now ranges over five runs.
+
+**And five runs bound this artifact, not the machine.** Successive
+regenerations gave `512x4096` spreads of 25.0pp, 7.7pp, and 21.5pp: the spread
+*itself* is unstable, so the endpoints above are exact for the committed
+sidecar and are not a property anyone should expect to reproduce. Read that row
+as "order 100% and unstable". The `32768x1024` figures are tight across every
+set, and the ordering the design rests on -- per-rotation below per-call, both
+shrinking as the kernel grows -- holds in every individual repeat.
+
+Note the pattern this file keeps re-instantiating, now three deep: the first
+correction fixed a *remembered* number, the second fixed a *derivation*, and
+the third fixed a *precision*. Each left the next level unexamined. A number
+quoted to three significant figures from one sample is an assumed value
+presented as an observed one, which is the same defect one level down -- and a
+range quoted from one set of five is that defect one level down again, which is
+why the paragraph above says so instead of stopping at the ranges.
 
 `32768x1024` is the cell the investigation started from, and its `-13.8%` is the
 headline: 3109 GB/s was measured against a resident MALL. It is fixed by the
