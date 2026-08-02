@@ -186,6 +186,75 @@ def _rotation_count(
     return max(1, min(max_buffers, by_memory, desired))
 
 
+def _last_level_cache_bytes(torch: Any, properties: Any) -> int:
+    """Bytes that must be turned over to actually miss the last-level cache.
+
+    ``properties.L2_cache_size`` is not that number on a part with a
+    memory-side cache behind L2. On gfx950 torch reports the 4 MiB per-XCD L2
+    while a 256 MiB MALL sits behind it, so a rotation sized against 4 MiB stays
+    resident and the benchmark measures cache-warm while reporting cache-cold.
+
+    Read from the KFD topology by PCI address rather than by node index:
+    ``HIP_VISIBLE_DEVICES`` renumbers torch's ordinals but not KFD's nodes, so
+    index matching reads another card's topology under any masking. On this host
+    the two orders disagree already (torch 0 is rocm-smi GPU 3).
+
+    Ambiguity is refused, not guessed. All matching nodes are collected and a
+    size is returned only when exactly one matches; ``os.listdir`` order is
+    arbitrary, so returning the first of several would make the result depend on
+    directory iteration order. This matters under CPX, where the eight logical
+    devices of one card share a single PCI address.
+
+    Falls back to ``L2_cache_size`` -- the value this harness used before -- on
+    any non-HIP build, missing topology, or ambiguous match.
+    """
+    if not getattr(torch.version, "hip", None):
+        return properties.L2_cache_size
+    domain = getattr(properties, "pci_domain_id", 0)
+    bus = getattr(properties, "pci_bus_id", None)
+    device = getattr(properties, "pci_device_id", None)
+    if bus is None or device is None:
+        return properties.L2_cache_size
+    matches = []
+    try:
+        node_root = "/sys/class/kfd/kfd/topology/nodes"
+        for node in os.listdir(node_root):
+            base = os.path.join(node_root, node)
+            try:
+                with open(os.path.join(base, "properties")) as handle:
+                    props = dict(line.split()[:2] for line in handle if len(line.split()) >= 2)
+            except OSError:
+                continue
+            if int(props.get("gfx_target_version", 0)) == 0:
+                continue  # CPU node
+            location = int(props.get("location_id", 0))
+            if (
+                int(props.get("domain", 0)) != domain
+                or ((location >> 8) & 0xFF) != bus
+                or ((location >> 3) & 0x1F) != device
+            ):
+                continue
+            matches.append(base)
+    except OSError:
+        return properties.L2_cache_size
+    if len(matches) != 1:
+        return properties.L2_cache_size
+    best = 0
+    try:
+        cache_root = os.path.join(matches[0], "caches")
+        for cache in os.listdir(cache_root):
+            try:
+                with open(os.path.join(cache_root, cache, "properties")) as handle:
+                    cprops = dict(line.split()[:2] for line in handle if len(line.split()) >= 2)
+            except OSError:
+                continue
+            if int(cprops.get("level", 0)) >= 2:
+                best = max(best, int(cprops.get("size", 0)) * 1024)  # KFD reports KB
+    except OSError:
+        return properties.L2_cache_size
+    return max(best, properties.L2_cache_size)
+
+
 class _L2Evictor:
     def __init__(self, torch: Any, target_bytes: int):
         self.source = torch.empty(target_bytes, device="cuda", dtype=torch.uint8)
@@ -904,7 +973,10 @@ def _run(
     environment: dict[str, Any],
 ) -> list[dict[str, Any]]:
     properties = torch.cuda.get_device_properties(0)
-    l2_target_bytes = properties.L2_cache_size * args.l2_target_ratio
+    llc_bytes = _last_level_cache_bytes(torch, properties)
+    environment["last_level_cache_bytes"] = llc_bytes
+    environment["torch_l2_cache_size"] = properties.L2_cache_size
+    l2_target_bytes = llc_bytes * args.l2_target_ratio
     peak_bw = _measure_achievable_bandwidth(
         torch,
         probe_bytes=args.copy_mib * 1024**2,
@@ -957,7 +1029,29 @@ def _run(
                 rotation_buffers=rotation_buffers,
             )
             rotation_working_set_bytes = rotation_buffers * byte_count
-            use_evictor = rotation_working_set_bytes < l2_target_bytes
+            # Evict unless the rotation alone already exceeds the last-level
+            # cache. The comparison is against the LLC itself, not against
+            # l2_target_bytes (= ratio * LLC): a set larger than the cache is
+            # self-evicting, and nothing between LLC and ratio*LLC needs the
+            # evictor to be switched off. Comparing against the target left the
+            # evictor off for every set in that band.
+            #
+            # The margin is not decoration. A set that merely *equals* or
+            # slightly exceeds capacity is not reliably self-evicting: the
+            # archived fine-boundary sweep in AI/ walks 256.000-256.008 MiB and
+            # every point still reads above the HBM reference, so an exact-fit
+            # or few-KiB-over set measures MALL-warm. A bare `> llc_bytes` test
+            # would leave the evictor off for exactly those cells -- including
+            # 32768x1024 forward at 256.004 MiB, which is the cell this whole
+            # investigation started from. Requiring a clear multiple keeps the
+            # decision away from the boundary the probe showed to be soft.
+            #
+            # The decay from 256 to 288 MiB is gradual rather than a cliff, so
+            # no single crossing point is defensible; 2x is a margin, not a
+            # measured threshold, and is deliberately conservative -- turning
+            # the evictor on when it was not needed costs time, leaving it off
+            # when it was needed costs correctness.
+            use_evictor = rotation_working_set_bytes <= 2 * llc_bytes
             samples_us = _time_rotating_calls(
                 torch,
                 prepared,
