@@ -1611,6 +1611,75 @@ def test_the_backward_zeroes_no_parameter_accumulator(with_bias):
     _assert_grad_close(weight.grad, weight_ref.grad)
 
 
+@pytest.mark.parametrize("pitch_pad", [1, 2, 3, 4, 8, 512])
+def test_a_row_padded_view_is_not_copied_and_not_wrong(pitch_pad):
+    """Rows already contiguous must reach the kernel without a repack.
+
+    Every operand is addressed through a row-scoped buffer descriptor sized to
+    ``n``, so a row-padded view already satisfies what the kernels need. This
+    asserts both halves: no copy is taken (the kernel reads the caller's own
+    storage), and the answer is bit-identical to the packed one. Asserting only
+    the second half would pass with the copy restored, which is the version of
+    this test that would not have caught the defect.
+    """
+    torch.manual_seed(0)
+    n, m = 1024, 64
+    full = torch.randn((m, n + pitch_pad), device="cuda", dtype=torch.bfloat16)
+    view = full[:, :n]
+    assert not view.is_contiguous() and view.stride(-1) == 1
+    weight = torch.randn(n, device="cuda", dtype=torch.bfloat16)
+
+    assert rmsnorm_flydsl_impl._packed_rows(view).data_ptr() == view.data_ptr()
+    assert torch.equal(rmsnorm(view, weight), rmsnorm(view.contiguous(), weight))
+
+
+def test_the_copy_still_happens_where_upstream_takes_it():
+    """The predicate must match quack.rmsnorm's, and cover the wrong-answer case.
+
+    A transposed view has ``stride(-1) != 1``; driving the kernel with one
+    directly gives a wrong result, so this is what the copy is for. The
+    predicate is read out of ``quack/rmsnorm.py`` rather than restated, so the
+    two backends cannot drift onto different inputs without this failing.
+    """
+    source = (Path(__file__).resolve().parents[1] / "quack" / "rmsnorm.py").read_text()
+    upstream = next(
+        node
+        for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef) and node.name == "_ensure_contiguous"
+    )
+    ours = ast.parse(inspect.getsource(rmsnorm_flydsl_impl._packed_rows)).body[0]
+
+    def predicates(node):
+        """Branch conditions, with the operand renamed so only the test compares.
+
+        The two functions name their argument differently (``t`` against
+        ``tensor``); comparing the unparsed source without this would compare
+        spellings, and would fail on a rename that changes nothing.
+        """
+        operand = node.args.args[0].arg
+        renamed = ast.parse(ast.unparse(node))
+        for sub in ast.walk(renamed):
+            if isinstance(sub, ast.Name) and sub.id == operand:
+                sub.id = "_operand"
+        return {
+            ast.unparse(sub.test)
+            for sub in ast.walk(renamed)
+            if isinstance(sub, (ast.If, ast.IfExp))
+        }
+
+    theirs = predicates(upstream)
+    assert theirs, "quack.rmsnorm._ensure_contiguous no longer branches"
+    assert theirs.issubset(predicates(ours)), (theirs, predicates(ours))
+
+    torch.manual_seed(0)
+    n, m = 512, 64
+    transposed = torch.randn((n, m), device="cuda", dtype=torch.bfloat16).t()
+    assert transposed.stride(-1) != 1
+    weight = torch.randn(n, device="cuda", dtype=torch.bfloat16)
+    assert rmsnorm_flydsl_impl._packed_rows(transposed).data_ptr() != transposed.data_ptr()
+    _assert_close(rmsnorm(transposed, weight), _reference(transposed, weight, 1e-6))
+
+
 def test_unsupported_architectures_are_named(monkeypatch):
     _clear_caches()
     monkeypatch.setattr(rmsnorm_flydsl_impl, "_normalize_arch", lambda _: "gfx90a")

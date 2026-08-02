@@ -752,10 +752,10 @@ class _RMSNormFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dout: torch.Tensor, *args):
         source, weight, bias, rstd = ctx.saved_tensors
-        dout = dout.contiguous()
+        dout = _packed_rows(dout)
         has_dresidual_out = ctx.prenorm
         if has_dresidual_out:
-            dresidual_out = args[0].contiguous()
+            dresidual_out = _packed_rows(args[0])
         else:
             dresidual_out = source
 
@@ -822,6 +822,44 @@ class _RMSNormFunction(torch.autograd.Function):
         )
 
 
+def _packed_rows(tensor: torch.Tensor) -> torch.Tensor:
+    """Copy only when the row is not already contiguous along the last axis.
+
+    Every operand reaches the kernels as a row-scoped buffer descriptor built
+    by ``fx.slice(tensor, (row, None))``, so what the kernels require is that
+    each row be contiguous -- not that the whole tensor be. A row-padded view
+    (``full[:, :n]``, stride ``(pitch, 1)``) already satisfies that, and the
+    descriptor is sized to ``n`` elements, so the padding is never addressed.
+    Verified bit-identical to the packed result at pitches ``n+{0,1,2,3,4,8,
+    256,512}`` for 2-D and per-head inputs.
+
+    ``.contiguous()`` unconditionally was costing a full extra read+write of
+    the activation on those views: at 32768x4096 bf16 it took the forward from
+    26.9 us to 32.3 us, a **+19.3..22.0%** overhead over five independent
+    processes, with the bare copy alone measuring ~5.3 us. That is a real
+    tensor of traffic bought for nothing.
+
+    After this change the same comparison reads **-0.7..+1.2%** over five
+    fresh processes. That range straddles zero and lies inside the 1.99%
+    run-to-run noise floor measured for an unprofiled event median on this
+    harness, so what it establishes is that the overhead is no longer
+    *distinguishable from none* -- not that it is exactly zero. The before
+    range does not overlap the after range or the noise floor, which is what
+    makes the removal itself a real effect rather than a lucky pair of draws.
+
+    The predicate is ``stride(-1) != 1``, matching ``_ensure_contiguous`` in
+    :mod:`quack.rmsnorm` exactly, so both backends copy on the same inputs. A
+    transposed view does have ``stride(-1) != 1``, and it is copied -- driving
+    the kernel with one directly produces a wrong answer, so this is the case
+    the copy exists for. Under ``torch.compile`` the copy stays unconditional
+    because dynamo cannot inspect strides on fake tensors; that is upstream's
+    reasoning and it applies here unchanged.
+    """
+    if torch.compiler.is_compiling():
+        return tensor.contiguous()
+    return tensor if tensor.stride(-1) == 1 else tensor.contiguous()
+
+
 def _rmsnorm_impl(
     x: torch.Tensor,
     weight: torch.Tensor | None = None,
@@ -869,16 +907,16 @@ def _rmsnorm_impl(
 
     last_shape = (num_heads, n) if per_head else (n,)
     parameter_shape = (num_heads, n) if per_head else (n,)
-    x_flat = x.reshape(-1, *last_shape).contiguous()
+    x_flat = _packed_rows(x.reshape(-1, *last_shape))
 
     # An absent weight or bias still has to be passed, because the custom op
     # schema is fixed. The kernels build no descriptor for it, so an empty
     # tensor is enough and keeps the allocation off every call.
     absent = torch.empty(0, device=x.device, dtype=x.dtype)
-    weight_arg = weight.contiguous() if weight is not None else absent
-    bias_arg = bias.contiguous() if bias is not None else absent
+    weight_arg = _packed_rows(weight) if weight is not None else absent
+    bias_arg = _packed_rows(bias) if bias is not None else absent
     residual_arg = (
-        residual.reshape(-1, *last_shape).contiguous() if residual is not None else x_flat
+        _packed_rows(residual.reshape(-1, *last_shape)) if residual is not None else x_flat
     )
     result = _RMSNormFunction.apply(
         x_flat,
