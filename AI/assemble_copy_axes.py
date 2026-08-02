@@ -57,6 +57,7 @@ Writes AI/data/copy_placement_draws/copy_axes_dev5.json.
 """
 
 import hashlib
+import itertools
 import json
 import re
 import statistics
@@ -398,7 +399,7 @@ def _band(draws):
     }
 
 
-def _estimator_repeatability(runs, size, band_w):
+def _estimator_repeatability(runs, size):
     """How far does the PUBLISHED estimator move when you repeat it?
 
     The published figure per draw is min-of-seven-rounds. Its uncertainty is not
@@ -418,7 +419,22 @@ def _estimator_repeatability(runs, size, band_w):
     cells whose ranges run 0.038% to 3.76%, a hundredfold spread. @Autotune
     reached the same correction independently from the quartiles. The per-cell
     count is what carries the claim now; a single verdict flag does not.
+
+    The comparison is done in ABSOLUTE TB/s. A second correction from @Reviewer
+    (a7fe31c8), and the reason matters more than the one cell it moves. The band
+    is an absolute interval, 0.010 TB/s wide, fixed on the display axis at
+    [4.885, 4.895). An earlier version compared each cell's range *as a percent
+    of that cell's own mean* against the band's width *as a percent of 4.885*.
+    Those are two different denominators, so the effective threshold scaled with
+    the cell: a cell running at 5.336 TB/s was implicitly allowed 0.0109 TB/s of
+    movement rather than 0.010. It passed on 0.0104. The published count went
+    10/20 instead of 9/20 -- a small error carrying a large one, because the
+    quantity being tested was no longer the quantity the band is defined in. The
+    relative range is still reported, as a description of each cell; it is not
+    what the threshold is applied to.
     """
+    lo, hi = BAND
+    band_abs = hi - lo
     cells = defaultdict(list)
     for prefix, rs in runs.items():
         for r in rs:
@@ -432,34 +448,49 @@ def _estimator_repeatability(runs, size, band_w):
             "n_cells_with_repeats": 0,
             "note": "no cell has repeated batches; estimator uncertainty is not measurable here",
         }
-    ranges = sorted((max(v) / min(v) - 1) * 100.0 for v in reps.values())
+    ranges = sorted(max(v) - min(v) for v in reps.values())
+    rel = sorted((max(v) / min(v) - 1) * 100.0 for v in reps.values())
     q = statistics.quantiles(ranges, n=4) if len(ranges) >= 4 else [ranges[0]] * 3
-    inside = sum(1 for r in ranges if r < band_w)
+    qr = statistics.quantiles(rel, n=4) if len(rel) >= 4 else [rel[0]] * 3
+    inside = sum(1 for r in ranges if r < band_abs)
     return {
         "estimator": "min of seven timing rounds, as published",
-        "statistic": "observed range across repeats of the same cell, distribution-free",
+        "statistic": (
+            "observed range across repeats of the same cell, distribution-free, "
+            "in absolute TB/s -- the units the band is defined in"
+        ),
         "n_cells_with_repeats": len(ranges),
         "replicates_per_cell": sorted({len(v) for v in reps.values()}),
-        "range_pct_q1_median_q3": [round(x, 4) for x in q],
-        "range_in_band_widths_q1_median_q3": [round(x / band_w, 2) for x in q],
-        "range_pct_min_max": [round(ranges[0], 4), round(ranges[-1], 4)],
-        "band_width_pct": round(band_w, 4),
+        "band_width_TBps": round(band_abs, 6),
+        "range_TBps_q1_median_q3": [round(x, 6) for x in q],
+        "range_in_band_widths_q1_median_q3": [round(x / band_abs, 2) for x in q],
+        "range_TBps_min_max": [round(ranges[0], 6), round(ranges[-1], 6)],
         "cells_whose_range_fits_inside_band": inside,
         "verdict": (
-            f"{inside} of {len(ranges)} cells repeat to within the band. "
+            f"{inside} of {len(ranges)} cells repeat to within the band's "
+            f"{band_abs:.3f} TB/s. "
             + (
                 "The cells are heterogeneous -- the interquartile range crosses the band "
                 "in both directions -- so neither 'resolves' nor 'does not resolve' is "
                 "true of this size as a whole. No single flag is published for it."
-                if q[0] < band_w < q[2]
+                if q[0] < band_abs < q[2]
                 else "The quartiles fall entirely on one side of the band, so the size "
                 "has a consistent verdict: "
                 + (
                     "the estimator repeats to within the band at this size."
-                    if q[2] < band_w
+                    if q[2] < band_abs
                     else "the estimator does not repeat to within the band at this size."
                 )
             )
+        ),
+        # Descriptive only. Kept because a cell's range relative to its own level
+        # is the natural way to read how noisy that cell is; it is deliberately
+        # NOT compared against a relative band width, which is the defect above.
+        "relative_range_pct_q1_median_q3": [round(x, 4) for x in qr],
+        "relative_range_is_descriptive_not_thresholded": (
+            "percent-of-own-mean cannot be tested against percent-of-4.885: cells "
+            "sit between 4.74 and 5.60 TB/s, so the two denominators differ by up "
+            "to 15% and the implied threshold would move with the cell"
         ),
         "what_is_held_fixed": (
             "allocation prefix and allocation ordinal, hence relative placement; the "
@@ -509,7 +540,7 @@ def _band_reachability(runs, size):
     floor = axis["within_draw_instrument_floor"]
     fl = floor.get("round_spread_pct_median")
     gaps = sorted((means[i + 1] / means[i] - 1) * 100.0 for i in range(len(means) - 1))
-    rep = _estimator_repeatability(runs, size, band_w)
+    rep = _estimator_repeatability(runs, size)
     return {
         "n_slot_means": len(means),
         "slot_mean_span_pct": round(span, 2),
@@ -581,11 +612,14 @@ def _band_reachability(runs, size):
                     f"{rep['range_in_band_widths_q1_median_q3'][1]}x / "
                     f"{rep['range_in_band_widths_q1_median_q3'][2]}x the band. "
                     + rep["verdict"]
-                    + " Two earlier versions of this sentence were wrong in different "
+                    + " Three earlier versions of this sentence were wrong in different "
                     "ways: the first used the seven-round range, which is a property of "
                     "the sample the min is taken over rather than of the min; the second "
                     "used 2sd of the per-cell RSD, which is a parametric half-width on "
-                    "n=4 and collapsed heterogeneous cells to one flag."
+                    "n=4 and collapsed heterogeneous cells to one flag; the third "
+                    "compared each cell's range as a percent of its own mean against the "
+                    "band's width as a percent of 4.885, two different denominators, "
+                    "which widened the threshold for every cell above the band."
                 )
             )
         ),
@@ -669,21 +703,34 @@ def _size_discrimination(runs):
 GUARD_FALSE_NEGATIVE_CEILING_PCT = 12.0
 
 
-def _guard_false_negative_rate(measured, dp=2, hi=20):
+def _guard_false_negative_rate(measured, cited, dp=2, hi=20):
     """How often a value the prose did not mean would still be accepted.
 
     Computed on the payload actually being written, because it is a property of
     that payload and not of the guard. The docstring version of this number was
     stale within one commit of being written -- see `_assert_prose_is_derived`.
+
+    Computed over the FULL accept-set. @Reviewer, a7fe31c8: an earlier version
+    took only `measured` and ignored `cited`, while the accept rule this measures
+    is `tok in cited or tok in measured`. So the guard's own self-assessment
+    excluded part of its own accept-set -- and specifically the hand-maintained
+    part, the one that grows when somebody wants a number to pass. A permissive-
+    ness metric blind to exactly the mechanism by which permissiveness is
+    granted. Five allowlist strings fall on the 2-dp grid without being covered
+    by any computed field, so the reported rate was low by 0.25 pp. Small; the
+    direction is what matters, since every future allowlist entry would have been
+    free.
     """
     grid = [f"{i / 10**dp:.{dp}f}" for i in range(hi * 10**dp + 1)]
-    hits = sum(1 for g in grid if g in measured)
+    accept = set(measured) | set(cited)
+    hits = sum(1 for g in grid if g in accept)
+    from_cited = sum(1 for g in grid if g in cited and g not in measured)
     rate = hits / len(grid) * 100.0
     if rate > GUARD_FALSE_NEGATIVE_CEILING_PCT:
         raise SystemExit(
             f"the prose guard's own false-negative rate is now {rate:.3f}%, above the "
             f"{GUARD_FALSE_NEGATIVE_CEILING_PCT}% ceiling. The accept-set has grown "
-            f"to {len(measured)} strings and covers {hits} of {len(grid)} plausible "
+            f"to {len(accept)} strings and covers {hits} of {len(grid)} plausible "
             f"{dp}-dp values, so 'this decimal matches a computed field' no longer "
             "carries much information. Narrow the accept-set (fewer rendered "
             "precisions), split the payload, or check prose against the specific "
@@ -692,10 +739,13 @@ def _guard_false_negative_rate(measured, dp=2, hi=20):
             "check exists to interrupt."
         )
     return {
-        "accept_set_size": len(measured),
+        "accept_set_size": len(accept),
+        "accept_set_measured": len(set(measured)),
+        "accept_set_cited": len(set(cited)),
         "grid": f"{dp}-dp values in [0, {hi}]",
         "grid_size": len(grid),
         "accepted_without_being_meant": hits,
+        "of_which_only_the_citation_allowlist_explains": from_cited,
         "false_negative_rate_pct": round(rate, 3),
         "ceiling_pct": GUARD_FALSE_NEGATIVE_CEILING_PCT,
         "headroom_pct": round(GUARD_FALSE_NEGATIVE_CEILING_PCT - rate, 3),
@@ -705,7 +755,10 @@ def _guard_false_negative_rate(measured, dp=2, hi=20):
             "at write time rather than quoted from a docstring, and the assembler "
             "now refuses to write once it passes the ceiling. Every increase so far "
             "came from an improvement to the artifact, which is why silent decay was "
-            "the likely outcome without a hard stop."
+            "the likely outcome without a hard stop. It is computed over the citation "
+            "allowlist as well as the measured values, because both are accepted; "
+            "counting only the measured half understated the guard's permissiveness "
+            "in the one direction a reviewer cannot see from the outside."
         ),
     }
 
@@ -747,7 +800,10 @@ def _assert_prose_is_derived(payload):
     The consequence is that this rate is a moving property of each payload, and
     that is why it is computed at write time now. It remains a tripwire, not a
     proof: a coincidental match is possible, and on the current payload roughly
-    one 2-dp value in twelve would pass unexplained.
+    one 2-dp value in ten would pass unexplained.
+
+    `cited` is part of the accept-set and is now counted as such -- see
+    `_guard_false_negative_rate`. Adding an entry here is not free.
     """
     cited = {
         "4.89": "historical copy cell, notes:869",
@@ -817,7 +873,119 @@ def _assert_prose_is_derived(payload):
             "turned out to measure the wrong axis entirely. Interpolate from a "
             "computed field, or add the value to `cited` with its provenance."
         )
-    return _guard_false_negative_rate(measured)
+    return _guard_false_negative_rate(measured, cited)
+
+
+def _updown_identity(d, lvl):
+    """Is level a deterministic function of collection position, symmetrically read?
+
+    Worth measuring rather than asserting: if it is, the up/down confound is an
+    identity and not a tendency, and no statistic computed on those passes can
+    separate a level effect from a midpoint-symmetric function of time. If a
+    future collection breaks it, that shows up here instead of silently
+    weakening the caveat this field exists to state.
+
+    Tested as functional dependence, not as a formula. The first version
+    hard-coded `level == min(seq, N-1-seq)`, which is the identity only when the
+    passes hold exactly one row per level. Adding a second repeat per level
+    doubled the position axis and that formula went to 86 exceptions out of 88 --
+    while the confound itself was untouched, since level is still constant within
+    every distance-from-nearest-end class. The failure direction is the part
+    worth keeping: a guard against overclaiming reported that the confound was
+    *weaker* than stated, i.e. it failed toward flattering the claim it exists to
+    restrain. A check that can only be trusted while the collection layout stays
+    fixed is a check that will mislead exactly when the layout changes. So the
+    property is tested directly: group the positions by distance from the nearest
+    end and ask whether any group holds more than one level.
+    """
+    seen = {}
+    for r in d["rows"]:
+        if r.get("direction") in ("up", "down"):
+            seen.setdefault(r["seq"], lvl(r))
+    if not seen:
+        return {"checked": False}
+    order = sorted(seen)
+    n = len(order)
+    classes = defaultdict(set)
+    for i, s in enumerate(order):
+        classes[min(i, n - 1 - i)].add(seen[s])
+    ambiguous = {k: sorted(v) for k, v in classes.items() if len(v) > 1}
+    holds = not ambiguous
+    return {
+        "checked": True,
+        "n_positions": n,
+        "property": (
+            "level is constant within every class of positions equidistant from the "
+            "nearest end of the up/down sequence, i.e. level is a function of "
+            "min(position, N-1-position)"
+        ),
+        "n_symmetric_classes": len(classes),
+        "classes_holding_more_than_one_level": ambiguous,
+        "holds_exactly": holds,
+        "consequence": (
+            "level is a deterministic function of collection position across the up and "
+            "down passes, so those passes cannot distinguish a level effect from any "
+            "midpoint-symmetric function of time -- including a single transient at the "
+            "turnaround. Only the interleaved pass can."
+            if holds
+            else "level is not fully determined by symmetric position here, so the up/down "
+            "passes carry some independent information about level. How much is not "
+            "quantified, and no claim rests on it."
+        ),
+    }
+
+
+def _interleaved_control(d, steps_for, lvl):
+    """The pass that actually breaks level-vs-collection-time.
+
+    Ascending-then-descending is not enough. With reps adjacent it makes level an
+    exact symmetric function of position, `level == min(seq, N-1-seq)`, so ANY
+    unimodal transient centred on the turnaround reproduces the staircase in both
+    directions at once. @Reviewer, 5c2e0083, and the objection is structural: no
+    amount of agreement between the two passes rules it out, because the two
+    passes are mirror images of the same confound.
+
+    The interleaved pass visits every (level, repeat) in one seeded shuffle. What
+    is reported here is not "the steps agree" -- it is the measured association
+    between level and position in that pass. If the shuffle worked, level is
+    near-uncorrelated with position under both a monotone reading and a symmetric
+    one, and any step found cannot be a function of when the row was collected.
+    """
+    rows = [r for r in d["rows"] if r.get("direction") == "interleaved"]
+    if not rows:
+        return {
+            "present": False,
+            "why_it_matters": (
+                "without it, level is a symmetric function of collection position and a "
+                "midpoint transient satisfies the up/down test. The step locations are "
+                "reported as surviving time reversal only, which is weaker."
+            ),
+            "how": "python AI/probe_copy_size_draws.py OUT --sweep-steps",
+        }
+    rows = sorted(rows, key=lambda r: r["seq"])
+    pos = list(range(len(rows)))
+    lv = [lvl(r) for r in rows]
+    mid = [min(p, len(pos) - 1 - p) for p in pos]
+    steps = steps_for(rows)
+    return {
+        "present": True,
+        "n_rows": len(rows),
+        "shuffle_seed": d.get("shuffle_seed"),
+        "steps_interleaved": steps,
+        "corr_level_vs_position": round(statistics.correlation(pos, lv), 4),
+        "corr_level_vs_distance_from_midpoint": round(statistics.correlation(mid, lv), 4),
+        "max_consecutive_same_level": max(len(list(g)) for _, g in itertools.groupby(lv)),
+        "what_this_establishes": (
+            "level is not recoverable from collection position in this pass, under "
+            "either a monotone or a midpoint-symmetric reading, so a step found here "
+            "is not a function of when its row was collected. This is the control the "
+            "up/down pass could not provide."
+        ),
+        "what_it_still_does_not_establish": (
+            "why the level matters. The mechanism behind a step is not addressed by any "
+            "ordering control."
+        ),
+    }
 
 
 def _staircase(path=REPO / "AI/data/copy_placement_draws/raw_dev5/_peak_sweep.json"):
@@ -915,6 +1083,13 @@ def _staircase(path=REPO / "AI/data/copy_placement_draws/raw_dev5/_peak_sweep.js
             "steps_descending": down,
             "steps_in_both_directions": both,
             "steps_in_one_direction_only": sorted(set(up) ^ set(down)),
+            "what_this_does_NOT_establish": (
+                "up-then-down leaves level a symmetric function of collection position, "
+                "so a transient centred on the turnaround satisfies both passes at once. "
+                "@Reviewer, 5c2e0083. Agreement between the two directions is therefore "
+                "necessary and not sufficient; see interleaved_control."
+            ),
+            "confound_is_exact_not_approximate": _updown_identity(d, lvl),
             "note": (
                 "each row is still its own fresh process; only the order of processes "
                 "differs. Steps appearing in one direction only are not established -- "
@@ -922,6 +1097,7 @@ def _staircase(path=REPO / "AI/data/copy_placement_draws/raw_dev5/_peak_sweep.js
                 "monotonic first design could not distinguish from a level effect."
             ),
         }
+    direction_control["interleaved_control"] = _interleaved_control(d, steps_for, lvl)
     return {
         "collected": True,
         "reps_per_level": d["reps_per_level"],

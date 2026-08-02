@@ -145,8 +145,8 @@
     "entries": [
       {
         "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/_peak_sweep.json",
-        "sha256": "279eeed537f3b77177b1765e14a25331dc14fddf6c209c4d7c80d48a6473127a",
-        "bytes": 87935
+        "sha256": "e220f0d49e045299f219c4a816211725662ea2ed953c259fc08d31ff4c4d5b64",
+        "bytes": 132771
       },
       {
         "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak0_1.json",
@@ -230,18 +230,18 @@
       },
       {
         "path": "AI/probe_copy_size_draws.py",
-        "sha256": "50ef692794122ae4dddcf934ca043d48f6d0d269fb3fa6da1458a415f01a9bc2",
-        "bytes": 17962
+        "sha256": "a9882bd4dfe510a437d8fc7138ce0b792c1d12e842b23e3930072575704379f9",
+        "bytes": 20718
       },
       {
         "path": "AI/assemble_copy_axes.py",
-        "sha256": "018cbe2afd4866602a9aec52867d8d7226e84244e66ad6bcc1a3f4c40d595b53",
-        "bytes": 55939
+        "sha256": "17df133b5ebbdf1524d10abc84cae43d9a3861d3003afa415cb2ee6cd8877609",
+        "bytes": 65615
       }
     ],
     "what_this_proves": "the assembler read exactly these bytes. It does not prove they came from a GPU, and a manifest cannot: it is a binding between artifact and raw runs, not an attestation."
   },
-  "commit": "001f2c5",
+  "commit": "df13d9e",
   "worktree_dirty": true,
   "historical_table": {
     "source": "AI/flydsl_rmsnorm_notes.md:869",
@@ -894,33 +894,39 @@
       },
       "band_width_vs_single_draw_noise": {
         "estimator": "min of seven timing rounds, as published",
-        "statistic": "observed range across repeats of the same cell, distribution-free",
+        "statistic": "observed range across repeats of the same cell, distribution-free, in absolute TB/s -- the units the band is defined in",
         "n_cells_with_repeats": 20,
         "replicates_per_cell": [
           4
         ],
-        "range_pct_q1_median_q3": [
+        "band_width_TBps": 0.01,
+        "range_TBps_q1_median_q3": [
+          0.006889,
+          0.010899,
+          0.020762
+        ],
+        "range_in_band_widths_q1_median_q3": [
+          0.69,
+          1.09,
+          2.08
+        ],
+        "range_TBps_min_max": [
+          0.002122,
+          0.193116
+        ],
+        "cells_whose_range_fits_inside_band": 9,
+        "verdict": "9 of 20 cells repeat to within the band's 0.010 TB/s. The cells are heterogeneous -- the interquartile range crosses the band in both directions -- so neither 'resolves' nor 'does not resolve' is true of this size as a whole. No single flag is published for it.",
+        "relative_range_pct_q1_median_q3": [
           0.1269,
           0.2077,
           0.4386
         ],
-        "range_in_band_widths_q1_median_q3": [
-          0.62,
-          1.01,
-          2.14
-        ],
-        "range_pct_min_max": [
-          0.0379,
-          3.7649
-        ],
-        "band_width_pct": 0.2047,
-        "cells_whose_range_fits_inside_band": 10,
-        "verdict": "10 of 20 cells repeat to within the band. The cells are heterogeneous -- the interquartile range crosses the band in both directions -- so neither 'resolves' nor 'does not resolve' is true of this size as a whole. No single flag is published for it.",
+        "relative_range_is_descriptive_not_thresholded": "percent-of-own-mean cannot be tested against percent-of-4.885: cells sit between 4.74 and 5.60 TB/s, so the two denominators differ by up to 15% and the implied threshold would move with the cell",
         "what_is_held_fixed": "allocation prefix and allocation ordinal, hence relative placement; the process, its address-space layout and the clock state are not",
         "what_is_not_claimed": "no interval is constructed. A t or z half-width on n=4 would assume iid normality within a cell, which four fresh processes on a shared machine do not establish, and at df=3 the verdict would be sensitive to it."
       },
       "why_the_round_range_is_not_this": "the seven-round range (median 0.612% at this size) describes the sample the estimator minimises over, not the estimator. It is reported in `within_draw_instrument_floor` and is NOT used for the resolvability flag above.",
-      "conclusion": "the 20 slot means span 18.20% and the band is 0.2047% wide. Their spacing is clustered rather than even: 8 of 19 adjacent gaps are narrower than the band and the largest is 20.0x it. Zero draws in band is therefore not evidence against the historical value -- with means bunched this way, a narrow window can sit in a sparse stretch and be missed by every draw. No probability is claimed for that; an earlier version asserted one from a uniform model that this same spacing refutes. The defensible statement is symmetric: at this size and sample size the data neither authenticate nor exclude a value in the band. On whether one draw could resolve the band at all: repeating the published min-of-seven estimator at a fixed (prefix, ordinal) cell across 4 processes gives observed ranges with quartiles 0.62x / 1.01x / 2.14x the band. 10 of 20 cells repeat to within the band. The cells are heterogeneous -- the interquartile range crosses the band in both directions -- so neither 'resolves' nor 'does not resolve' is true of this size as a whole. No single flag is published for it. Two earlier versions of this sentence were wrong in different ways: the first used the seven-round range, which is a property of the sample the min is taken over rather than of the min; the second used 2sd of the per-cell RSD, which is a parametric half-width on n=4 and collapsed heterogeneous cells to one flag."
+      "conclusion": "the 20 slot means span 18.20% and the band is 0.2047% wide. Their spacing is clustered rather than even: 8 of 19 adjacent gaps are narrower than the band and the largest is 20.0x it. Zero draws in band is therefore not evidence against the historical value -- with means bunched this way, a narrow window can sit in a sparse stretch and be missed by every draw. No probability is claimed for that; an earlier version asserted one from a uniform model that this same spacing refutes. The defensible statement is symmetric: at this size and sample size the data neither authenticate nor exclude a value in the band. On whether one draw could resolve the band at all: repeating the published min-of-seven estimator at a fixed (prefix, ordinal) cell across 4 processes gives observed ranges with quartiles 0.69x / 1.09x / 2.08x the band. 9 of 20 cells repeat to within the band's 0.010 TB/s. The cells are heterogeneous -- the interquartile range crosses the band in both directions -- so neither 'resolves' nor 'does not resolve' is true of this size as a whole. No single flag is published for it. Three earlier versions of this sentence were wrong in different ways: the first used the seven-round range, which is a property of the sample the min is taken over rather than of the min; the second used 2sd of the per-cell RSD, which is a parametric half-width on n=4 and collapsed heterogeneous cells to one flag; the third compared each cell's range as a percent of its own mean against the band's width as a percent of 4.885, two different denominators, which widened the threshold for every cell above the band."
     },
     "2048MiB": {
       "n_slot_means": 20,
@@ -961,33 +967,39 @@
       },
       "band_width_vs_single_draw_noise": {
         "estimator": "min of seven timing rounds, as published",
-        "statistic": "observed range across repeats of the same cell, distribution-free",
+        "statistic": "observed range across repeats of the same cell, distribution-free, in absolute TB/s -- the units the band is defined in",
         "n_cells_with_repeats": 20,
         "replicates_per_cell": [
           4
         ],
-        "range_pct_q1_median_q3": [
+        "band_width_TBps": 0.01,
+        "range_TBps_q1_median_q3": [
+          0.018151,
+          0.024827,
+          0.031935
+        ],
+        "range_in_band_widths_q1_median_q3": [
+          1.82,
+          2.48,
+          3.19
+        ],
+        "range_TBps_min_max": [
+          0.005513,
+          0.04838
+        ],
+        "cells_whose_range_fits_inside_band": 1,
+        "verdict": "1 of 20 cells repeat to within the band's 0.010 TB/s. The quartiles fall entirely on one side of the band, so the size has a consistent verdict: the estimator does not repeat to within the band at this size.",
+        "relative_range_pct_q1_median_q3": [
           0.3559,
           0.4825,
           0.6402
         ],
-        "range_in_band_widths_q1_median_q3": [
-          1.74,
-          2.36,
-          3.13
-        ],
-        "range_pct_min_max": [
-          0.1085,
-          0.964
-        ],
-        "band_width_pct": 0.2047,
-        "cells_whose_range_fits_inside_band": 1,
-        "verdict": "1 of 20 cells repeat to within the band. The quartiles fall entirely on one side of the band, so the size has a consistent verdict: the estimator does not repeat to within the band at this size.",
+        "relative_range_is_descriptive_not_thresholded": "percent-of-own-mean cannot be tested against percent-of-4.885: cells sit between 4.74 and 5.60 TB/s, so the two denominators differ by up to 15% and the implied threshold would move with the cell",
         "what_is_held_fixed": "allocation prefix and allocation ordinal, hence relative placement; the process, its address-space layout and the clock state are not",
         "what_is_not_claimed": "no interval is constructed. A t or z half-width on n=4 would assume iid normality within a cell, which four fresh processes on a shared machine do not establish, and at df=3 the verdict would be sensitive to it."
       },
       "why_the_round_range_is_not_this": "the seven-round range (median 1.029% at this size) describes the sample the estimator minimises over, not the estimator. It is reported in `within_draw_instrument_floor` and is NOT used for the resolvability flag above.",
-      "conclusion": "the 20 slot means span 11.34% and the band is 0.2047% wide. Their spacing is clustered rather than even: 7 of 19 adjacent gaps are narrower than the band and the largest is 10.3x it. Zero draws in band is therefore not evidence against the historical value -- with means bunched this way, a narrow window can sit in a sparse stretch and be missed by every draw. No probability is claimed for that; an earlier version asserted one from a uniform model that this same spacing refutes. The defensible statement is symmetric: at this size and sample size the data neither authenticate nor exclude a value in the band. On whether one draw could resolve the band at all: repeating the published min-of-seven estimator at a fixed (prefix, ordinal) cell across 4 processes gives observed ranges with quartiles 1.74x / 2.36x / 3.13x the band. 1 of 20 cells repeat to within the band. The quartiles fall entirely on one side of the band, so the size has a consistent verdict: the estimator does not repeat to within the band at this size. Two earlier versions of this sentence were wrong in different ways: the first used the seven-round range, which is a property of the sample the min is taken over rather than of the min; the second used 2sd of the per-cell RSD, which is a parametric half-width on n=4 and collapsed heterogeneous cells to one flag."
+      "conclusion": "the 20 slot means span 11.34% and the band is 0.2047% wide. Their spacing is clustered rather than even: 7 of 19 adjacent gaps are narrower than the band and the largest is 10.3x it. Zero draws in band is therefore not evidence against the historical value -- with means bunched this way, a narrow window can sit in a sparse stretch and be missed by every draw. No probability is claimed for that; an earlier version asserted one from a uniform model that this same spacing refutes. The defensible statement is symmetric: at this size and sample size the data neither authenticate nor exclude a value in the band. On whether one draw could resolve the band at all: repeating the published min-of-seven estimator at a fixed (prefix, ordinal) cell across 4 processes gives observed ranges with quartiles 1.82x / 2.48x / 3.19x the band. 1 of 20 cells repeat to within the band's 0.010 TB/s. The quartiles fall entirely on one side of the band, so the size has a consistent verdict: the estimator does not repeat to within the band at this size. Three earlier versions of this sentence were wrong in different ways: the first used the seven-round range, which is a property of the sample the min is taken over rather than of the min; the second used 2sd of the per-cell RSD, which is a parametric half-width on n=4 and collapsed heterogeneous cells to one flag; the third compared each cell's range as a percent of its own mean against the band's width as a percent of 4.885, two different denominators, which widened the threshold for every cell above the band."
     }
   },
   "peak_staircase": {
@@ -1006,8 +1018,8 @@
     ],
     "axis_name_retracted": "'peak_live_512mib' named a quantity this design holds constant; see high_water_check. The level is a prior-allocation count.",
     "criterion": "level-to-level shift exceeds 3x the across-process repeat spread",
-    "criterion_floor_pct": 1.072,
-    "criterion_floor_source": "median round-to-round spread of a single draw over 440 draws",
+    "criterion_floor_pct": 1.082,
+    "criterion_floor_source": "median round-to-round spread of a single draw over 660 draws",
     "direction_control": {
       "present": true,
       "steps_ascending": [
@@ -1026,272 +1038,297 @@
         21
       ],
       "steps_in_one_direction_only": [],
-      "note": "each row is still its own fresh process; only the order of processes differs. Steps appearing in one direction only are not established -- they are consistent with drift over the collection window, which the monotonic first design could not distinguish from a level effect."
+      "what_this_does_NOT_establish": "up-then-down leaves level a symmetric function of collection position, so a transient centred on the turnaround satisfies both passes at once. @Reviewer, 5c2e0083. Agreement between the two directions is therefore necessary and not sufficient; see interleaved_control.",
+      "confound_is_exact_not_approximate": {
+        "checked": true,
+        "n_positions": 88,
+        "property": "level is constant within every class of positions equidistant from the nearest end of the up/down sequence, i.e. level is a function of min(position, N-1-position)",
+        "n_symmetric_classes": 44,
+        "classes_holding_more_than_one_level": {},
+        "holds_exactly": true,
+        "consequence": "level is a deterministic function of collection position across the up and down passes, so those passes cannot distinguish a level effect from any midpoint-symmetric function of time -- including a single transient at the turnaround. Only the interleaved pass can."
+      },
+      "note": "each row is still its own fresh process; only the order of processes differs. Steps appearing in one direction only are not established -- they are consistent with drift over the collection window, which the monotonic first design could not distinguish from a level effect.",
+      "interleaved_control": {
+        "present": true,
+        "n_rows": 44,
+        "shuffle_seed": 20260802,
+        "steps_interleaved": [
+          13,
+          17,
+          21
+        ],
+        "corr_level_vs_position": -0.02,
+        "corr_level_vs_distance_from_midpoint": 0.1107,
+        "max_consecutive_same_level": 2,
+        "what_this_establishes": "level is not recoverable from collection position in this pass, under either a monotone or a midpoint-symmetric reading, so a step found here is not a function of when its row was collected. This is the control the up/down pass could not provide.",
+        "what_it_still_does_not_establish": "why the level matters. The mechanism behind a step is not addressed by any ordering control."
+      }
     },
     "levels": [
       {
         "peak_live_512mib": 0,
         "slot_means": [
-          4.84078979914865,
-          5.037454260033962,
-          4.916067323899769,
-          4.996834303889132,
-          4.780933665561711
+          4.837531087332751,
+          5.039143680178232,
+          4.944409011572229,
+          4.991757536683511,
+          4.785708333305831
         ],
-        "across_process_repeat_spread_pct": 0.8,
+        "across_process_repeat_spread_pct": 1.24,
         "shift_vs_previous_level_pct": null
       },
       {
         "peak_live_512mib": 1,
         "slot_means": [
-          4.837444811839525,
-          5.042971454738828,
-          4.918757239345588,
-          4.988218302787905,
-          4.78036228369217
+          4.835320152004634,
+          5.037096094285203,
+          4.930142166499055,
+          4.9917286897014135,
+          4.792029436321532
         ],
-        "across_process_repeat_spread_pct": 0.69,
-        "shift_vs_previous_level_pct": 0.17
+        "across_process_repeat_spread_pct": 0.76,
+        "shift_vs_previous_level_pct": 0.29
       },
       {
         "peak_live_512mib": 2,
         "slot_means": [
-          4.8399764866636055,
-          5.0382576358284235,
-          4.9286561430562745,
-          4.98823951647363,
-          4.801501840576884
+          4.8360935086375365,
+          5.035670332488073,
+          4.936222729325057,
+          4.989590514778228,
+          4.788713462963616
         ],
-        "across_process_repeat_spread_pct": 0.88,
-        "shift_vs_previous_level_pct": 0.44
+        "across_process_repeat_spread_pct": 0.9,
+        "shift_vs_previous_level_pct": 0.12
       },
       {
         "peak_live_512mib": 3,
         "slot_means": [
-          4.834617116527352,
-          5.050118202296098,
-          4.925305612001214,
-          4.985582721523521,
-          4.788522027119114
+          4.833577162627532,
+          5.0446259567602985,
+          4.927326901713626,
+          4.997577618941747,
+          4.788343158566607
         ],
-        "across_process_repeat_spread_pct": 0.98,
-        "shift_vs_previous_level_pct": 0.27
+        "across_process_repeat_spread_pct": 1.13,
+        "shift_vs_previous_level_pct": 0.18
       },
       {
         "peak_live_512mib": 4,
         "slot_means": [
-          4.846518652056578,
-          5.0352105902457405,
-          4.928729949597351,
-          4.992634887920003,
-          4.786754039741269
+          4.838281935935287,
+          5.036457754914931,
+          4.932893608220956,
+          4.99489691560106,
+          4.785954401231178
         ],
-        "across_process_repeat_spread_pct": 0.67,
-        "shift_vs_previous_level_pct": 0.3
+        "across_process_repeat_spread_pct": 0.99,
+        "shift_vs_previous_level_pct": 0.16
       },
       {
         "peak_live_512mib": 5,
         "slot_means": [
-          4.8236564975879,
-          5.028209267299165,
-          4.938359270027959,
-          4.993040407256187,
-          4.782690639551518
+          4.830840125455643,
+          5.032340321927473,
+          4.933841267210972,
+          4.9979505305466425,
+          4.7925243543546445
         ],
-        "across_process_repeat_spread_pct": 0.82,
-        "shift_vs_previous_level_pct": 0.47
+        "across_process_repeat_spread_pct": 0.92,
+        "shift_vs_previous_level_pct": 0.15
       },
       {
         "peak_live_512mib": 6,
         "slot_means": [
-          4.843635950833747,
-          5.043105587601233,
-          4.926684236843141,
-          4.9849483497461975,
-          4.789767370769397
+          4.835313168012514,
+          5.031504776520983,
+          4.923388877816681,
+          4.987022348718512,
+          4.792010018401783
         ],
-        "across_process_repeat_spread_pct": 0.94,
-        "shift_vs_previous_level_pct": 0.41
+        "across_process_repeat_spread_pct": 1.06,
+        "shift_vs_previous_level_pct": 0.22
       },
       {
         "peak_live_512mib": 7,
         "slot_means": [
-          4.837883134039016,
-          5.045283185717507,
-          4.9354336296271,
-          4.9868544906341405,
-          4.799773446522911
+          4.8390167724812025,
+          5.044995444115422,
+          4.924095893924752,
+          4.99285655417336,
+          4.785131189186967
         ],
-        "across_process_repeat_spread_pct": 0.89,
-        "shift_vs_previous_level_pct": 0.21
+        "across_process_repeat_spread_pct": 0.7,
+        "shift_vs_previous_level_pct": 0.27
       },
       {
         "peak_live_512mib": 8,
         "slot_means": [
-          4.825281839585706,
-          5.035885756249659,
-          4.93426200404007,
-          4.992217588985688,
-          4.801027829030062
+          4.834545912977052,
+          5.042143185958692,
+          4.929522441224381,
+          4.986809455291095,
+          4.794028950504875
         ],
-        "across_process_repeat_spread_pct": 0.66,
-        "shift_vs_previous_level_pct": 0.26
+        "across_process_repeat_spread_pct": 0.98,
+        "shift_vs_previous_level_pct": 0.19
       },
       {
         "peak_live_512mib": 9,
         "slot_means": [
-          4.81900987540202,
-          5.044860567185276,
-          4.9177262184388235,
-          4.990140098199248,
-          4.794456174101327
+          4.832698262960281,
+          5.050633813017246,
+          4.932147847409195,
+          4.989001102069868,
+          4.794241847223769
         ],
-        "across_process_repeat_spread_pct": 0.98,
-        "shift_vs_previous_level_pct": 0.34
+        "across_process_repeat_spread_pct": 1.08,
+        "shift_vs_previous_level_pct": 0.17
       },
       {
         "peak_live_512mib": 10,
         "slot_means": [
-          4.836462431147871,
-          5.035228104711352,
-          4.93825948856555,
-          4.992110395433629,
-          4.7933125970034975
+          4.833263477516909,
+          5.044267911472392,
+          4.921359549380932,
+          4.988639653099846,
+          4.790072883204427
         ],
-        "across_process_repeat_spread_pct": 0.82,
-        "shift_vs_previous_level_pct": 0.42
+        "across_process_repeat_spread_pct": 0.98,
+        "shift_vs_previous_level_pct": 0.22
       },
       {
         "peak_live_512mib": 11,
         "slot_means": [
-          4.837965938581894,
-          5.047986315359921,
-          4.926411140531332,
-          4.99827985575144,
-          4.795427680439643
+          4.824159764243739,
+          5.035254447717569,
+          4.925475382838273,
+          5.000239100545233,
+          4.7972152799633685
         ],
-        "across_process_repeat_spread_pct": 0.75,
-        "shift_vs_previous_level_pct": 0.25
+        "across_process_repeat_spread_pct": 0.64,
+        "shift_vs_previous_level_pct": 0.23
       },
       {
         "peak_live_512mib": 12,
         "slot_means": [
-          4.833408611907261,
-          5.049986821080818,
-          4.931780220969486,
-          4.983519503790597,
-          4.796212453587256
+          4.828462116213035,
+          5.039985674250089,
+          4.929116505161965,
+          4.99528007167045,
+          4.798840524231164
         ],
-        "across_process_repeat_spread_pct": 0.86,
-        "shift_vs_previous_level_pct": 0.3
+        "across_process_repeat_spread_pct": 0.9,
+        "shift_vs_previous_level_pct": 0.1
       },
       {
         "peak_live_512mib": 13,
         "slot_means": [
-          5.334950465585678,
-          4.7953271966828055,
-          4.8297261794240685,
-          4.93191031615594,
-          4.997410073502633
+          5.331797309550322,
+          4.795961654476703,
+          4.834575596257236,
+          4.93089067217901,
+          4.988080962437459
         ],
-        "across_process_repeat_spread_pct": 0.71,
-        "shift_vs_previous_level_pct": 10.38
+        "across_process_repeat_spread_pct": 1.0,
+        "shift_vs_previous_level_pct": 10.42
       },
       {
         "peak_live_512mib": 14,
         "slot_means": [
-          5.323738532900908,
-          4.802707226023012,
-          4.839402953013961,
-          4.932752034956279,
-          4.989196104340493
+          5.3325779996108436,
+          4.780655911662649,
+          4.827479572213565,
+          4.928707703814706,
+          4.996718615092657
         ],
-        "across_process_repeat_spread_pct": 1.0,
-        "shift_vs_previous_level_pct": 0.21
+        "across_process_repeat_spread_pct": 0.61,
+        "shift_vs_previous_level_pct": 0.32
       },
       {
         "peak_live_512mib": 15,
         "slot_means": [
-          5.331446569931379,
-          4.796941565077966,
-          4.828643399142255,
-          4.94212470775353,
-          4.987645728002162
+          5.338812492141727,
+          4.791535964608008,
+          4.829731557759627,
+          4.9280098279352,
+          4.991131526270299
         ],
-        "across_process_repeat_spread_pct": 1.12,
-        "shift_vs_previous_level_pct": 0.22
+        "across_process_repeat_spread_pct": 0.86,
+        "shift_vs_previous_level_pct": 0.23
       },
       {
         "peak_live_512mib": 16,
         "slot_means": [
-          5.318029484185132,
-          4.792132710802825,
-          4.834437818597463,
-          4.935489956579603,
-          4.991968264864075
+          5.335866252499088,
+          4.787385184387097,
+          4.832660336976869,
+          4.924200301331818,
+          4.991357958620695
         ],
-        "across_process_repeat_spread_pct": 0.64,
-        "shift_vs_previous_level_pct": 0.25
+        "across_process_repeat_spread_pct": 0.82,
+        "shift_vs_previous_level_pct": 0.09
       },
       {
         "peak_live_512mib": 17,
         "slot_means": [
-          5.0849055957332405,
-          5.141180658593504,
-          5.331624185931872,
-          5.222815841247415,
-          5.005955987064578
+          5.065735020532197,
+          5.133421602087558,
+          5.318712378363811,
+          5.221485159143692,
+          4.992330472170335
         ],
-        "across_process_repeat_spread_pct": 0.76,
-        "shift_vs_previous_level_pct": 10.28
+        "across_process_repeat_spread_pct": 1.03,
+        "shift_vs_previous_level_pct": 10.06
       },
       {
         "peak_live_512mib": 18,
         "slot_means": [
-          5.053787608402047,
-          5.138094460061095,
-          5.324478222392715,
-          5.220284349255047,
-          4.995304211576252
+          5.0786168656275175,
+          5.128560254509918,
+          5.334374437526814,
+          5.226715640653101,
+          4.994607922950839
         ],
-        "across_process_repeat_spread_pct": 1.11,
-        "shift_vs_previous_level_pct": 0.61
+        "across_process_repeat_spread_pct": 1.01,
+        "shift_vs_previous_level_pct": 0.29
       },
       {
         "peak_live_512mib": 19,
         "slot_means": [
-          5.042219673683685,
-          5.135113810664676,
-          5.3344817340044735,
-          5.2476712891805715,
-          4.998493066251324
+          5.050758968647485,
+          5.136999050316008,
+          5.329973634292496,
+          5.228133384261152,
+          4.9990979742596595
         ],
-        "across_process_repeat_spread_pct": 1.25,
-        "shift_vs_previous_level_pct": 0.52
+        "across_process_repeat_spread_pct": 1.0,
+        "shift_vs_previous_level_pct": 0.55
       },
       {
         "peak_live_512mib": 20,
         "slot_means": [
-          5.023666346961134,
-          5.134259981528773,
-          5.327931459168281,
-          5.221588312793106,
-          5.006052214520132
+          5.021433082053318,
+          5.1440457202961944,
+          5.32501707254395,
+          5.248370492222238,
+          4.9962989296857385
         ],
-        "across_process_repeat_spread_pct": 1.01,
-        "shift_vs_previous_level_pct": 0.5
+        "across_process_repeat_spread_pct": 1.62,
+        "shift_vs_previous_level_pct": 0.58
       },
       {
         "peak_live_512mib": 21,
         "slot_means": [
-          4.9336544843021874,
-          4.837775652325891,
-          4.774339208190179,
-          5.038086355467721,
-          4.958785026059521
+          4.914297374682846,
+          4.833052510046801,
+          4.78439680131117,
+          5.04142482666158,
+          4.960869908419389
         ],
-        "across_process_repeat_spread_pct": 1.14,
-        "shift_vs_previous_level_pct": 10.39
+        "across_process_repeat_spread_pct": 0.9,
+        "shift_vs_previous_level_pct": 10.15
       }
     ],
     "why_not_within_process": "the measurement itself allocates and frees 2 GiB buffers, which re-rolls placement; a within-process sweep measures that instead of the peak and reports a spurious step at every level"
@@ -1303,14 +1340,17 @@
     "corrects": "denominator_stability_across_processes in the roofline sidecar, which reports copy at 13.35% with n_processes: 3. That is not a process axis: the three runs straddled edits to _copy_variability that changed the allocator's peak. Same program, six processes: 0.63%."
   },
   "prose_guard": {
-    "accept_set_size": 1840,
+    "accept_set_size": 1895,
+    "accept_set_measured": 1890,
+    "accept_set_cited": 11,
     "grid": "2-dp values in [0, 20]",
     "grid_size": 2001,
-    "accepted_without_being_meant": 197,
-    "false_negative_rate_pct": 9.845,
+    "accepted_without_being_meant": 207,
+    "of_which_only_the_citation_allowlist_explains": 5,
+    "false_negative_rate_pct": 10.345,
     "ceiling_pct": 12.0,
-    "headroom_pct": 2.155,
-    "note": "a tripwire, not a proof. This rate rises as the artifact grows -- more measured values cover more of the grid by accident -- so it is computed at write time rather than quoted from a docstring, and the assembler now refuses to write once it passes the ceiling. Every increase so far came from an improvement to the artifact, which is why silent decay was the likely outcome without a hard stop.",
+    "headroom_pct": 1.655,
+    "note": "a tripwire, not a proof. This rate rises as the artifact grows -- more measured values cover more of the grid by accident -- so it is computed at write time rather than quoted from a docstring, and the assembler now refuses to write once it passes the ceiling. Every increase so far came from an improvement to the artifact, which is why silent decay was the likely outcome without a hard stop. It is computed over the citation allowlist as well as the measured values, because both are accepted; counting only the measured half understated the guard's permissiveness in the one direction a reviewer cannot see from the outside.",
     "measured_on": "the payload as checked, before this field was added"
   }
 }
