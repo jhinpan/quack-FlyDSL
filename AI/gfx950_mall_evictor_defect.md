@@ -61,7 +61,7 @@ from the same undersized 12 MiB figure. Simulating `_rotation_count` exactly:
 
 **`m=32768` is not uniformly safe.** `32768x1024` forward lands at *exactly*
 256.0 MiB — precisely the boundary, and the probe measured that point on the
-**inflated** side (6834 GB/s at 256 MiB vs 5124 at 384 MiB). So the affected set
+**inflated** side (6453 GB/s at 256 MiB vs 4896 at 384 MiB). So the affected set
 is "every cell whose picked working set is <= 256 MiB", which is 11 of 18 cells
 and includes one `m=32768` cell. An earlier version of this file said "only
 `m<=4096` is affected" and "`m=32768` is unaffected"; both are wrong.
@@ -79,38 +79,51 @@ practical fix**. But the reason is the size of the requirement, not an
 
 ## Measurement
 
-`AI/probe_gfx950_mall_rotation.py`, MI355X (gfx950), one GPU, SPX/NPS1.
-Kernel held *exactly* fixed (`copy_` between rotating buffer pairs); only the
-number of rotation buffers varies, so any systematic difference is cache
-residency and not kernel selection.
+`AI/probe_gfx950_mall_rotation.py`, MI355X (gfx950), one GPU, SPX/NPS1,
+`HIP_VISIBLE_DEVICES=7`, torch 2.9.1+rocm7.2.0. Kernel held *exactly* fixed
+(`copy_` between rotating buffer pairs); only the number of rotation buffers
+varies, so any systematic difference is cache residency and not kernel
+selection. Every figure below is emitted by that script, which also writes
+`AI/probe_gfx950_mall_rotation.json` with per-repeat raw samples and the
+environment (including `rocminfo`'s `L3: 262144 KB`, i.e. the MALL is
+discoverable rather than assumed). Timing follows `_time_rotating_calls`: the
+window covers one whole rotation and the evictor runs *outside* it.
 
     ### buffer = 64 MiB
      buffers    working set   vs MALL      GB/s
-           1         128 MiB     0.50x      6825
-           2         256 MiB     1.00x      6834
-           3         384 MiB     1.50x      5124     <- step here
-           4         512 MiB     2.00x      5053
-           8        1024 MiB     4.00x      5032
-          32        4096 MiB    16.00x      4961
+           1         128 MiB     0.50x      6090
+           2         256 MiB     1.00x      6453
+           3         384 MiB     1.50x      4896     <- step here
+           4         512 MiB     2.00x      4942
+           8        1024 MiB     4.00x      4960
+          32        4096 MiB    16.00x      5030
 
 The honest figure is the **boundary step between adjacent rotation counts**:
-2 buffers (256 MiB) = 6834 GB/s vs 3 buffers (384 MiB) = 5124 GB/s, one
-rotation apart, same kernel — **1.33x inflation**. The 16 MiB sweep shows the
-same step at the same place and reaches 1.75x, but its single-buffer row is
-additionally inflated by fitting the 32 MiB aggregate L2, so it should not be
-the headline.
+2 buffers (256 MiB) = 6453 GB/s vs 3 buffers (384 MiB) = 4896 GB/s, one
+rotation apart, same kernel — **1.32x inflation**. The 16 MiB sweep steps at
+the same place (8 bufs = 256 MiB, 5309 GB/s → 12 bufs = 384 MiB, 4008 GB/s)
+and gives **1.32x**, independently.
 
 A correctly-sized evictor recovers the HBM number:
 
-    64 MiB x2 bufs (WS=256 MiB), evictor=0 MiB      6003 GB/s   <- current behaviour
-    64 MiB x2 bufs (WS=256 MiB), evictor=12 MiB     4856 GB/s   <- current evictor size
-    64 MiB x2 bufs (WS=256 MiB), evictor=256 MiB    4456 GB/s
-    64 MiB x2 bufs (WS=256 MiB), evictor=512 MiB    4346 GB/s
-    64 MiB x8 bufs (WS=1024 MiB), no evictor        4565 GB/s   <- HBM reference
+    64 MiB x2 bufs (WS=256 MiB), evictor=0 MiB      6403 GB/s   <- current behaviour
+    64 MiB x2 bufs (WS=256 MiB), evictor=12 MiB     4891 GB/s   <- current evictor size
+    64 MiB x2 bufs (WS=256 MiB), evictor=256 MiB    4726 GB/s
+    64 MiB x2 bufs (WS=256 MiB), evictor=512 MiB    4797 GB/s
+    64 MiB x2 bufs (WS=256 MiB), evictor=1024 MiB   4335 GB/s
+    64 MiB x8 bufs (WS=1024 MiB), no evictor        4964 GB/s   <- HBM reference
 
-A 256–512 MiB evictor lands at 4346–4456 GB/s against a 4565 GB/s HBM
-reference. The 12 MiB evictor recovers roughly two thirds of the gap, which is
-why the defect is easy to miss rather than glaring.
+Evicting at all is what matters here: with no evictor the boundary cell reads
+6403 GB/s against a 4964 GB/s HBM reference, and *any* of the evictor sizes
+brings it to 4335–4891 GB/s, i.e. to within about 12% of that reference. The
+12 MiB evictor is not obviously worse than the 256–1024 MiB ones on this
+access pattern, so the measured defect is **defect 1** — the `ws < 12 MiB`
+gate means no evictor runs on these shapes at all. Defect 2 (the evictor being
+sized off the per-XCD L2) is a real mis-derivation but is not, on this
+evidence, what costs the 1.32x. An earlier version of this block reported
+280–1070 GB/s at the larger evictor sizes; that was my own bug — the evictor
+was being run inside the timed window, so those numbers measured the evictor
+itself, not the copy.
 
 ## A false start worth recording
 
@@ -129,7 +142,7 @@ The wiki's microbench holds its kernel fixed and reports 6152 GB/s at 64 MiB vs
 6192 GB/s at 1024 MiB — **flat across the boundary**, the opposite shape to my
 first probe. That disagreement is what prompted the controlled rerun. The
 controlled probe reproduces a step where the uncontrolled one showed a cliff,
-and its absolute values (4961–6834 GB/s) are consistent with the two known
+and its absolute values (4008–6453 GB/s) are consistent with the two known
 ceilings.
 
 Why the wiki's curve is flat while this one steps: the wiki kernel is a

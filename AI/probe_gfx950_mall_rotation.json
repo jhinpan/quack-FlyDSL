@@ -1,0 +1,435 @@
+{
+  "environment": {
+    "device_name": "AMD Instinct MI355X",
+    "gcn_arch": "gfx950:sramecc+:xnack-",
+    "multi_processor_count": 256,
+    "torch_l2_cache_size_bytes": 4194304,
+    "mall_bytes_assumed": 268435456,
+    "torch_version": "2.9.1+rocm7.2.0.git7e1940d4",
+    "torch_hip": "7.2.26015-fc0010cf6a",
+    "torch_cuda": null,
+    "python": "3.10.12",
+    "platform": "Linux-6.8.0-60-generic-x86_64-with-glibc2.35",
+    "hostname": "mia1-p02-g23",
+    "warmup": 5,
+    "iters_per_sample": 30,
+    "repeats": 5,
+    "visible_devices": "7",
+    "rocminfo_l3": [
+      "L3:                      262144(0x40000) KB"
+    ],
+    "git_commit": "50c54b65a468a9dc382853e0fec4c2cdddebee98"
+  },
+  "measurements": [
+    {
+      "block": "rotation_sweep",
+      "buffer_mib": 16,
+      "n_buffers": 1,
+      "working_set_bytes": 33554432,
+      "working_set_vs_mall": 0.125,
+      "evictor_bytes": 0,
+      "gbps_median": 4583.9388862760925,
+      "gbps_samples": [
+        4583.9388862760925,
+        4546.670951713413,
+        4596.4975724807655,
+        4634.589939447821,
+        4583.9388862760925
+      ]
+    },
+    {
+      "block": "rotation_sweep",
+      "buffer_mib": 16,
+      "n_buffers": 2,
+      "working_set_bytes": 67108864,
+      "working_set_vs_mall": 0.25,
+      "evictor_bytes": 0,
+      "gbps_median": 4647.42823643158,
+      "gbps_samples": [
+        4647.42823643158,
+        4686.045843357928,
+        4647.42823643158,
+        4634.589939447821,
+        4647.42823643158
+      ]
+    },
+    {
+      "block": "rotation_sweep",
+      "buffer_mib": 16,
+      "n_buffers": 3,
+      "working_set_bytes": 100663296,
+      "working_set_vs_mall": 0.375,
+      "evictor_bytes": 0,
+      "gbps_median": 4953.9023312531,
+      "gbps_samples": [
+        4944.16963980377,
+        4953.9023312531,
+        4934.475116061137,
+        4953.902331253101,
+        4958.78306037516
+      ]
+    },
+    {
+      "block": "rotation_sweep",
+      "buffer_mib": 16,
+      "n_buffers": 4,
+      "working_set_bytes": 134217728,
+      "working_set_vs_mall": 0.5,
+      "evictor_bytes": 0,
+      "gbps_median": 5107.219325887474,
+      "gbps_samples": [
+        5130.450950648052,
+        5076.313433435335,
+        5122.618440544108,
+        5107.219325887474,
+        5091.526461624813
+      ]
+    },
+    {
+      "block": "rotation_sweep",
+      "buffer_mib": 16,
+      "n_buffers": 6,
+      "working_set_bytes": 201326592,
+      "working_set_vs_mall": 0.75,
+      "evictor_bytes": 0,
+      "gbps_median": 5253.825303182523,
+      "gbps_samples": [
+        5259.315491363754,
+        5253.825303182523,
+        5248.347075127137,
+        5259.315491363754,
+        5221.125403692689
+      ]
+    },
+    {
+      "block": "rotation_sweep",
+      "buffer_mib": 16,
+      "n_buffers": 8,
+      "working_set_bytes": 268435456,
+      "working_set_vs_mall": 1.0,
+      "evictor_bytes": 0,
+      "gbps_median": 5309.245434801117,
+      "gbps_samples": [
+        5146.2865465984405,
+        5313.343946458931,
+        5313.343946458931,
+        5309.14059840919,
+        5309.245434801117
+      ]
+    },
+    {
+      "block": "rotation_sweep",
+      "buffer_mib": 16,
+      "n_buffers": 12,
+      "working_set_bytes": 402653184,
+      "working_set_vs_mall": 1.5,
+      "evictor_bytes": 0,
+      "gbps_median": 4008.0546104788004,
+      "gbps_samples": [
+        3963.863171518111,
+        4052.447259227495,
+        4008.0546104788004,
+        3992.179184206527,
+        4011.2690049220087
+      ]
+    },
+    {
+      "block": "rotation_sweep",
+      "buffer_mib": 16,
+      "n_buffers": 16,
+      "working_set_bytes": 536870912,
+      "working_set_vs_mall": 2.0,
+      "evictor_bytes": 0,
+      "gbps_median": 4129.744681898054,
+      "gbps_samples": [
+        4041.454732116411,
+        4129.744681898054,
+        4146.329583900146,
+        4133.560216609455,
+        4129.744681898054
+      ]
+    },
+    {
+      "block": "rotation_sweep",
+      "buffer_mib": 16,
+      "n_buffers": 24,
+      "working_set_bytes": 805306368,
+      "working_set_vs_mall": 3.0,
+      "evictor_bytes": 0,
+      "gbps_median": 4062.259505639769,
+      "gbps_samples": [
+        4089.4894099494145,
+        4032.1363701030104,
+        4104.4968262241755,
+        3923.692008422076,
+        4062.259505639769
+      ]
+    },
+    {
+      "block": "rotation_sweep",
+      "buffer_mib": 16,
+      "n_buffers": 32,
+      "working_set_bytes": 1073741824,
+      "working_set_vs_mall": 4.0,
+      "evictor_bytes": 0,
+      "gbps_median": 4117.076636171397,
+      "gbps_samples": [
+        4117.076636171397,
+        4136.76097207874,
+        3611.3892183115045,
+        4123.4009292627115,
+        4069.6397021873063
+      ]
+    },
+    {
+      "block": "rotation_sweep",
+      "buffer_mib": 64,
+      "n_buffers": 1,
+      "working_set_bytes": 134217728,
+      "working_set_vs_mall": 0.5,
+      "evictor_bytes": 0,
+      "gbps_median": 6089.733524099064,
+      "gbps_samples": [
+        6089.733524099064,
+        6095.2646593263,
+        6067.709004476658,
+        6089.733524099064,
+        6095.2646593263
+      ]
+    },
+    {
+      "block": "rotation_sweep",
+      "buffer_mib": 64,
+      "n_buffers": 2,
+      "working_set_bytes": 268435456,
+      "working_set_vs_mall": 1.0,
+      "evictor_bytes": 0,
+      "gbps_median": 6452.775367048816,
+      "gbps_samples": [
+        6458.985688282128,
+        6483.948141613573,
+        6421.900896041757,
+        6415.607991120055,
+        6452.775367048816
+      ]
+    },
+    {
+      "block": "rotation_sweep",
+      "buffer_mib": 64,
+      "n_buffers": 3,
+      "working_set_bytes": 402653184,
+      "working_set_vs_mall": 1.5,
+      "evictor_bytes": 0,
+      "gbps_median": 4896.044967789929,
+      "gbps_samples": [
+        4896.044967789929,
+        4858.237831330136,
+        4906.784374871953,
+        4871.168020928374,
+        4897.206254519414
+      ]
+    },
+    {
+      "block": "rotation_sweep",
+      "buffer_mib": 64,
+      "n_buffers": 4,
+      "working_set_bytes": 536870912,
+      "working_set_vs_mall": 2.0,
+      "evictor_bytes": 0,
+      "gbps_median": 4941.697139283699,
+      "gbps_samples": [
+        4945.3385976887585,
+        4941.697139283699,
+        4932.616405551544,
+        4925.421329517721,
+        4956.341607884295
+      ]
+    },
+    {
+      "block": "rotation_sweep",
+      "buffer_mib": 64,
+      "n_buffers": 6,
+      "working_set_bytes": 805306368,
+      "working_set_vs_mall": 3.0,
+      "evictor_bytes": 0,
+      "gbps_median": 4946.569003801782,
+      "gbps_samples": [
+        4927.199150322286,
+        4934.444929540946,
+        4966.091752258312,
+        4946.569003801782,
+        4959.974302946012
+      ]
+    },
+    {
+      "block": "rotation_sweep",
+      "buffer_mib": 64,
+      "n_buffers": 8,
+      "working_set_bytes": 1073741824,
+      "working_set_vs_mall": 4.0,
+      "evictor_bytes": 0,
+      "gbps_median": 4959.958939442491,
+      "gbps_samples": [
+        4943.517367475244,
+        4959.958939442491,
+        4979.3025909012495,
+        4957.211086824532,
+        4975.6109612052305
+      ]
+    },
+    {
+      "block": "rotation_sweep",
+      "buffer_mib": 64,
+      "n_buffers": 12,
+      "working_set_bytes": 1610612736,
+      "working_set_vs_mall": 6.0,
+      "evictor_bytes": 0,
+      "gbps_median": 5014.017639637302,
+      "gbps_samples": [
+        5041.017692603687,
+        4943.228767309111,
+        5014.017639637302,
+        5042.272300234254,
+        4947.784507652769
+      ]
+    },
+    {
+      "block": "rotation_sweep",
+      "buffer_mib": 64,
+      "n_buffers": 16,
+      "working_set_bytes": 2147483648,
+      "working_set_vs_mall": 8.0,
+      "evictor_bytes": 0,
+      "gbps_median": 4983.000047226527,
+      "gbps_samples": [
+        4933.999158188085,
+        4919.080542081384,
+        4983.000047226527,
+        5030.613979355358,
+        5023.0834660606
+      ]
+    },
+    {
+      "block": "rotation_sweep",
+      "buffer_mib": 64,
+      "n_buffers": 24,
+      "working_set_bytes": 3221225472,
+      "working_set_vs_mall": 12.0,
+      "evictor_bytes": 0,
+      "gbps_median": 5027.477440105339,
+      "gbps_samples": [
+        5015.258842067659,
+        5027.477440105339,
+        4993.18794706517,
+        5052.387423070727,
+        5049.2275744442295
+      ]
+    },
+    {
+      "block": "rotation_sweep",
+      "buffer_mib": 64,
+      "n_buffers": 32,
+      "working_set_bytes": 4294967296,
+      "working_set_vs_mall": 16.0,
+      "evictor_bytes": 0,
+      "gbps_median": 5030.142704728649,
+      "gbps_samples": [
+        4975.835665014946,
+        4998.065077862961,
+        5086.376993584566,
+        5050.4964200925315,
+        5030.142704728649
+      ]
+    },
+    {
+      "block": "evictor_control",
+      "buffer_mib": 64,
+      "n_buffers": 2,
+      "working_set_bytes": 268435456,
+      "evictor_bytes": 0,
+      "gbps_median": 6403.364663526247,
+      "gbps_samples": [
+        6415.761650318625,
+        6385.08732274415,
+        6403.364663526247,
+        6391.167976423371,
+        6403.517736801474
+      ]
+    },
+    {
+      "block": "evictor_control",
+      "buffer_mib": 64,
+      "n_buffers": 2,
+      "working_set_bytes": 268435456,
+      "evictor_bytes": 12582912,
+      "gbps_median": 4891.316560064259,
+      "gbps_samples": [
+        4862.961215605966,
+        4905.52892795827,
+        4884.196685693343,
+        4909.117592956519,
+        4891.316560064259
+      ]
+    },
+    {
+      "block": "evictor_control",
+      "buffer_mib": 64,
+      "n_buffers": 2,
+      "working_set_bytes": 268435456,
+      "evictor_bytes": 268435456,
+      "gbps_median": 4725.976307280302,
+      "gbps_samples": [
+        4725.976307280302,
+        4716.012978430355,
+        4712.700992220051,
+        4752.668257093504,
+        4725.976307280302
+      ]
+    },
+    {
+      "block": "evictor_control",
+      "buffer_mib": 64,
+      "n_buffers": 2,
+      "working_set_bytes": 268435456,
+      "evictor_bytes": 536870912,
+      "gbps_median": 4796.83079316228,
+      "gbps_samples": [
+        4796.83079316228,
+        4800.347829517338,
+        4817.578050440906,
+        4779.83368448714,
+        4776.431483390537
+      ]
+    },
+    {
+      "block": "evictor_control",
+      "buffer_mib": 64,
+      "n_buffers": 2,
+      "working_set_bytes": 268435456,
+      "evictor_bytes": 1073741824,
+      "gbps_median": 4335.198046408138,
+      "gbps_samples": [
+        4329.604199791885,
+        4338.0002630777335,
+        4335.198046408138,
+        4318.390343138788,
+        4354.890460992448
+      ]
+    },
+    {
+      "block": "hbm_reference",
+      "buffer_mib": 64,
+      "n_buffers": 8,
+      "working_set_bytes": 1073741824,
+      "evictor_bytes": 0,
+      "gbps_median": 4963.627371229173,
+      "gbps_samples": [
+        4929.016241803197,
+        4957.233936070456,
+        4963.627371229173,
+        4964.545583740986,
+        5002.477651620568
+      ]
+    }
+  ]
+}

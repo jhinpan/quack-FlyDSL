@@ -518,7 +518,8 @@ pure launch path, where the CuTe kernel is about 2.2x ahead (6.1 us against
 > **The MI355X column is known to be measured wrong in most cells.** On gfx950
 > a rotation working set of 256 MiB or less stays resident in the MALL, and the
 > evictor is sized from the 4 MiB per-XCD L2 that torch reports, so it is both
-> too small and gated off. Measured inflation is 1.33x at the boundary.
+> too small and gated off. Measured inflation is 1.32x at the boundary,
+> reproduced independently at two buffer sizes.
 > Simulating the harness's actual buffer selection, **11 of 18 cells** land at
 > or under 256 MiB. The `M=4096` row (71% / 64%) is therefore optimistic;
 > `M<=512` is launch-bound so bandwidth is not the binding constraint there;
