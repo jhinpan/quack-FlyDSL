@@ -1945,7 +1945,7 @@ def test_the_singleton_layout_compiles_with_fullgraph(dynamic):
         _assert_close(got, _reference(tensor, weight, 1e-6))
 
 
-def test_the_autotuned_path_does_not_share_a_launcher_across_row_counts(tmp_path, monkeypatch):
+def test_the_tuner_selects_a_config_per_row_count(tmp_path, monkeypatch):
     """The forced-tuner singleton path, listed as missing coverage.
 
     The obvious value test -- run a singleton through ``rmsnorm_autotuned``,
@@ -1965,12 +1965,26 @@ def test_the_autotuned_path_does_not_share_a_launcher_across_row_counts(tmp_path
     on a harmless reorder while saying the two calls "can now land on one
     tuner entry" -- which moving ``m`` to position 2 would not cause.
 
-    So this forces a real search and compares the keys the tuner actually
-    built. What makes the autotuned path immune is that those keys differ by
-    row count, and that ``_launch_rmsnorm_fwd_autotuned`` never consults
-    ``_FWD_CACHE`` -- the shared-key cache that poisons the non-tuned forward.
-    Both are asserted against measured state rather than against the shape of
-    a constant.
+    What the row count in the key actually buys is **config selection, not
+    correctness** -- @Autotune's point, and he is right. The tuner caches a
+    ``Config`` (a tuning parameter such as ``threads_per_row``), not a built
+    launcher, and re-applies it to the current arguments on every call. So a
+    singleton's entry reused for m = 4096 is merely a config tuned for the
+    wrong row count: measured with ``m`` removed from the key, every row count
+    shares the singleton's config and every answer is still exact. That is the
+    opposite of ``_FWD_CACHE``, which caches a launcher and therefore poisons.
+
+    An earlier version of this test was named "does not share a launcher" and
+    its failure message said the autotuned path would "need the same
+    canonicalisation guard as the non-tuned one". Both were wrong about the
+    mechanism while asserting the right thing -- the same defect this suite
+    keeps finding, one layer up: a correct assertion explained by a mechanism
+    that does not exist.
+
+    So: this forces a real search and asserts the tuner separates its configs
+    by row count (a performance contract), and separately that
+    ``_launch_rmsnorm_fwd_autotuned`` never consults ``_FWD_CACHE`` (the
+    correctness one). Both against measured state, not the shape of a constant.
     """
     _clear_caches()
     tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
@@ -1999,12 +2013,13 @@ def test_the_autotuned_path_does_not_share_a_launcher_across_row_counts(tmp_path
     ordinary_keys = set(tuner.cache) - singleton_keys
 
     assert ordinary_keys, (
-        "the ordinary call reused the singleton's tuner entry instead of building "
-        "its own; the autotuned path now needs the same canonicalisation guard as "
-        "the non-tuned one"
+        "the ordinary call reused the config tuned for the singleton instead of "
+        "searching for its own; answers stay correct -- the tuner caches a Config, "
+        "not a launcher -- but every row count now runs geometry picked for m=1"
     )
     assert singleton_keys.isdisjoint(ordinary_keys), (
-        "the singleton and the ordinary call share a tuner key"
+        "the singleton and the ordinary call share a tuner key, so one search "
+        "result is being applied to both row counts"
     )
 
     assert len(rmsnorm_flydsl_impl._FWD_CACHE) == 0, (
@@ -2019,12 +2034,27 @@ def test_the_autotuned_path_does_not_share_a_launcher_across_row_counts(tmp_path
 def test_a_persisted_singleton_artifact_cannot_be_loaded_for_another_row_count(
     tmp_path, monkeypatch
 ):
-    """The disk-artifact singleton path, the other gap @Reviewer left open.
+    """The two persistence paths, the other gap @Reviewer left open.
 
-    The tuner persists winners to ``$FLYDSL_AUTOTUNE_CACHE_DIR`` and reloads
-    them at import, so a singleton tuned in one process could in principle be
-    handed to an ordinary call in the next -- a reuse the in-process test
-    cannot see, because it never crosses a process boundary.
+    There are **two**, and calling both "the artifact" hid that in an earlier
+    version of this docstring -- his catch. The regular disk cache
+    (``$FLYDSL_AUTOTUNE_CACHE_DIR``, ``_save_disk_cache``/``_load_disk_cache``)
+    and the offline config artifact (``$FLYDSL_AUTOTUNE_CONFIG_DIR``,
+    ``_emit_artifact``/``_load_artifact``, its own ``_artifact_cache``) are
+    separate mechanisms. Both are covered below.
+
+    Either way a singleton tuned in one process could in principle be handed to
+    an ordinary call in the next -- reuse the in-process test cannot see,
+    because it never crosses a process boundary.
+
+    The offline artifact path, measured across real processes:
+
+        A: force-tune singleton and ordinary -> 2 distinct artifact files
+        B: fresh unforced process, artifact dir only -> _artifact_cache = 1
+        B: ordinary (m=8) error with the singleton artifact available = 0.0
+
+    So it does load unforced in a fresh process, and the two row counts emit
+    separate artifact identities rather than one shared file.
 
     Measured end to end first, with a forced search (``FLYDSL_AUTOTUNE=1``)
     into a private cache dir, guard present and guard removed:
@@ -2092,6 +2122,24 @@ def test_a_persisted_singleton_artifact_cannot_be_loaded_for_another_row_count(
         "persisted keys are collapsing, so artifacts tuned for one row count "
         "can be loaded for another"
     )
+
+    # The second, separate persistence path: the offline config artifact. It
+    # has its own directory, its own cache and its own identity function, so
+    # the disk-cache round-trip above says nothing about it.
+    artifacts = sorted((tmp_path / "artifacts").rglob("*.json"))
+    assert len(artifacts) == len(keys), (
+        f"{len(keys)} row counts were tuned but {len(artifacts)} offline config "
+        "artifact(s) were emitted; the two searches are sharing one artifact "
+        "identity, so a config tuned for the singleton can be loaded for another "
+        "row count in a fresh unforced process"
+    )
+
+    # Reload them the way an unforced process would, from a cleared cache.
+    tuner._artifact_cache.clear()
+    monkeypatch.delenv("FLYDSL_AUTOTUNE")
+    tuner.cache.clear()
+    rmsnorm_autotuned(ordinary, weight)
+    _assert_close(rmsnorm_autotuned(ordinary, weight), _reference(ordinary, weight, 1e-6))
     # The row count is what separates a singleton artifact from any other, so
     # the persisted keys must still differ in that term wherever they differ at
     # all. Writing this as ``key[0] == key[0]`` -- which is what a "check the
