@@ -485,6 +485,51 @@ survived review. **Every throughput figure should be quoted with, or at least
 checked against, its share of the roofline**, precisely so that the impossible
 ones announce themselves rather than waiting for a more absurd sibling.
 
+**The roofline rule caught a bad denominator, which this file already had a
+section about.** Chasing the N ceiling I wrote a fresh in-process `copy_`
+reference and got 109.9% at `32768x4096`, reproducibly over three processes.
+The rule above fired, correctly -- but on my denominator, not my measurement.
+"A same-device copy is not the bandwidth ceiling" below already documents this
+exact failure, down to the symptom of exceeding 100%, and
+`_measure_achievable_bandwidth` probes three patterns and stores
+`peak_bw_probe` in every CSV row precisely so the choice stays legible. I
+reinvented, and re-fell-into, a reference the harness had already tried and
+rejected. Against `two_read_one_write` the same four shapes read 98.9 / 95.3 /
+90.6 / 82.8%, under 100 and monotone in N. The lesson that was missing is not
+about copies: **a roofline violation indicts the denominator as readily as the
+numerator, and the denominator is the cheaper half to check first.**
+
+**Below about 26 us of device work, the public API measures Python, not the
+kernel.** One `rmsnorm(x, w)` costs ~26 us of *host* time at `256x4096`, against
+~6.4 us for `torch.nn.functional.rms_norm`. It is genuinely asynchronous -- the
+cost does not move when ~1.2 ms of device work is queued ahead of it -- so it is
+host dispatch, not a stall. Localized by stubbing each stage in situ: the cached
+launcher is 11.3 us, the four `torch.empty*` allocations bring it to 16.3, the
+`autograd.Function.apply` to 19.4, and `_validate_inputs` adds 2.9 for 26.1
+total. Under CUDA-graph replay, which excludes host cost entirely, the same call
+is **2.11 us against torch's 3.88** at `1x4096`, confirmed by rocprofv3 kernel
+times (2.11 vs 4.77 us). So the kernel wins roughly 2x at every shape measured
+while the end-to-end call loses ~4x at small ones -- 27.9 vs 6.7 us per norm
+over a 64-norm stack at `m=1`, which is decode-shaped and where it hurts most.
+
+The reason the harness does not show this: it times FlyDSL through
+`_launch_rmsnorm_fwd` (`provider_detail: "FlyDSL low-level forward"`, and quack
+likewise through `rmsnorm_fwd`) while torch is timed through its public API.
+That is a defensible kernel-to-kernel comparison and it is labelled, but **no
+committed cell measures what a caller of `quack.rmsnorm_flydsl.rmsnorm`
+experiences**, and the gap is 15 us wide -- larger than most of the small-shape
+cells themselves. The evictor is what hides it even at the low level: its 256 MB
+copy prefills the queue so host dispatch overlaps device work, which is why the
+same case reads 12.32 us without an evictor and 4.45 us with one. That is sound
+for a device-time comparison and applies equally to every provider; it is only
+unsound if the number is read as end-to-end latency.
+
+Both backends share the architecture -- `quack.rmsnorm` wraps in an
+`autograd.Function` too -- so this is a parity question rather than a FlyDSL
+defect, and it is not yet measured on the cutedsl side here (cutedsl does not
+import on ROCm). What is measured is that the FlyDSL kernel is ahead and the
+FlyDSL wrapper is behind, and that the harness reports only the first.
+
 **A canary agreeing to a fraction of a percent is not stability evidence.**
 The habit is to re-run one cell after a change, see it land within a percent
 of an archived value, and read that as "nothing regressed". It supports a
@@ -698,3 +743,57 @@ m=4096 cells the H200 is faster in **58**, the two exceptions both being torch
 backward at 4096x3000 (fp16 1.081, bf16 1.044). An earlier version of this
 paragraph said "on every provider," which is wrong for the same reason as
 above — a near-unanimous result reported as a unanimous one.
+
+## `MAX_N = 8192` is a real cliff, but not where the constant says
+
+`rmsnorm_config.MAX_N` rejects any row wider than 8192, and its comment calls
+it "the register budget expressed as a row length. Every other cap on N derives
+from it." Monkeypatching it to `1 << 20` (probe only, nothing committed) says
+the correctness half of that is false: the forward runs to **N = 262144** and
+the backward to **65536**, at bf16 accuracy indistinguishable from the shapes
+under the cap -- forward relative error 1.0e-3..2.1e-3 across
+16384/32768/65536/131072/262144, backward `dx` 2.2e-3 and `dw` 2.3e-3..3.2e-3
+against an fp32 reference at 8192..65536. Nothing spills, nothing wraps,
+nothing silently truncates. cutedsl for comparison gates only at
+`N > 128k with dtype >= 32 bits` (rmsnorm.py:637) and escapes the register
+budget above 8k with `reload_from="smem"`, which this backend has no analogue
+for.
+
+There *is* a cliff, and it is worth keeping a cap for -- but it sits between
+**49152 and 57344**, not at 8192, and the two are separated by a confound that the obvious
+sweep does not control. Holding total elements at 2^25 and sweeping N makes
+`m` fall as N rises, so block count falls with it; at N=65536 only 512 blocks
+remain for 256 CUs. Pricing starvation on its own -- N fixed at 8192, where
+`elems_per_thread` is 32 and there is no register pressure, sweeping `m` --
+costs 78.5% -> 5.3% of ceiling from m=4096 down to m=256, entirely from block
+count. So the naive sweep's degradation is mostly starvation, not width.
+
+Holding `m` fixed at 4096 (16 blocks/CU throughout) isolates width, against the
+`two_read_one_write` ceiling:
+
+| N | elems/thread | share of ceiling |
+| --- | --- | --- |
+| 8192 | 32 | 80.5% |
+| 32768 | 128 | 81.6% |
+| 49152 | 192 | 77.6% |
+| 57344 | 224 | 38.8% |
+| 65536 | 256 | 39.8% |
+| 98304 | 384 | 40.1% |
+
+Flat to 49152, then halves between 49152 and 57344 -- the step is abrupt, not a
+slope, and it reproduces to a tenth of a point over three processes. That is a real width limit and it does look like
+occupancy collapse from per-thread live state -- so the comment's *mechanism* is
+probably right while its *value* is off by 8x. What is not yet done is
+confirming the mechanism directly: no register count, occupancy figure or spill
+report has been read out of the compiled kernel, and until one is, "register
+budget" remains the plausible story rather than the measured one. **The cap is
+not raised on the strength of this.** A constant that is conservative by 6x
+costs reachable shapes; a constant moved on an unconfirmed mechanism costs
+correctness somewhere unmeasured. The finding is that 8192 is not where the
+hardware objects, and that whoever raises it should raise it to 49152 and say
+why -- not that it should be raised today.
+
+Note also that the `N=16384, m=4096` cell read **104.3%** of ceiling, above the
+roofline. That working set is 256 MiB, exactly the MALL boundary that
+`AI/gfx950_mall_evictor_defect.md` documents, so this row is cache-warm and is
+excluded from the table above rather than explained away.
