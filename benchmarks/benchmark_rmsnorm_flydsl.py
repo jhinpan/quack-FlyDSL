@@ -296,14 +296,36 @@ def _last_level_cache_bytes(
     contradicted: list[str] = []
 
     def _field(props: dict[str, str], name: str) -> int | None:
-        """An integer field that must be *present* and must parse. None means
-        neither -- absent and malformed are the same amount of evidence."""
+        """An unsigned integer field that must be present, parse, and be in range.
+
+        None means none of the three -- absent, malformed and out-of-range are
+        the same amount of evidence, which is none.
+
+        Every integer KFD publishes here is unsigned, so a negative value is a
+        malformed read and not a small one. Parsing alone let three wrong
+        answers through as clean matches (@Reviewer, against 53c1d4d):
+        ``gfx_target_version -1`` passed the ``!= 0`` CPU test and was accepted
+        as a GPU; ``unique_id -1`` was accepted as an identity; and
+        ``location_id -35584`` is the worst of the three, because Python's
+        arithmetic shift on a negative gives ``(-35584 >> 8) & 0xFF == 117``
+        and ``(-35584 >> 3) & 0x1F == 0`` -- it *aliases* this host's real bus
+        0x75, device 0 and clean-wins the PCI match. A masked bitfield cannot
+        reject its own garbage, so the range check has to happen before the
+        mask, not after.
+
+        Verified against the live topology before tightening rather than after:
+        35332 integer fields across all 10 KFD nodes and their 4370 cache
+        entries, zero negative. ``unique_id`` reaches 18206932166487137716,
+        above 2**63, confirming these are unsigned 64-bit and that signedness
+        is the bug rather than the format.
+        """
         if name not in props:
             return None
         try:
-            return int(props[name])
+            value = int(props[name])
         except ValueError:
             return None
+        return value if value >= 0 else None
 
     try:
         for node in sorted(os.listdir(node_root)):
@@ -492,7 +514,31 @@ def _last_level_cache_bytes(
         provenance["skipped_cache_entries"] = skipped
     if degraded:
         provenance["degraded"] = degraded
-    return max(best, fallback), provenance
+    # `max(best, fallback)` laundered the fallback's value through the
+    # topology's source label. @Reviewer's counterexample against 53c1d4d: a
+    # clean unique_id-matched node reporting only a 4 MiB L2, with torch
+    # claiming a 256 MiB L2_cache_size, returned 268435456 tagged
+    # `source: kfd_topology` and no degradation -- so _resolve_llc accepted a
+    # MALL that KFD never observed. The label said where the number came from
+    # and it was not true of that number.
+    #
+    # A value and its provenance have to travel together or the provenance is
+    # decoration. `best` is what the topology actually reported; the fallback
+    # is recorded beside it, never merged into it. This is the same defect
+    # class again, at the point of return rather than the point of parse: two
+    # different situations -- observed and assumed -- collapsing into one
+    # indistinguishable number.
+    if fallback > best:
+        # Not an error on its own: on a part with no memory-side cache torch's
+        # L2 and KFD's last level are the same line, and a *larger* torch
+        # figure just means we could not see what torch saw. It is recorded
+        # because the caller may want the larger number, and must be able to
+        # tell that choosing it means leaving the topology's evidence.
+        provenance["torch_l2_exceeds_topology"] = {
+            "topology_bytes": best,
+            "torch_l2_bytes": fallback,
+        }
+    return best, provenance
 
 
 GFX950_MALL_BYTES = 256 * 1024**2
@@ -524,17 +570,31 @@ def _resolve_llc(
        because the node that was this card failed to parse and the fallback PCI
        key is not unique under CPX.
 
-    On gfx950 all four are fatal. For (2) and (3) the test is the value itself:
-    this part has a 256 MiB MALL, so any resolved figure below that is wrong
-    however confidently it was obtained. Keying on the number rather than on the
-    failure mode is what makes this robust to the next unanticipated parse
-    failure -- @Reviewer found (2) against ``fad422c`` after (1) was fixed, and
-    enumerating reasons would just wait for a third.
+    On gfx950 all four are fatal, and the acceptance test is a conjunction of
+    three independent things -- a trustworthy *source*, no recorded
+    degradation, and a value at or above the MALL -- none of which subsumes
+    the others.
 
-    (4) is the one case the value cannot catch, and it is why ``degraded`` is
-    also fatal rather than only advisory: every card on this host is the same
-    part, so the wrong node reports the *same* 256 MiB and the number looks
-    perfect. What is unsound there is the identification, not the magnitude.
+    An earlier version of this paragraph said "for (2) and (3) the test is the
+    value itself", and that was the wrong lesson to draw from a true
+    observation. The value catches a *wrong-sized* answer. It cannot catch a
+    right-sized one, and there are two ways to get one:
+
+    - (4), where the number is right because every card on this host is the
+      same part, so the wrong node reports the same 256 MiB. What is unsound
+      is the identification, not the magnitude. This is why ``degraded`` is
+      fatal rather than advisory.
+    - source laundering, which @Reviewer found against ``53c1d4d``: the parser
+      merged torch's fallback into the topology's number with ``max()`` and
+      kept the topology's label, so a node reporting only 4 MiB returned
+      268435456 marked ``kfd_topology``. The value test passed on a number
+      KFD never observed. Fixed at the source -- the parser now returns only
+      what the topology reported -- but the docstring had been asserting a
+      robustness the code did not have, which is the recurring shape here.
+
+    So: the value is a *necessary* condition, never a sufficient one, and the
+    reason to check the source first is that a number which is right by
+    coincidence is not evidence.
 
     ``--llc-bytes`` is the escape hatch for a gfx950 host whose topology this
     helper cannot read.
@@ -543,6 +603,16 @@ def _resolve_llc(
         return args.llc_bytes, {"source": "explicit_override", "flag": "--llc-bytes"}
     llc_bytes, provenance = _last_level_cache_bytes(torch, properties, node_root)
     if _device_arch(torch) != "gfx950":
+        # Off gfx950 the LLC figure is a sizing hint, not a soundness gate, and
+        # the conservative choice is the larger of the two -- a rotation sized
+        # against too *large* a cache is merely wasteful, while one sized too
+        # small is silently cache-warm. The parser no longer merges them (that
+        # is what laundered the source on gfx950), so the choice is made here,
+        # where it can be labelled: `torch_l2_exceeds_topology` in the
+        # provenance says the returned number is torch's, not the topology's.
+        larger = provenance.get("torch_l2_exceeds_topology")
+        if larger is not None:
+            return larger["torch_l2_bytes"], provenance
         return llc_bytes, provenance
     # Three independent conditions, and the value is only one of them. An
     # earlier version accepted any figure at or above the MALL size with no

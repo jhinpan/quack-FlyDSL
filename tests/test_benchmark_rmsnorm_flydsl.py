@@ -783,3 +783,181 @@ def test_the_methodology_string_points_at_evidence_instead_of_asserting_a_number
     assert "178%" not in steady
     assert "probe_event_timing_calibration" in steady
     assert "torch.cuda.Event" in steady
+
+
+def test_a_topology_value_is_never_the_torch_fallback_wearing_its_label(tmp_path):
+    # @Reviewer's blocker 1 against 53c1d4d. `max(best, fallback)` merged the
+    # two numbers and kept the topology's source label, so a node reporting
+    # only a 4 MiB L2 returned 268435456 tagged `kfd_topology` whenever torch
+    # happened to claim a large L2 -- and _resolve_llc's value test passed on a
+    # MALL that KFD never observed. A value and its provenance have to travel
+    # together.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    _node(root, 2, GPU_AT_BDF, ((2, 4096),))  # topology sees only 4 MiB
+    torch = _hip_torch()
+    properties = _properties(l2=256 * 1024**2)  # torch claims 256 MiB
+
+    value, provenance = benchmark._last_level_cache_bytes(torch, properties, str(root))
+
+    assert value == 4 * 1024**2, "the returned number must be the one KFD reported"
+    assert provenance["source"] == "kfd_topology"
+    # The larger torch figure is not discarded, it is labelled -- a caller that
+    # wants it must be able to see that taking it leaves the topology.
+    assert provenance["torch_l2_exceeds_topology"] == {
+        "topology_bytes": 4 * 1024**2,
+        "torch_l2_bytes": 256 * 1024**2,
+    }
+
+
+def test_gfx950_refuses_a_mall_sized_number_the_topology_never_reported(tmp_path):
+    # The end-to-end half of the same blocker: the laundered value reached
+    # _resolve_llc and was accepted, because source, degradation and value all
+    # looked clean. Only the value was a lie.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    _node(root, 2, GPU_AT_BDF, ((2, 4096),))
+    with pytest.raises(RuntimeError, match="reports no cache at or above the MALL size"):
+        benchmark._resolve_llc(
+            _gfx950_torch(),
+            _properties(l2=256 * 1024**2),
+            argparse.Namespace(llc_bytes=None),
+            str(root),
+        )
+
+
+def test_off_gfx950_the_larger_torch_value_is_still_available_to_the_caller(tmp_path):
+    # Over-refusal control. Not merging the two numbers must not silently make
+    # every non-gfx950 host size its rotation against a smaller cache than
+    # before; off gfx950 the LLC is a sizing hint and the conservative choice
+    # is still the larger figure. What changed is that the choice is now made
+    # where it can be labelled, instead of inside the parser where it erased
+    # the distinction.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    _node(root, 2, GPU_AT_BDF, ((2, 4096),))
+    value, provenance = benchmark._resolve_llc(
+        _gfx950_torch(arch="gfx942"),
+        _properties(l2=256 * 1024**2),
+        argparse.Namespace(llc_bytes=None),
+        str(root),
+    )
+    assert value == 256 * 1024**2
+    assert provenance["torch_l2_exceeds_topology"]["topology_bytes"] == 4 * 1024**2
+
+
+@pytest.mark.parametrize(
+    "properties_text,why",
+    [
+        (
+            f"gfx_target_version -1\nunique_id {REAL_UID}\ndomain 0\nlocation_id 29952\n",
+            "a negative gfx_target_version passed the != 0 CPU test and was read as a GPU",
+        ),
+        (
+            "gfx_target_version 90500\ndomain 0\nlocation_id -35584\n",
+            "(-35584 >> 8) & 0xFF is 117 and (-35584 >> 3) & 0x1F is 0, so a negative "
+            "location_id aliases this host's real bus 0x75 device 0 and clean-wins PCI",
+        ),
+        (
+            "gfx_target_version 90500\nunique_id -1\ndomain 0\nlocation_id 29952\n",
+            "a negative unique_id was accepted as an identity",
+        ),
+    ],
+)
+def test_a_negative_identity_field_is_unreadable_not_a_small_number(tmp_path, properties_text, why):
+    # @Reviewer's blocker 2 against 53c1d4d. Every integer KFD publishes is
+    # unsigned -- verified against the live topology, 35332 integer fields
+    # across 10 nodes and 4370 cache entries, zero negative -- so a negative
+    # value is a malformed read, not a small one. The location_id case is the
+    # sharp one: a masked bitfield cannot reject its own garbage, so the range
+    # check has to run before the mask.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    _node(root, 2, properties_text, ((3, 262144),))
+    uuid_text = b"a60c2956cd9dd4c5" if "unique_id -1" not in properties_text else None
+    if "location_id -35584" in properties_text:
+        uuid_text = None  # force the PCI path, which is what aliases
+
+    value, provenance = benchmark._last_level_cache_bytes(
+        _hip_torch(), _properties(uuid_text=uuid_text), str(root)
+    )
+
+    assert value == 4 * 1024**2, why
+    assert provenance["source"] == "torch_l2_fallback"
+    assert provenance["skipped_nodes"] == ["2:unparseable_properties"], why
+
+
+def test_a_real_unique_id_above_two_to_the_63_still_parses():
+    # Over-refusal control for the unsigned check. These are unsigned 64-bit:
+    # this host publishes 18206932166487137716, which is above 2**63 and would
+    # be negative if anything treated it as signed. Rejecting negatives must
+    # not reject the top half of the legitimate range.
+    assert 18206932166487137716 > 2**63
+    root = Path("/sys/class/kfd/kfd/topology/nodes")
+    if not root.is_dir():
+        pytest.skip("no KFD topology on this host")
+    seen = []
+    for node in sorted(root.iterdir()):
+        try:
+            text = (node / "properties").read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == "unique_id":
+                seen.append(int(parts[1]))
+    assert all(value >= 0 for value in seen)
+
+
+def test_a_uid_match_survives_a_malformed_field_it_did_not_need(tmp_path):
+    # Over-refusal control, and the invariant the resolver documents: a node
+    # that *asserted* the identity we asked for is positive evidence, and a
+    # node that failed to parse asserted nothing, so an unreadable `domain` on
+    # the very node whose unique_id matched cannot retract the match. I wrote
+    # this case first asserting the opposite -- that any negative field makes
+    # the node unreadable -- and the code was right and the test was wrong.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    _node(
+        root,
+        2,
+        f"gfx_target_version 90500\nunique_id {REAL_UID}\ndomain -1\nlocation_id 29952\n",
+        ((3, 262144),),
+    )
+    value, provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), str(root))
+    assert value == 256 * 1024**2
+    assert provenance["matched_by"] == "unique_id"
+    assert "degraded" not in provenance
+
+
+def test_a_malformed_domain_still_cannot_hand_the_read_to_a_pci_neighbour(tmp_path):
+    # The same negative `domain`, with torch's unique_id unavailable so the PCI
+    # key is all there is. Now the malformed node is a candidate we neither
+    # confirmed nor excluded, its neighbour at the same address must not win
+    # clean, and on gfx950 that is fatal rather than advisory -- both cards
+    # report the same 256 MiB, so the number cannot reveal the mix-up.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    _node(
+        root,
+        2,
+        f"gfx_target_version 90500\nunique_id {REAL_UID}\ndomain -1\nlocation_id 29952\n",
+        ((3, 262144),),
+    )
+    _node(root, 3, "gfx_target_version 90500\ndomain 0\nlocation_id 29952\n", ((3, 262144),))
+
+    value, provenance = benchmark._last_level_cache_bytes(
+        _hip_torch(), _properties(uuid_text=None), str(root)
+    )
+    assert value == 256 * 1024**2
+    assert provenance["matched_by"] == "pci_domain_bus_device"
+    assert provenance["degraded"] == ["unidentified_nodes"]
+    assert provenance["skipped_nodes"] == ["2:unparseable_properties"]
+
+    with pytest.raises(RuntimeError, match="may belong to a different device"):
+        benchmark._resolve_llc(
+            _gfx950_torch(),
+            _properties(uuid_text=None),
+            argparse.Namespace(llc_bytes=None),
+            str(root),
+        )
