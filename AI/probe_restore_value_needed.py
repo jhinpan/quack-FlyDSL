@@ -57,8 +57,16 @@ read-and-write pattern ``restore_value`` is for. If check 2 also came back
 CHECK 3 (the cost) measures both benchmark paths on the same config to put a
 number on the regime switch: ``_bench_cuda_graph_l2_rotate`` (what autotune
 uses today) vs ``partial(do_bench, warmup=5, rep=25)`` (what it would use the
-moment ``restore_value`` is set). The gap is the systematic bias that scoring
-would inherit -- not noise, and not in a random direction.
+moment ``restore_value`` is set). It runs the full 2x2 -- rotate/single x
+graph/do_bench -- because the two paths differ in launch MECHANISM as well as
+cache state, and comparing only the corners confounds them. On this device the
+mechanism term turns out to carry essentially the whole gap, and the rotation
+term is ~1.00x, which this probe reports without claiming to explain: see
+``the_rotation_term_is_~1.00_and_this_probe_does_not_explain_it`` in the
+output. Note the cache of interest on gfx950 is the 256 MiB MALL, not the
+4 MiB L2 that ``torch.cuda.get_device_properties()`` reports -- reasoning from
+the latter is defect 1 of ``AI/gfx950_mall_evictor_defect.md``, and an earlier
+version of this file did exactly that.
 
 WHICH KERNEL THIS ACTUALLY TESTS, AND WHICH IT DOES NOT. The two decorators at
 issue -- ``rmsnorm_fwd_tuned`` (rmsnorm.py:514) and ``rmsnorm_bwd_tuned``
@@ -112,6 +120,12 @@ OUT = REPO / "AI" / "data" / "restore_value_needed.json"
 
 N_REPLAYS = 8
 SHAPES = [(32768, 4096), (8192, 2048)]
+
+# gfx950 last-level cache. NOT torch's L2_cache_size (4 MiB), which is the
+# per-XCD L2 and is the fallback value AI/gfx950_mall_evictor_defect.md
+# identifies as defect 1. Hardcoded here for the same reason that document
+# hardcodes it, and flagged as hardcoded in the output.
+MALL_BYTES = 256 * 2**20
 
 
 def _fingerprint(t):
@@ -198,6 +212,7 @@ def check_bench_path_gap(M, N, dtype):
         rmsnorm(x_, w_, eps=1e-6)
 
     args = (x, w)
+    one_t = M * N * torch.tensor([], dtype=dtype).element_size()
     n_bufs = _pick_l2_rotate_count(args, {})
     arg_sets, kwarg_sets = _clone_l2_rotate_inputs(args, {}, n_bufs)
 
@@ -227,7 +242,10 @@ def check_bench_path_gap(M, N, dtype):
         return r[0] if isinstance(r, (list, tuple)) else r
 
     graph_rot = [bench_graph(arg_sets, kwarg_sets) for _ in range(5)]
-    # Single-set graph bench: same mechanism, no rotation -> L2-hot.
+    # Single-set graph bench: same mechanism, no rotation. Deliberately NOT
+    # labelled "L2-hot" -- on gfx950 the last-level cache is the 256 MiB MALL,
+    # not the 4 MiB L2 that torch reports, so whether either cell is warm is a
+    # question about MALL residency. See the note below.
     graph_one = [
         bench_graph([arg_sets[0]] * len(arg_sets), [kwarg_sets[0]] * len(kwarg_sets))
         for _ in range(5)
@@ -242,53 +260,69 @@ def check_bench_path_gap(M, N, dtype):
         "shape": [M, N],
         "dtype": str(dtype).replace("torch.", ""),
         "rotation_buffers": n_bufs,
-        "l2_cache_size_bytes": torch.cuda.get_device_properties(0).L2_cache_size,
-        "one_x_tensor_bytes": M * N * torch.tensor([], dtype=dtype).element_size(),
+        "torch_reported_L2_cache_size_bytes": torch.cuda.get_device_properties(0).L2_cache_size,
+        "mall_bytes_assumed": MALL_BYTES,
+        "mall_bytes_is_hardcoded": True,
+        "one_x_tensor_bytes": one_t,
+        "rotation_working_set_bytes": n_bufs * one_t,
+        "single_set_fits_mall": one_t <= MALL_BYTES,
+        "rotation_set_fits_mall": n_bufs * one_t <= MALL_BYTES,
         "cells_ms": {
             "graph_rotate__what_autotune_uses_today": {"median": g_rot, "runs": graph_rot},
-            "graph_single__L2_hot_same_mechanism": {"median": g_one, "runs": graph_one},
-            "do_bench_rotate__L2_cold_other_mechanism": {"median": d_rot, "runs": do_rot},
+            "graph_single__same_mechanism_no_rotation": {"median": g_one, "runs": graph_one},
+            "do_bench_rotate__other_mechanism_rotated": {"median": d_rot, "runs": do_rot},
             "do_bench_single__what_restore_value_switches_to": {"median": d_one, "runs": do_one},
         },
         "effects": {
-            "l2_effect_within_graph__single_over_rotate": g_one / g_rot if g_rot else None,
-            "l2_effect_within_do_bench__single_over_rotate": d_one / d_rot if d_rot else None,
+            "rotation_effect_within_graph__single_over_rotate": g_one / g_rot if g_rot else None,
+            "rotation_effect_within_do_bench__single_over_rotate": d_one / d_rot if d_rot else None,
             "mechanism_effect_at_rotate__do_bench_over_graph": d_rot / g_rot if g_rot else None,
             "end_to_end_switch__do_single_over_graph_rotate": d_one / g_rot if g_rot else None,
         },
         "note": (
-            "The end-to-end ratio is NOT an L2 measurement and must not be "
+            "The end-to-end ratio is NOT a cache measurement and must not be "
             "quoted as one. do_bench_single is SLOWER than graph_rotate here, "
-            "which looks backwards for an 'L2-hot is faster' story -- because "
-            "the mechanism term dominates: do_bench pays one event pair and "
-            "one fresh output allocation per launch, while the graph replays "
-            "200 recorded calls with no Python in the window. Also: "
+            "which looks backwards for a 'warm is faster' story -- because the "
+            "mechanism term dominates: do_bench pays one event pair and one "
+            "fresh output allocation per launch, while the graph replays 200 "
+            "recorded calls with no Python in the window. Also: "
             "bench_utils.py:98 is a claim about which CONFIG wins (relative "
             "ranking across layouts), not about the magnitude of any single "
             "config, so none of these ratios confirm or refute it -- that "
             "needs the whole config set scored under both regimes."
         ),
-        "why_the_l2_term_is_~1.00_here": (
-            "MI355X reports L2_cache_size = 4 MiB. One 32768x4096 bf16 tensor "
-            "is 256 MiB and one 8192x2048 is 32 MiB -- 64x and 8x the cache "
-            "before any rotation. So the single-buffer cell is not actually "
-            "L2-hot: the working set blows the cache on the FIRST pass, and "
-            "rotating 4 clones cannot make it colder than already-cold. The "
-            "~1.00x within-graph ratio is therefore the EXPECTED result on "
-            "this device, not evidence that rotation is useless in general -- "
-            "on a card where the tensor fits (or on the small shapes where it "
-            "would), the same code path would separate. It does mean the "
-            "rotation machinery buys nothing for these two rmsnorm shapes on "
-            "MI355X while still paying 4x the memory."
+        "the_rotation_term_is_~1.00_and_this_probe_does_not_explain_it": (
+            "CORRECTION of an earlier version of this field, which argued the "
+            "null result from torch's L2_cache_size = 4 MiB and concluded 'the "
+            "working set blows the cache, rotation cannot make an already-cold "
+            "read colder.' That reasoning is wrong. On gfx950 the last-level "
+            "cache is the 256 MiB MALL, not the 4 MiB per-XCD L2 (hierarchy: "
+            "per-CU L1D -> 4 MiB L2 x8 XCDs -> 256 MiB MALL -> HBM, ROCm Kernel "
+            "Wiki hw-chiplet-xcd). Reading L2_cache_size and sizing a cache "
+            "argument on it is defect 1 of AI/gfx950_mall_evictor_defect.md, "
+            "fixed harness-side in 31c1fd4. Against the right cache the claim "
+            "inverts for the small shape: 8192x2048 rotated is 128 MiB, which "
+            "FITS the MALL comfortably -- nearly the same 128 MiB example that "
+            "document uses -- so rotation there produces no cold read at all. "
+            "32768x4096 is the opposite: single sits at 256 MiB (exactly at "
+            "capacity) while rotated is 1024 MiB and does cross it, which is "
+            "where a contrast should have shown. It did not. This probe "
+            "therefore records a ~1.00x within-graph ratio WITHOUT a surviving "
+            "explanation. Candidates to separate: rmsnorm at these sizes is "
+            "HBM-bound enough that MALL residency moves little; the evictor gap "
+            "(defect 1) means neither cell is genuinely warm; or graph_single "
+            "is not single-buffer in the way assumed. That is Experiment No.002 "
+            "territory, which gfx950_mall_evictor_defect.md blocks pending "
+            "re-collection. The MALL size above is hardcoded, not measured -- "
+            "same caveat that document flags about its own 256 MiB."
         ),
-        "l2_within_do_bench_is_confounded": (
-            "The do_bench rotate cell is NOT a clean L2 contrast: rotation "
-            "there is a Python closure doing a modulo and an index per call, "
-            "inside the timed region, whereas do_bench_single calls straight "
-            "through. Its 0.797x/0.984x is that overhead plus allocator "
-            "behaviour, not a cache effect. Only the within-graph ratio is "
-            "like-for-like, because there the rotation is baked into the "
-            "recorded graph either way."
+        "rotation_within_do_bench_is_confounded": (
+            "The do_bench rotate cell is NOT a clean contrast: rotation there "
+            "is a Python closure doing a modulo and an index per call, inside "
+            "the timed region, whereas do_bench_single calls straight through. "
+            "Its ratio is that overhead plus allocator behaviour, not a cache "
+            "effect. Only the within-graph ratio is like-for-like, because "
+            "there the rotation is baked into the recorded graph either way."
         ),
     }
 
@@ -367,9 +401,14 @@ def main():
         for k, v in c.items():
             print(f"      {v['median']:.4f} ms  {k}")
         print(
-            f"      -> L2 within graph {e['l2_effect_within_graph__single_over_rotate']:.3f}x, "
-            f"within do_bench {e['l2_effect_within_do_bench__single_over_rotate']:.3f}x, "
+            f"      -> rotation within graph "
+            f"{e['rotation_effect_within_graph__single_over_rotate']:.3f}x, "
+            f"within do_bench {e['rotation_effect_within_do_bench__single_over_rotate']:.3f}x, "
             f"mechanism {e['mechanism_effect_at_rotate__do_bench_over_graph']:.3f}x"
+        )
+        print(
+            f"      -> rotation set {g['rotation_working_set_bytes'] / 2**20:.1f} MiB, "
+            f"fits 256 MiB MALL: {g['rotation_set_fits_mall']}"
         )
     print(f"wrote {OUT}")
     return 0

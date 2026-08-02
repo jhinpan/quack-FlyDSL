@@ -3433,33 +3433,79 @@ of 5 from `AI/data/restore_value_needed.json`):
 
 | | graph | `do_bench` |
 | --- | --- | --- |
-| rotate (4 sets) | **0.0906** | 0.1127 |
-| single | 0.0908 | 0.1110 |
+| rotate (4 sets) | **0.0906** | 0.1129 |
+| single | 0.0910 | 0.1112 |
 
-- **Mechanism** = 1.244× here, 1.629× at 8192×2048. `do_bench` pays an event
+- **Mechanism** = 1.246× here, 1.630× at 8192×2048. `do_bench` pays an event
   pair and a fresh output allocation per launch; the graph replays 200 recorded
   calls with no Python in the window. This term is essentially the whole
-  end-to-end gap (1.225× and 1.320×).
-- **L2, within one mechanism** = 1.00× (1.003× and 0.990×).
+  end-to-end gap (1.227× and 1.323×).
+- **Rotation, within one mechanism** = 1.00× (1.004× and 0.991×).
 
-(Cells move in the third decimal between runs — 0.0904/0.0907/0.1112 in the run
-before the one that produced the committed artifact. Message `f75cd8b8` quotes
-that earlier run; the table here is the artifact's. The effect ratios are
-unchanged to three figures, which is the point of quoting ratios.)
+(Cells move in the third decimal between runs — 0.0904/0.0907/0.1112 two runs
+earlier. Message `f75cd8b8` quotes that earlier run; the table here is the
+current artifact's. Ratios are stable to three figures, which is why the
+section argues from ratios.)
 
-And the 1.00× has a concrete cause worth recording on its own: **MI355X reports
-`L2_cache_size` = 4 MiB**, while one 32768×4096 bf16 tensor is 256 MiB and one
-8192×2048 is 32 MiB — 64× and 8× the cache before any rotation. The
-single-buffer cell was **never L2-hot**; the working set blows the cache on the
-first pass, and rotating four clones cannot make an already-cold read colder.
-So for these two shapes on this device the rotation machinery buys nothing
-while paying 4× the memory. That is a device-and-shape statement, not a verdict
-on the design — on a card or shape where the tensor fits, the same code
-separates.
+###### …and the explanation I first gave for the 1.00× was the very defect this repo already documents
+
+I wrote, and committed in `2566fb9`: "**MI355X reports `L2_cache_size` = 4 MiB**,
+while one 32768×4096 bf16 tensor is 256 MiB and one 8192×2048 is 32 MiB — 64×
+and 8× the cache before any rotation. The single-buffer cell was never L2-hot;
+the working set blows the cache on the first pass, and rotating four clones
+cannot make an already-cold read colder." **That reasoning is wrong, and wrong
+in the specific way `AI/gfx950_mall_evictor_defect.md` exists to warn about.**
+
+The last-level cache on gfx950 is not the 4 MiB L2. The hierarchy (ROCm Kernel
+Wiki `hw-chiplet-xcd`, quoted in that file) is
+
+    per-CU L1D -> per-XCD 4 MiB L2 (x8 XCDs in SPX) -> 256 MiB MALL -> HBM
+
+and `torch.cuda.get_device_properties().L2_cache_size` returning 4 MiB is
+precisely the value that document calls the **fallback** — defect 1 in its own
+table is the harness sizing its rotation target against `L2_cache_size` instead
+of the MALL, fixed in `31c1fd4` ("size the rotation target and the evictor gate
+against the MALL, not L2"). I read the same property the old harness read, drew
+the same conclusion the old harness drew, and did it in a tree that contains a
+written record of why that is a mistake. Working the numbers against the right
+cache:
+
+| shape | one tensor | rotation set (4 bufs) | fits 256 MiB MALL? |
+| --- | --- | --- | --- |
+| 32768×4096 bf16 | 256.0 MiB | 1024.0 MiB | single **yes** (at capacity), rotated **no** |
+| 8192×2048 bf16 | 32.0 MiB | 128.0 MiB | **yes, both** |
+
+So the claim inverts for the small shape. At 8192×2048 the rotated working set
+is **128 MiB, comfortably inside the MALL** — it is nearly the same 128 MiB
+example defect 1 uses ("too big to trigger the evictor, small enough to stay
+resident in MALL"). Rotation there does not produce a cold read at all, and
+"the working set blows the cache" is simply false. For 32768×4096, rotation
+*does* cross the MALL while the single-buffer cell sits right at capacity, so
+that pair is the one where a real hot/cold contrast should have appeared.
+
+Which leaves the honest statement of the observation much narrower than what I
+published: **the within-graph single-vs-rotate ratio came out ~1.00× on both
+shapes, and I do not have an explanation for it that survives contact with this
+document.** The reason I offered explains a null result on the small shape by
+appeal to a cache that is not the relevant one, and predicts a *non*-null on
+the large shape, which is not what the probe measured. Candidates worth
+separating before anyone leans on it: rmsnorm at these sizes is
+HBM-bandwidth-bound enough that MALL residency moves little; or the evictor gap
+means neither cell is genuinely warm; or the `graph_single` cell is not
+single-buffer in the way I assumed. That is Experiment No.002 territory
+(`gfx950_mall_evictor_defect.md` blocks it pending re-collection), not
+something to settle in a footnote.
+
+What survives unchanged is the part the section is actually for: the
+**mechanism** term (1.244×/1.629×) accounts for essentially the whole
+`graph_rotate` → `do_bench_single` gap, so the end-to-end number is not an L2
+measurement and must not be quoted as one. That conclusion never depended on
+which cache is last-level. The `restore_value` verdict does not depend on any
+of this either — it rests on the mutation contract and the replay test.
 
 One contamination of my own, flagged rather than quietly dropped: the
 `do_bench` rotate cell rotates via a Python closure doing a modulo and an index
-**inside the timed region**, so its 0.985×/0.810× is that overhead plus
+**inside the timed region**, so its 0.985×/0.812× is that overhead plus
 allocator behaviour, not a cache effect. Only the within-graph ratio is
 like-for-like,
 because there the rotation is baked into the recorded graph on both sides.
