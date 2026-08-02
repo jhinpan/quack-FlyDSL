@@ -993,10 +993,13 @@ register counts and spill reports have since been read out (see the
 register-budget section at the end of this file) and they put a capacity step
 on this same boundary. Occupancy has since been measured there too: it halves
 from 1.96 to 1.00 waves/SIMD between 49152 and 57344, matching the computed
-bound. So both edges are now measured, but what is established is still that
-two boundaries coincide, not that one causes the other. **The cap is not raised on the strength of this.** A
-constant that is conservative by 6x costs reachable shapes; a constant moved on
-an unconfirmed mechanism costs correctness somewhere unmeasured. The finding is
+bound. An intervention at fixed N then moved it back -- forcing 2 waves at
+57344 recovers bandwidth from 38.1% to 52.8%, while the same hint at 49152,
+where it has nothing to move, changes nothing. So the direction is established;
+the magnitude is not, and the lever also adds spills. **The cap is not raised
+on the strength of this.** A constant that is conservative by 6x costs
+reachable shapes; a constant moved on a mechanism whose magnitude is unmeasured
+costs correctness somewhere unmeasured. The finding is
 that 8192 is not where the hardware objects, and that whoever raises it should
 raise it to 49152 and say why -- not that it should be raised today.
 
@@ -1368,15 +1371,53 @@ The step is a register-file threshold, not a width effect: `vgpr_alloc` crosses
 `floor(512/264)=1`. N itself rises smoothly through it -- 49152 → 57344 is a
 factor of 1.17 -- while occupancy halves.
 
-Two things this does **not** settle. It is still a coincidence of two edges:
-occupancy halving and bandwidth halving at the same N does not establish that
-the first causes the second. And "latency-hiding-bound" remains an assumption
-about the kernel rather than a finding. What would settle direction is an
-intervention -- force the allocation across the boundary at fixed N and watch
-the bandwidth follow. That is still owed. What has changed is that the
-occupancy half is no longer a register-count argument wearing an occupancy
-label; the bandwidth half is now archived too (`rmsnorm_fwd_width_cliff.json`),
-so both edges are measured and the open question is narrowed to causality.
+By itself this is still a coincidence of two edges: occupancy halving and
+bandwidth halving at the same N does not establish that the first causes the
+second. So the intervention it called for has now been run.
+
+### The intervention: move occupancy at fixed N, watch bandwidth
+
+`AI/probe_rmsnorm_occupancy_intervention.py`, raw at
+`AI/data/rmsnorm_fwd_occupancy_intervention.json`. The lever is
+`--amdgpu-waves-per-eu`, which flydsl's ROCm backend takes as a `waves_per_eu`
+compile hint. At N=57344 it pushes the allocation from 264 VGPRs to 256 --
+across the boundary, at a width that has not changed.
+
+| hint | vgpr | alloc | measured waves/SIMD | vgpr spills | scratch | bandwidth % |
+|------|------|-------|---------------------|-------------|---------|-------------|
+| none | 264 | 264 | 1.000 | 0 | 0 | 38.1 |
+| 2 | 256 | 256 | **1.940** | 8 | 36 | **52.8** |
+| 3 | 168 | 168 | 2.798 | 97 | 392 | 43.1 |
+| 4 | 128 | 128 | 3.680 | 137 | 552 | 34.4 |
+
+Control, N=49152 (already at 2 waves, so the hint has nothing to move):
+
+| hint | alloc | measured waves/SIMD | spills | bandwidth % |
+|------|-------|---------------------|--------|-------------|
+| none | 232 | 1.959 | 0 | 76.6 |
+| 2 | 232 | 1.954 | 0 | 77.0 |
+
+**Restoring occupancy at the cliff recovers a substantial part of the lost
+bandwidth: 38.1% → 52.8%.** The control is the load-bearing row -- where the
+hint cannot move occupancy it does not move bandwidth either (76.6 vs 77.0),
+which is what separates "occupancy drives bandwidth here" from "this compiler
+flag is generically good". The probe asserts the control's allocation is
+unchanged and aborts if it is not.
+
+**The lever is not clean, and the reading depends on saying how.** It buys
+occupancy with spills, so the first step is a two-variable change. What makes
+it evidential is the direction of the disagreement: bandwidth improves *while*
+the spill count goes 0 → 8, i.e. the confound pushes against the hypothesis and
+loses. The later steps then reverse and track spills (97, 137) while occupancy
+keeps climbing -- so "more occupancy is always faster" is **not** shown, and I
+am not claiming it. A clean lever would move occupancy at constant spills; I
+do not have one.
+
+So the claim is directional, not quantitative, and occupancy is not the whole
+story: even at the best hint 52.8% is well short of the 76.8% the kernel
+reaches one width below. What remains unestablished is the *magnitude* of the
+occupancy contribution, and "latency-hiding-bound" is still an assumption about
+the kernel rather than a finding.
 
 **Two traps had to be cleared to get this number, and both are worth recording
 because either would have produced a confident wrong answer.**
