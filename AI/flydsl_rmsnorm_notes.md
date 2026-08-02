@@ -2378,7 +2378,7 @@ because the naive table is the one that would have been sent.
 | split parameter reduce | `dw_partial` | yes | two-stage, no atomic variant |
 | dual dx dtype | yes | kernel only | absent from the API, not "partial" |
 | **layernorm / mean** | **yes** | **no** | **real gap** |
-| cluster / multicast | yes | n/a | DSMEM claim ok; **N ceiling is policy**, see re-audit |
+| cluster / multicast | yes | n/a | `n/a` right, reason unstated; see re-audit |
 
 The four rows a grep gets wrong: `autotune` and `persistent` live in
 `quack/flydsl/`, not in `rmsnorm_flydsl.py`, so a module-scoped grep reads 0 on
@@ -2432,8 +2432,9 @@ internal and `rmsnorm_flydsl.py:728` hard-wires it to `needs_grad`; the public
 kernels are at parity. The APIs are not, and a caller cannot obtain rstd from
 FlyDSL at all.
 
-**Row 10, `cluster / multicast | n/a`, is wrong, and it is the one that
-matters.** The row is defensible as written -- gfx950 really has no DSMEM, and
+**Row 10, `cluster / multicast | n/a`, is the one that matters, and after five
+wrong causes it turns out to be defensible for a reason nobody stated.** I
+called it wrong; it is not wrong, it is unexplained. gfx950 really has no DSMEM, and
 the ROCm Kernel Wiki states the general form of it: "There is no TMA/mbarrier
 equivalent on CDNA; completion is gated by the generic VMCNT counter, not a
 dedicated barrier object" (`wiki/hardware/async-copy-lds.md`). But writing
@@ -2476,6 +2477,26 @@ NVIDIA, it is what divides `tiler_mn[1]` until `sX` fits, exactly as
 third reader was closer to right than I was. What remains true from my
 correction is only the narrow part -- that the Blackwell-bwd bump is not the
 general mechanism -- and that was never the interesting claim.
+
+**@CrossVendor then ran the control on H100 and turned that arithmetic into an
+observation.** At immutable `a0d08a87`: default N=262144 bf16 passes forward
+and backward; **forced `cluster_n = 1` fails**, while an N=65536 cluster-1
+control passes. That is the positive/negative pair, and it settles the
+causality properly -- clusters are *required* for this SM90 implementation's
+262144 row, and the unconditional full-tile `sX` allocation is the binding
+mechanism, not `reload_from`. My inference happened to land on the right
+mechanism, but inference is what it was; his is the run that establishes it.
+
+He also found the thing I would have gotten wrong a third time. Cutedsl's
+alignment domain is **not** unrestricted: it accepts non-multiple-of-8 16-bit
+rows (N=758 bf16, N=764 fp16) and N=3001 fp32, but *odd* 16-bit rows fail on a
+16-bit `cp.async` atom. So the domain is dtype- and codegen-dependent. Both my
+original claim ("cutedsl serves any length") and my withdrawal of it ("I have
+shown no shape that separates them") were too coarse; the truth is a
+structured domain neither statement describes. And on dtypes: fp8 e4m3/e5m2
+compile and run on H100, **fp4 fails NVVM** -- so the "map includes fp8 and
+fp4" row I wrote overstated by one entry, exactly the pattern of naming a set
+larger than the evidence.
 
 For the record on the reader whose finding started that correction: what he
 found, `_bump_cluster_n_for_smem` (`quack/rmsnorm_config.py:344-371`), raises
@@ -2525,21 +2546,30 @@ So the honest statement of row 10, after five wrong ones:
   distance to a measured degradation is **~6x**, not 32x, and what sits at
   the far end is a cliff rather than a failure. Raising the cap is a policy
   question with data in hand.
-- **Whether cutedsl serves 262144 at `cluster_n = 1` is still unverified, and
-  the arithmetic says it does not.** I asserted it from a parameter list. Do
-  not repeat that claim without an H100 run; @CrossVendor is doing one.
+- **Cutedsl at `cluster_n = 1` does not serve 262144 -- measured, not
+  inferred.** @CrossVendor's H100 control: default passes fwd+bwd, forced
+  cluster-1 fails, N=65536 cluster-1 passes. Clusters are causally required
+  for that row on SM90.
 - Which means the two backends' ceilings are *not* the clean 8192-vs-262144
   contrast the row implied in either direction. FlyDSL's is a policy cap over
   a working kernel. Cutedsl's is a real smem constraint that clusters relieve
   -- on hardware that has them.
 
-Four readers, four causes -- registers, clusters, LDS staging, Blackwell smem
--- for a limit that is a constant in a config file with a probe already
-proving it non-binding. Every one of those causes was reached by reading code
-that really does do what it appears to do; none was reached by checking
-whether the limit binds. That is the defect class of this whole file, and I
-reproduced it twice in one afternoon, the second time in the act of correcting
-the first.
+And therefore the row's `n/a`, which I attacked hardest, is **right** -- but
+for a reason it never gave and none of us reached by reading. gfx950 has no
+clusters; cutedsl needs clusters for its widest rows; so that part of
+cutedsl's range is genuinely not portable, and marking it `n/a` rather than a
+deficit is correct. What the row failed to say is that this is a *range*
+statement, not a feature checkbox, and that FlyDSL's own 8192 has nothing to
+do with it.
+
+Five readers, five causes -- registers, clusters, LDS staging, Blackwell smem,
+policy -- for what turned out to be two unrelated limits filed under one row.
+Every cause was reached by reading code that really does do what it appears to
+do; the two that survived were reached by running it, one on each vendor's
+hardware. I reproduced the file's own defect twice in one afternoon, the
+second time in the act of correcting the first, and the thing that broke the
+loop was not more careful reading.
 
 **Row 8, `dual dx dtype | partial | narrower`, understates a total absence.**
 The FlyDSL *kernel* is dual-dtype capable -- it reads `dx.dtype` off a
@@ -2586,15 +2616,16 @@ layernorm's mean subtraction -- a grep for "mean" finds it and means nothing.
 actually lives: the accepted input domain.** That much stands. Two of the four
 sub-claims I filed under it do not, both caught by @CrossVendor:
 
-- **N alignment: my evidence proves nothing.** I wrote that FlyDSL requires a
-  multiple of `N_ALIGNMENT` (8) "while cutedsl is tested at 192, 760, 1128."
-  192, 760 and 1128 are all divisible by 8. Every shape I offered as the
-  contrast would pass FlyDSL's check. The restriction is real and unlisted
-  (`quack/flydsl/rmsnorm_config.py:41`, enforced `rmsnorm_flydsl.py:140`), and
-  cutedsl's `vecsize = gcd(N, ...)` (`quack/rmsnorm.py:126`) does look
-  general, but *I have shown no shape that separates them.* A sibling test at
-  N=668 on the same `ReductionBase` would; that is cross-entropy, not rmsnorm,
-  and I have not run it.
+- **N alignment: my evidence proved nothing, and the answer is structured.**
+  I wrote that FlyDSL requires a multiple of `N_ALIGNMENT` (8) "while cutedsl
+  is tested at 192, 760, 1128." 192, 760 and 1128 are all divisible by 8 --
+  every shape I offered as the contrast would pass FlyDSL's check. The
+  restriction is real and unlisted (`quack/flydsl/rmsnorm_config.py:41`,
+  enforced `rmsnorm_flydsl.py:140`). @CrossVendor then measured the other
+  side on H100: cutedsl takes N=758 bf16, N=764 fp16 and N=3001 fp32, but odd
+  16-bit rows fail on a 16-bit `cp.async` atom. So there *is* a separating
+  shape -- 758 and 764 are it -- and the domain is dtype/codegen-dependent
+  rather than either "any length" (my first claim) or unknown (my second).
 - **Architecture: "sm80-sm120" is my invention.** I read an `arch < Arch.sm_90`
   fallback branch (`quack/rmsnorm.py:100,650`) and reported the span as
   supported hardware. The README's actual claim is **H100, B200/B300, or RTX
@@ -2602,12 +2633,17 @@ sub-claims I filed under it do not, both caught by @CrossVendor:
   which is the same substitution as reading a test parameter as an
   observation, two sections up.
 
-What survives: the N ceiling (a policy cap on one side, measured above; a real
-smem constraint on the other, unverified) and the output dtype domain (FlyDSL
-admits fp16/bf16/fp32 only, `rmsnorm_flydsl.py:29`; cutedsl never asserts
-`out`'s dtype and its map includes fp8 and fp4). Ten rows of feature
-checkboxes said nothing about any of it, and a caller hits these before
-hitting any feature.
+What survives, both now measured rather than read. The N ceiling: a policy cap
+on the FlyDSL side (probe above, correct to 262144 with the cap lifted), a
+real per-CTA smem constraint on the cutedsl side that clusters relieve
+(@CrossVendor's H100 control -- default 262144 passes, forced `cluster_n = 1`
+fails, N=65536 cluster-1 passes). And the output dtype domain: FlyDSL admits
+fp16/bf16/fp32 only (`rmsnorm_flydsl.py:29`) where cutedsl never asserts
+`out`'s dtype -- but the breadth is **fp8 e4m3/e5m2, which compile and run on
+H100; fp4 fails NVVM**. My "its map includes fp8 and fp4" was one entry too
+wide: the type appears in `torch2cute_dtype_map`, which is not the same set as
+the types that survive codegen. Ten rows of feature checkboxes said nothing
+about any of it, and a caller hits these before hitting any feature.
 
 Three corrections this forced to text elsewhere in this file. "Nothing in-tree
 consumes layernorm" is false -- `tests/test_layernorm.py` and
