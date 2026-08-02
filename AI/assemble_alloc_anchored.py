@@ -1,0 +1,458 @@
+"""Assemble the anchored six-cell run against predictions made before it ran.
+
+Written and committed BEFORE `alloc_factorial_anchored.json` exists. That is the
+same discipline `assemble_alloc_factorial.py` used, and it is worth restating why
+it is not ceremony: the four-cell run produced a headline that turned out to be a
+property of the aggregation basis, and the only reason that was discoverable
+rather than deniable is that the basis had been fixed in a commit before anyone
+saw a number. Every choice below is therefore made blind.
+
+What the earlier run declared, verbatim, in two places
+-----------------------------------------------------
+`anchor_limitation.declared_followup`:
+    "add count=0 and count=13 cells at 512 MiB in one shuffled run with the
+    existing four."
+
+`slot_structure.declared_followup_for_the_anchor_run`:
+    "the argmin slot index per process, with the prediction that count=0 differs
+    from every count>0 cell, and the test that the two routes to a fixed total
+    continue to disagree."
+
+So there are exactly two pre-registered questions, and this file answers those
+and reports everything else as exploratory:
+
+    P1 (rate)    does the prefix move the rate at all? count=0 vs the rest.
+    P2 (argmin)  is count=0's argmin slot different from every count>0 cell,
+                 and do the two 24 GiB routes still disagree?
+
+P2 is the sharper test because it is a prediction about a NOMINAL outcome with
+five possible values, made in advance. The four-cell grid could not test it at
+all: four cells with four distinct argmin values is saturated, zero residual df,
+so any rule fit perfectly. Six cells give df back.
+
+What a null on P1 would and would not mean
+------------------------------------------
+If count=0 matches the count>0 cells, the prefix does not move the rate in this
+regime and the four-cell grid's 94.53% is measuring something other than what it
+claims. That is the outcome that would hurt most, which is why it is named here
+rather than left implicit.
+
+The anchors' own limitation, restated because it bounds every number below
+------------------------------------------------------------------------
+count=0 allocates nothing; count=13 reaches 6.5 GiB. Both sit BELOW the
+measurement's own 12.0 GiB live set, so their process high-water is pinned by the
+measurement rather than by the prefix. This is the staircase sweep's exact
+limitation, reintroduced knowingly. Consequence: the anchors are evidence about
+"does the prefix matter at all", NOT two more points on a bytes curve. Any
+figure below that treats 0 / 6.5 / 12 / 24 / 48 GiB as one ordered axis is
+mislabelled, and `_bytes_axis_is_not_valid_across_anchors` says so in the output.
+
+Run:  python AI/assemble_alloc_anchored.py IN.json OUT.json
+"""
+
+import argparse
+import hashlib
+import json
+import math
+import random
+import statistics
+import subprocess
+from collections import defaultdict
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+
+PERM_SEED = 20260806
+PERM_DRAWS = 20000
+
+# The measurement's own live set. Anchors below this are pinned by the
+# measurement rather than by their prefix.
+MEASUREMENT_LIVE_GIB = 12.0
+
+
+def _rank(v):
+    s = sorted(range(len(v)), key=lambda i: v[i])
+    out = [0.0] * len(v)
+    i = 0
+    while i < len(s):
+        j = i
+        while j + 1 < len(s) and v[s[j + 1]] == v[s[i]]:
+            j += 1
+        r = (i + j) / 2 + 1
+        for k in range(i, j + 1):
+            out[s[k]] = r
+        i = j + 1
+    return out
+
+
+def _corr(x, y):
+    mx, my = statistics.fmean(x), statistics.fmean(y)
+    sxx = sum((a - mx) ** 2 for a in x)
+    syy = sum((b - my) ** 2 for b in y)
+    if sxx <= 0 or syy <= 0:
+        return 0.0
+    return sum((a - mx) * (b - my) for a, b in zip(x, y)) / math.sqrt(sxx * syy)
+
+
+def _cells(rows):
+    """Per-process mean over slots -- the pre-registered basis, unchanged.
+
+    Kept as primary here even though the four-cell run established that the
+    basis is a modelling choice rather than a neutral summary. Switching now,
+    with the aggregation sweep's table already visible, would be exactly the
+    post-hoc selection the pre-registration exists to prevent. The sweep is
+    rerun below on all four bases so the reader can see the dependence rather
+    than take this choice on trust.
+    """
+    by = defaultdict(list)
+    for r in rows:
+        by[r["cell"]].append(statistics.fmean(r["spread"]["TBps_per_identical_buffer"]))
+    return {
+        c: {
+            "n": len(v),
+            "mean_TBps": round(statistics.fmean(v), 5),
+            "sd_TBps": round(statistics.stdev(v), 5) if len(v) > 1 else None,
+            "values": [round(x, 5) for x in v],
+        }
+        for c, v in sorted(by.items())
+    }
+
+
+def _p1_prefix_moves_the_rate(rows):
+    """PRE-REGISTERED. Does the prefix move the rate at all?
+
+    count=0 against every count>0 cell. Welch rather than pooled-variance t,
+    because the four-cell run's cell sds ranged 0.0018 to 0.0083 -- a factor of
+    4.6 -- and pooling variances that differ that much is how a difference in
+    spread gets reported as a difference in means.
+    """
+    by = defaultdict(list)
+    for r in rows:
+        by[r["cell"]].append(statistics.fmean(r["spread"]["TBps_per_identical_buffer"]))
+    if "zero" not in by:
+        return {"ran": False, "why": "no count=0 cell in this run"}
+    z = by["zero"]
+    out = {}
+    for c, v in sorted(by.items()):
+        if c == "zero":
+            continue
+        ma, mb = statistics.fmean(v), statistics.fmean(z)
+        va, vb = statistics.variance(v), statistics.variance(z)
+        na, nb = len(v), len(z)
+        se = math.sqrt(va / na + vb / nb)
+        t = (ma - mb) / se if se > 0 else 0.0
+        df = (
+            (va / na + vb / nb) ** 2 / ((va / na) ** 2 / (na - 1) + (vb / nb) ** 2 / (nb - 1))
+            if se > 0
+            else 0.0
+        )
+        out[f"{c}_minus_zero"] = {
+            "delta_TBps": round(ma - mb, 5),
+            "welch_t": round(t, 3),
+            "welch_df": round(df, 1),
+        }
+    return {
+        "ran": True,
+        "question": "does the prefix move the rate at all, relative to allocating nothing?",
+        "contrasts": out,
+        "why_welch": (
+            "cell sds in the four-cell run spanned 0.0018 to 0.0083 TB/s, a factor of "
+            "4.6. Pooling variances that unequal is how a difference in spread gets "
+            "reported as a difference in means."
+        ),
+        "what_a_null_here_would_mean": (
+            "if count=0 matches the count>0 cells then the prefix does not move the rate "
+            "in this regime, and the four-cell grid's 94.53% total-bytes figure is "
+            "describing something other than what it claims. Named before the run "
+            "because it is the outcome that would cost the most."
+        ),
+    }
+
+
+def _p2_argmin(rows):
+    """PRE-REGISTERED. The argmin slot index, and the two predictions made about it.
+
+    Prediction A: count=0's argmin differs from every count>0 cell's.
+    Prediction B: the two routes to 24 GiB continue to give different argmins.
+
+    Both were recorded in slot_structure.declared_followup_for_the_anchor_run
+    before this run existed. A is a prediction about a nominal outcome with five
+    possible values; under a null where the argmin is unrelated to the treatment
+    it is not a coin flip, and the permutation test below supplies the reference
+    rather than an intuition about it.
+    """
+    by = defaultdict(list)
+    for r in rows:
+        v = r["spread"]["TBps_per_identical_buffer"]
+        by[r["cell"]].append(min(range(len(v)), key=lambda j: v[j]))
+    per_cell = {
+        c: {
+            "argmin_each_process": v,
+            "unanimous": len(set(v)) == 1,
+            "modal": max(set(v), key=v.count),
+        }
+        for c, v in sorted(by.items())
+    }
+
+    pred_a = None
+    if "zero" in by:
+        z = set(by["zero"])
+        others = {c: set(v) for c, v in by.items() if c != "zero"}
+        pred_a = {
+            "zero_argmins": sorted(z),
+            "overlaps_with": sorted(c for c, s in others.items() if s & z),
+            "holds": all(not (s & z) for s in others.values()),
+        }
+
+    pred_b = None
+    if "lo_hi" in by and "hi_lo" in by:
+        pred_b = {
+            "lo_hi_argmins": sorted(set(by["lo_hi"])),
+            "hi_lo_argmins": sorted(set(by["hi_lo"])),
+            "routes_still_disagree": not (set(by["lo_hi"]) & set(by["hi_lo"])),
+        }
+
+    # Permutation reference for "cells have distinct argmins": shuffle the
+    # cell labels across processes and count how often the observed level of
+    # cell-argmin agreement is matched. Shuffling LABELS rather than generating
+    # uniform argmins keeps the marginal distribution of argmin values fixed at
+    # whatever it actually is, so a skewed marginal cannot manufacture the
+    # result -- which a uniform-null would have let it do.
+    flat = [
+        (r["cell"], min(range(5), key=lambda j: r["spread"]["TBps_per_identical_buffer"][j]))
+        for r in rows
+    ]
+    labels = [c for c, _ in flat]
+    vals = [a for _, a in flat]
+
+    def _score(lbls):
+        g = defaultdict(list)
+        for c, a in zip(lbls, vals):
+            g[c].append(a)
+        unanimous = sum(1 for v in g.values() if len(set(v)) == 1)
+        distinct = len({v[0] for v in g.values() if len(set(v)) == 1})
+        return unanimous, distinct
+
+    obs = _score(labels)
+    rnd = random.Random(PERM_SEED)
+    perm = labels[:]
+    ge = 0
+    for _ in range(PERM_DRAWS):
+        rnd.shuffle(perm)
+        s = _score(perm)
+        if s >= obs:
+            ge += 1
+    return {
+        "per_cell": per_cell,
+        "prediction_A_zero_differs_from_every_count_gt_0": pred_a,
+        "prediction_B_routes_to_24GiB_still_disagree": pred_b,
+        "permutation_p_for_cellwise_argmin_structure": round(ge / PERM_DRAWS, 5),
+        "what_the_permutation_shuffles": (
+            "cell LABELS across processes, holding the observed multiset of argmin "
+            "values fixed. A null that instead drew argmins uniformly would let a "
+            "skewed marginal -- if slot 0 is simply slowest most of the time -- "
+            "manufacture apparent cell structure. This one cannot: it asks only "
+            "whether the argmins line up with the cells better than chance "
+            "relabelling, which is the actual claim."
+        ),
+        "why_this_is_the_sharper_test": (
+            "it is a prediction about a nominal outcome with five values, fixed in a "
+            "commit before the data existed. The four-cell grid could not test it: four "
+            "cells with four distinct argmins is saturated, zero residual df, so some "
+            "rule fit perfectly whatever the values were. Six cells give df back."
+        ),
+    }
+
+
+def _exploratory_slot_profiles(rows):
+    """NOT pre-registered. Cell mean slot profiles and spreads, for description only."""
+    by = defaultdict(list)
+    for r in rows:
+        by[r["cell"]].append(r["spread"]["TBps_per_identical_buffer"])
+    out = {}
+    for c, v in sorted(by.items()):
+        n = len(v[0])
+        out[c] = {
+            "mean_profile_by_slot": [
+                round(statistics.fmean([x[j] for x in v]), 4) for j in range(n)
+            ],
+            "mean_spread_max_minus_min": round(statistics.fmean([max(x) - min(x) for x in v]), 4),
+        }
+    return {
+        "status": "EXPLORATORY -- not declared before the run, do not quote as a test",
+        "per_cell": out,
+    }
+
+
+def _aggregation_sweep(rows):
+    """NOT pre-registered as a test; run because the four-cell artifact showed the
+    headline is basis-dependent, so publishing one basis silently would repeat the
+    error that file spent three commits correcting."""
+    out = {}
+    for name, fn in (
+        ("mean_PREREGISTERED_PRIMARY", statistics.fmean),
+        ("median", statistics.median),
+        ("max_coordinate", max),
+        ("min_coordinate", min),
+    ):
+        by = defaultdict(list)
+        for r in rows:
+            by[r["cell"]].append(fn(r["spread"]["TBps_per_identical_buffer"]))
+        mu = {c: statistics.fmean(v) for c, v in by.items()}
+        row = {c: round(mu[c], 5) for c in sorted(mu)}
+        if "lo_hi" in mu and "hi_lo" in mu:
+            row["diagonal_hi_lo_minus_lo_hi"] = round(mu["hi_lo"] - mu["lo_hi"], 5)
+        if "zero" in mu:
+            row["zero_to_lo_lo_delta"] = round(mu.get("lo_lo", 0) - mu["zero"], 5)
+        out[name] = row
+    return {
+        "status": "reported on all four bases because the four-cell run showed the "
+        "headline is a property of the aggregation. The mean stays primary.",
+        "bases": out,
+    }
+
+
+def _order_control(rows):
+    """Residual rate against collection position. Residuals, not raw rate.
+
+    The four-cell version of this check correlated the RAW rate and reported
+    -0.0362, which reads as a clean null; the residuals gave +0.4971. Cell means
+    up to 0.064 TB/s apart dominated the raw series. Spearman on residuals here
+    from the start.
+    """
+    rows = sorted(rows, key=lambda r: r["seq"])
+    xs = [r["seq"] for r in rows]
+    ys = [statistics.fmean(r["spread"]["TBps_per_identical_buffer"]) for r in rows]
+    mu = defaultdict(list)
+    for r, v in zip(rows, ys):
+        mu[r["cell"]].append(v)
+    mu = {c: statistics.fmean(v) for c, v in mu.items()}
+    res = [v - mu[r["cell"]] for r, v in zip(rows, ys)]
+    rs = _corr(_rank(xs), _rank(res))
+    rnd = random.Random(PERM_SEED)
+    p2, ge = xs[:], 0
+    for _ in range(PERM_DRAWS):
+        rnd.shuffle(p2)
+        if abs(_corr(_rank(p2), _rank(res))) >= abs(rs) - 1e-12:
+            ge += 1
+    return {
+        "residual_spearman_vs_position": round(rs, 4),
+        "permutation_p_two_sided": round(ge / PERM_DRAWS, 4),
+        "corr_RAW_rate_vs_position_DO_NOT_QUOTE_AS_THE_CONTROL": round(
+            _corr(_rank(xs), _rank(ys)), 4
+        ),
+        "why_that_field_is_named_that": (
+            "the four-cell run's first draft correlated the raw rate and got -0.0362, "
+            "which reads as a clean null. Residualising on cell mean gave +0.4971. Cell "
+            "means up to 0.064 TB/s apart dominated the raw series, so the raw figure "
+            "answered a question nobody asked."
+        ),
+        "what_this_cannot_do": (
+            "it fits drift as MONOTONE in position. Non-monotone or periodic structure "
+            "passes it untouched, exactly as it passes a linear-trend adjustment."
+        ),
+    }
+
+
+def _preconditions(rows):
+    hw = defaultdict(list)
+    for r in rows:
+        hw[r["cell"]].append(r["prefix_high_water_GiB"])
+    per = {c: round(statistics.fmean(v), 3) for c, v in sorted(hw.items())}
+    below = {c: v for c, v in per.items() if v < MEASUREMENT_LIVE_GIB}
+    return {
+        "prefix_high_water_GiB_by_cell": per,
+        "measurement_live_set_GiB": MEASUREMENT_LIVE_GIB,
+        "cells_below_the_measurement_live_set": sorted(below),
+        "this_is_by_design_not_a_failure": (
+            "the anchors exist to sample BELOW where the four-cell grid could reach. "
+            "Their process high-water is therefore pinned by the measurement's own "
+            "12.0 GiB rather than by their prefix -- the staircase sweep's limitation, "
+            "reintroduced knowingly."
+        ),
+        "_bytes_axis_is_not_valid_across_anchors": (
+            "do NOT plot 0 / 6.5 / 12 / 24 / 48 GiB as one ordered bytes axis. For the "
+            "two anchors the prefix does not set the peak, so the x value is not the "
+            "quantity the other cells' x values measure. The anchors answer 'does the "
+            "prefix matter at all', not 'where on the bytes curve does this sit'."
+        ),
+    }
+
+
+def _manifest(src, extra):
+    out = {}
+    for p in [src, *extra]:
+        f = Path(p)
+        if not f.is_absolute():
+            f = REPO / p
+        if f.exists():
+            b = f.read_bytes()
+            out[str(p)] = {"sha256": hashlib.sha256(b).hexdigest(), "bytes": len(b)}
+    return out
+
+
+def _git():
+    def run(*a):
+        try:
+            return subprocess.run(
+                ["git", *a], cwd=str(REPO), capture_output=True, text=True, check=True
+            ).stdout.strip()
+        except (subprocess.CalledProcessError, OSError):
+            return None
+
+    dirty = run("status", "--porcelain") or ""
+    return {
+        "commit": run("rev-parse", "--short", "HEAD"),
+        "worktree_dirty": bool(dirty),
+        "worktree_dirty_paths": sorted(x[3:] for x in dirty.splitlines()) if dirty else [],
+    }
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("src")
+    ap.add_argument("out")
+    args = ap.parse_args()
+
+    raw = json.loads(Path(args.src).read_text())
+    rows = raw["rows"]
+
+    payload = {
+        "what": (
+            "the pre-registered anchored six-cell run: count=0 and count=13 added to the "
+            "original four in one shuffle, 24 processes."
+        ),
+        "preregistration": (
+            "this assembler was written and committed before alloc_factorial_anchored.json "
+            "existed. The two questions it answers were declared in the FOUR-cell "
+            "artifact, in anchor_limitation.declared_followup and in "
+            "slot_structure.declared_followup_for_the_anchor_run, before that run either."
+        ),
+        "device_name": raw.get("device_name"),
+        "shuffle_seed": raw.get("shuffle_seed"),
+        "anchored": raw.get("anchored"),
+        "n_processes": len(rows),
+        "preconditions": _preconditions(rows),
+        "cell_means": _cells(rows),
+        "P1_PREREGISTERED_does_the_prefix_move_the_rate": _p1_prefix_moves_the_rate(rows),
+        "P2_PREREGISTERED_argmin_slot": _p2_argmin(rows),
+        "order_control": _order_control(rows),
+        "aggregation_sweep": _aggregation_sweep(rows),
+        "exploratory_slot_profiles": _exploratory_slot_profiles(rows),
+        "what_this_still_cannot_do": (
+            "it identifies no mechanism. Nothing here explains why a slot is slow or why "
+            "the treatment relabels which one is, and no factorial or ordering control "
+            "can. Placement past the MALL remains consistent with the pattern and "
+            "unevidenced against any other mechanism that reorders buffers."
+        ),
+        "manifest": _manifest(
+            args.src, ["AI/probe_alloc_factorial.py", "AI/assemble_alloc_anchored.py"]
+        ),
+        "git": _git(),
+    }
+    Path(args.out).write_text(json.dumps(payload, indent=2) + "\n")
+    print(f"wrote {args.out}")
+
+
+if __name__ == "__main__":
+    main()
