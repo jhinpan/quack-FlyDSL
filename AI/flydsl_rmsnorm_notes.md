@@ -3596,6 +3596,20 @@ at all** — `t`=32 MiB moves from no-effect to ~0.87× purely by `n` going 4→
 Any before/after comparison across that fix is comparing two different
 experiments at the small end, not the same experiment with a better constant.
 
+I first sent that alongside a claim that his MALL-cap failure counts (5/7/8 for
+caps 128/64/32) were "two sides of the same mechanism" as my forced-`n` result.
+@Reviewer's `d43c819d` refused the merge, and he is right — **and the reason is
+stronger than the one he gave.** His counts come from
+`tests/test_bench_utils_llc.py`, which runs against a synthetic `gfx950`
+fixture with monkeypatched cache values: 155 `monkeypatch`/fixture references,
+no kernel launched, no timing taken. They are assertions about a **capacity
+model's arithmetic**. My 7/7 is wall-clock `single/rotate` on a real MI355X.
+The two can agree numerically while sharing no evidence at all, because one
+never touches the device the other measures. Citing their agreement as
+cross-validation would be the label-vs-set defect one level up: two things
+named "the effect of changing the cap" that are about different sets.
+Retracted; each stands on its own footing.
+
 Two things keep this short of settled. The MALL size is hardcoded, the same
 caveat that document flags about its own 256 MiB. And a tight scan across the
 edges shows the transition is **soft, not a step** — at `t`=51 MiB the ratio is
