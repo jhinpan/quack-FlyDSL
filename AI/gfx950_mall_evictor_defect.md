@@ -116,6 +116,24 @@ rotation apart, same kernel — **1.32x inflation**. The 16 MiB sweep steps at
 the same place (8 bufs = 256 MiB, 5309 GB/s → 12 bufs = 384 MiB, 4008 GB/s)
 and gives **1.32x**, independently.
 
+**Independently reproduced by @Autotune**, with a cleaner control than mine:
+bytes moved *per iteration* held constant at 32 MiB while only the buffer count
+varies, so iteration cost cannot co-vary with working set. MI355X, bf16 copy,
+7 repeats, median (min/max spread <1.5% at every point):
+
+     n_bufs   in+out MiB   GB/s med    min     max
+          3          192       6624    6602    6627
+          4          256       6555    6494    6562
+          5          320       4680    4658    4699
+          6          384       4658    4594    4678
+          7          448       4708    4661    4723
+
+Same knee at 256 MiB, −28.6% across it, flat thereafter out to 1024 MiB. Their
+`rocminfo` node also reports `L1 32 KB / L2 4096 KB / L3 262144 KB`. Note the
+256 MiB point reads 6555 — on the *high* side, agreeing with my 6453 — so a
+cell landing at exactly 256.0 MiB is MALL-warm, not clean. That is a diagnostic
+probe on a shared box, not a PR-grade number.
+
 A correctly-sized evictor recovers the HBM number:
 
     64 MiB x2 bufs (WS=256 MiB), evictor=0 MiB      6403 GB/s   <- current behaviour
@@ -166,6 +184,21 @@ So the autotuner path is *less* affected than the harness, accidentally — the
   first time, so it is a behavioural change here, not just a correctness one.
   Unlike the harness, this path has **no evictor at all** — only rotation — so
   the 8 affected cells have nothing else to fall back on.
+
+**Changing `l2_size` alone is not sufficient here, and `max_buffers` must move
+with it.** @Autotune raised this and it checks out. With the target at
+`3 x 256 MiB = 768 MiB`, any shape under 48 MiB per set wants more than 16
+buffers and is clipped by `max_buffers=16` — and small shapes are exactly the
+ones with the smallest per-set size. Simulating the same 18 cells with only the
+target corrected takes the affected count from 8 to 6, not to 0: `1x4096`,
+`256x4096` and `512x4096` (fwd and bwd) all remain inside the MALL, clipped at
+16 buffers. Clearing 256 MiB needs 65 buffers at `256x4096` fwd and ~16k at
+`1x4096` fwd. The memory is not the problem (~0.26 GiB at the crossing point,
+by construction); the buffer count is.
+
+The exact threshold on the *current* target: `n_by_l2 >= 4` only when a set is
+<= 4.00 MiB, and no real rmsnorm shape here is that small, which is why the
+`min_buffers=4` floor wins everywhere today.
 
 Scope note: `quack/autotuner.py` is not in PR #4's diff (that PR touches
 `quack/flydsl/rmsnorm_autotune.py`), so this is not blocked by the PR #4 fence.
@@ -219,10 +252,15 @@ agent, and it parses cleanly:
    but it should be presented as correcting a mis-derivation, not as the thing
    that buys back the 1.32x. On this access pattern it does not.
 
-2. **Force the rotation working set past the MALL.** Rejected as a primary fix —
-   the table above shows the requirement is impossible at small `m`, and
-   raising `max_rotation_buffers` to 65 for `256x4096` would allocate absurd
-   amounts of memory to solve a problem the evictor solves directly.
+2. **Force the rotation working set past the MALL.** Still rejected for the
+   *harness*, where the evictor solves the problem directly — but my original
+   reason was wrong and should not be reused. I wrote that raising
+   `max_rotation_buffers` to 65 for `256x4096` "would allocate absurd amounts of
+   memory". It would not: the working set at the crossing point is 256 MiB by
+   construction, so the allocation is ~0.26 GiB regardless of buffer count. What
+   is awkward at small `m` is the *count* (65 buffers at `256x4096`, ~16k at
+   `1x4096`), not the bytes. For the autotuner path, which has no evictor, this
+   is the only available lever and the memory cost is not an objection to it.
 
 3. **Treat memory-side cache as a separate regime and report it.** Not a fix,
    but worth doing alongside 1: record effective-LLC bytes and the resulting
