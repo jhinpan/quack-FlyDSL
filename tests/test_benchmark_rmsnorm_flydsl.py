@@ -719,3 +719,67 @@ def test_dirty_tree_is_recorded_so_a_commit_hash_is_not_read_as_provenance():
     if dirty["git_dirty"]:
         assert dirty["git_dirty_paths"]
     assert len(dirty["git_dirty_paths"]) <= 20
+
+
+def test_the_evictor_field_name_says_what_the_evictor_actually_does():
+    # @Reviewer's blocker 3. v3 corrected the prose methodology string to say
+    # the evictor runs once per rotation *before* the event window, and left
+    # the CSV column named `l2_eviction_between_calls` -- so the machine
+    # contract still asserted the thing the prose had just withdrawn. A
+    # consumer reads the column, not the paragraph.
+    assert "evictor_ran_per_rotation" in benchmark.RESULT_FIELDS
+    assert "l2_eviction_between_calls" not in benchmark.RESULT_FIELDS
+
+
+def test_the_rename_bumped_the_schema_so_a_reader_can_tell_the_versions_apart():
+    # A breaking rename that kept schema_version at 3 would leave v3 artifacts
+    # from before and after the rename indistinguishable, which is the same
+    # failure as an unrecorded skip: two different things reading identically.
+    # The frozen artifacts under AI/gate_llc_before_after/ are v2 and v3 and
+    # legitimately carry the old name.
+    # The parent emitted v3 under both field names, so this asserts the bump
+    # itself and fails against it -- a frozen-artifact check alone would pass
+    # on the parent and guard nothing.
+    source = Path(benchmark.__file__).read_text(encoding="utf-8")
+    assert source.count('"schema_version": 4,') == 2, "row and environment must agree"
+    assert '"schema_version": 3,' not in source
+    frozen = Path(benchmark.__file__).resolve().parents[1] / "AI" / "gate_llc_before_after"
+    for environment_path in sorted(frozen.glob("*/environment.json")):
+        recorded = json.loads(environment_path.read_text(encoding="utf-8"))["schema_version"]
+        assert recorded < 4, f"{environment_path} predates the rename but claims v{recorded}"
+
+
+def test_the_methodology_string_points_at_evidence_instead_of_asserting_a_number():
+    # @Reviewer's blocker 4: a machine-readable methodology should not state an
+    # unarchived diagnostic as fact. The 178% figure was never archived and did
+    # not reproduce (the measured per-call over-read is +52%/+18%/+6%). The
+    # string now cites the committed probe rather than quoting a magnitude.
+    torch = types.SimpleNamespace(
+        __version__="2.9.1",
+        version=types.SimpleNamespace(hip="7.2", cuda=None),
+        cuda=types.SimpleNamespace(
+            device_count=lambda: 1,
+            get_device_properties=lambda _: types.SimpleNamespace(
+                name="AMD Instinct MI355X",
+                gcnArchName="gfx950:sramecc+:xnack-",
+                multi_processor_count=256,
+                total_memory=309220868096,
+                L2_cache_size=4 * 1024**2,
+            ),
+        ),
+    )
+    args = argparse.Namespace(
+        shapes=[(512, 4096)],
+        dtype_weight_modes=[("bfloat16", "same")],
+        operations=["fwd"],
+        providers=["torch"],
+        eps=1e-6,
+        warmup_rounds=1,
+        sample_rounds=1,
+        max_rotation_buffers=4,
+        l2_target_ratio=3.0,
+    )
+    steady = benchmark._environment(torch, args, Path("/tmp"))["methodology"]["steady_state"]
+    assert "178%" not in steady
+    assert "probe_event_timing_calibration" in steady
+    assert "torch.cuda.Event" in steady

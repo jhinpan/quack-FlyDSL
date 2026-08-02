@@ -46,6 +46,22 @@ DTYPE_WEIGHT_MODES = (
 EVICTOR_LLC_MARGIN = 2
 OPERATIONS = ("fwd", "bwd")
 PROVIDERS = ("flydsl", "quack", "torch")
+# Schema history, so a consumer can tell what a given artifact's fields mean:
+#   v2  l2_target_bytes (actually carrying 3 x LLC), l2_eviction_between_calls
+#   v3  l2_target_bytes -> rotation_target_bytes; + evictor_threshold_bytes,
+#       last_level_cache_provenance, rotation_target_bytes, evictor_gate
+#   v4  l2_eviction_between_calls -> evictor_ran_per_rotation
+#
+# v4 is a rename with no behavioural change, and it is a *breaking* rename on
+# purpose. The old name asserted the evictor ran between individually timed
+# calls; it never did -- it runs once per rotation, before the event window
+# opens. v3 corrected that in the prose methodology string while leaving the
+# field name saying the opposite, so the machine-readable contract still
+# claimed the thing the prose had just withdrawn. @Reviewer's blocker 3. No
+# alias is kept: a consumer reading `l2_eviction_between_calls` should fail
+# loudly against a v4 artifact rather than silently read a field whose meaning
+# it has wrong. The v2/v3 artifacts under AI/gate_llc_before_after/ keep the
+# old name and are frozen; their schema_version distinguishes them.
 RESULT_FIELDS = (
     "schema_version",
     "provider",
@@ -70,7 +86,7 @@ RESULT_FIELDS = (
     "rotation_working_set_bytes",
     "rotation_target_bytes",
     "evictor_threshold_bytes",
-    "l2_eviction_between_calls",
+    "evictor_ran_per_rotation",
     "timed_samples",
 )
 
@@ -623,11 +639,20 @@ def _time_rotating_calls(
 ) -> list[float]:
     """Time a whole rotation with one event pair, not one pair per call.
 
-    A hipEvent record carries barrier semantics, so bracketing every launch
-    charges two pipeline drains to each kernel. Checked against rocprofv3's
-    hardware timestamps on gfx950: per-call pairs read 178% high on a 6us
-    kernel and 9% high on a 29us one, while one pair around the rotation is
-    within 5% of both.
+    A ``torch.cuda.Event`` record carries barrier semantics, so bracketing
+    every launch charges two pipeline drains to each kernel. Measured against
+    rocprofv3 hardware timestamps on gfx950 by
+    ``AI/probe_event_timing_calibration.py``, sidecar committed beside it:
+    per-call pairs read +52% / +18% / +6% over the hardware duration at
+    ``512x4096`` / ``4096x4096`` / ``32768x1024``, and one pair per rotation
+    reads +16% / +5% / +1%. The over-read shrinks as the kernel grows, which
+    is the expected shape for a fixed per-launch cost.
+
+    An earlier version of this docstring said "178% high on a 6us kernel and
+    9% high on a 29us one, while one pair around the rotation is within 5% of
+    both". Those numbers were never archived and do not reproduce; the ordering
+    they were used to justify does. @Reviewer refused the unarchived figure
+    (blocker 4) and the probe exists because he was right to.
 
     The evictor runs outside the window. Keeping the operands out of L2 is the
     rotation's job -- ``_rotation_count`` sizes it against the L2 target for
@@ -1188,7 +1213,7 @@ def _device_arch(torch: Any) -> str:
 def _environment(torch: Any, args: argparse.Namespace, output_dir: Path) -> dict[str, Any]:
     properties = torch.cuda.get_device_properties(0)
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "status": "running",
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         # Every provider is checked against the fp32 reference before it is
@@ -1244,11 +1269,14 @@ def _environment(torch: Any, args: argparse.Namespace, output_dir: Path) -> dict
         },
         "methodology": {
             "steady_state": (
-                "one torch.cuda device-event pair per timed rotation, divided by the "
-                "number of calls in it -- NOT one pair per call, which carries barrier "
-                "semantics and read 178% high on a 6us kernel against rocprofv3 "
-                "hardware timestamps; after provider warmup, with FlyDSL first-launch "
-                "JIT synchronized, recorded separately, and excluded"
+                "one torch.cuda.Event pair per timed rotation, divided by the number "
+                "of calls in it -- NOT one pair per call, which carries barrier "
+                "semantics and over-reads short kernels. Magnitude is measured, not "
+                "asserted here: see AI/probe_event_timing_calibration.py and its "
+                "committed sidecar for the per-call and per-rotation over-read against "
+                "rocprofv3 hardware timestamps on this part. After provider warmup, "
+                "with FlyDSL first-launch JIT synchronized, recorded separately, and "
+                "excluded"
             ),
             "cache": (
                 "round-robin cloned tensor sets sized against rotation_target_bytes "
@@ -1486,7 +1514,7 @@ def _run(
             logical_gbps = byte_count / stats["median_us"] / 1000.0
             peak_bw_pct = logical_gbps / peak_bw["median_gbps"] * 100.0
             row = {
-                "schema_version": 3,
+                "schema_version": 4,
                 "provider": provider_name,
                 "provider_detail": prepared.provider_detail,
                 "operation": cell.operation,
@@ -1509,7 +1537,7 @@ def _run(
                 "rotation_working_set_bytes": rotation_working_set_bytes,
                 "rotation_target_bytes": rotation_target_bytes,
                 "evictor_threshold_bytes": EVICTOR_LLC_MARGIN * llc_bytes,
-                "l2_eviction_between_calls": use_evictor,
+                "evictor_ran_per_rotation": use_evictor,
                 "timed_samples": len(samples_us),
             }
             rows.append(row)
