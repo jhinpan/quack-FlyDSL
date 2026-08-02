@@ -158,27 +158,112 @@ def test_gate_flips_exactly_the_cells_the_docs_claim():
     assert gate_flipped == 37
 
 
-def test_resolve_llc_fails_closed_on_gfx950_rather_than_measuring_cache_warm():
+def _gfx950_torch(arch="gfx950:sramecc+:xnack-"):
+    """A torch stub whose _device_arch resolves, so _resolve_llc runs for real.
+
+    The previous version of the fail-closed test monkeypatched
+    _last_level_cache_bytes out of the way and asserted against a hand-written
+    provenance dict. It therefore tested the branch, not the pipeline, and
+    passed while a corrupt cache entry walked straight through the real parser.
+    Everything below drives the actual sysfs reader over a temporary tree.
+    """
+    return types.SimpleNamespace(
+        version=types.SimpleNamespace(hip="7.2"),
+        cuda=types.SimpleNamespace(
+            get_device_properties=lambda _: types.SimpleNamespace(gcnArchName=arch)
+        ),
+    )
+
+
+def _gfx950_node(tmp_path, caches):
+    root = tmp_path / "nodes"
+    root.mkdir()
+    node = root / "2"
+    (node / "caches").mkdir(parents=True)
+    (node / "properties").write_text(
+        "gfx_target_version 90500\nunique_id 11964983762810164421\ndomain 0\nlocation_id 30720\n"
+    )
+    for index, body in enumerate(caches):
+        cache = node / "caches" / str(index)
+        cache.mkdir()
+        (cache / "properties").write_text(body)
+    return str(root)
+
+
+def test_resolve_llc_fails_closed_on_gfx950_rather_than_measuring_cache_warm(tmp_path):
     # The whole point of the helper. Returning torch's 4 MiB L2 here would let
     # the run complete with every row silently measured against a resident
     # 256 MiB MALL -- the original defect, reintroduced quietly.
-    torch = _hip_torch()
     args = argparse.Namespace(llc_bytes=None)
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(
-            benchmark,
-            "_last_level_cache_bytes",
-            lambda *_: (4 * 1024**2, {"source": "torch_l2_fallback", "reason": "no_matching_node"}),
-        )
-        patch.setattr(benchmark, "_device_arch", lambda _: "gfx950")
-        with pytest.raises(RuntimeError, match="known wrong"):
-            benchmark._resolve_llc(torch, _properties(), args)
+    absent = str(tmp_path / "absent")
+    with pytest.raises(RuntimeError, match="could not be read"):
+        benchmark._resolve_llc(_gfx950_torch(), _properties(), args, absent)
 
-        # Another architecture has no known-wrong fallback, so it is allowed.
-        patch.setattr(benchmark, "_device_arch", lambda _: "gfx942")
-        value, provenance = benchmark._resolve_llc(torch, _properties(), args)
-        assert value == 4 * 1024**2
-        assert provenance["reason"] == "no_matching_node"
+    # Another architecture has no known-wrong fallback, so it is allowed.
+    value, provenance = benchmark._resolve_llc(_gfx950_torch("gfx942"), _properties(), args, absent)
+    assert value == 4 * 1024**2
+    assert provenance["reason"] == "no_kfd_topology"
+
+
+def test_a_corrupt_mall_entry_beside_a_good_l2_entry_is_not_reported_as_success(tmp_path):
+    # @Reviewer's counterexample against fad422c. The matched node parses, the
+    # L2 entry parses, and the level-3 MALL entry does not -- so `best` is a
+    # real reading of the wrong cache. The old code returned
+    # (4194304, source=kfd_topology) with nothing marking it degraded, and
+    # _resolve_llc had no reason to fail. The run then measured cache-warm
+    # while its own artifact claimed a successful topology read.
+    root = _gfx950_node(tmp_path, ["level 2\nsize 4096\n", "level 3\nsize not-a-number\n"])
+    value, provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), root)
+
+    # The parser still returns its best effort -- callers on other parts may
+    # legitimately use it -- but it no longer claims the read was complete.
+    assert value == 4 * 1024**2
+    assert provenance["source"] == "kfd_topology"
+    assert provenance["degraded"] == "unparseable_cache_entries"
+    assert provenance["skipped_cache_entries"] == ["1:bad_size_level3"]
+
+    with pytest.raises(RuntimeError, match="unparseable"):
+        benchmark._resolve_llc(
+            _gfx950_torch(), _properties(), argparse.Namespace(llc_bytes=None), root
+        )
+
+
+def test_gfx950_refuses_a_clean_read_that_reports_no_mall(tmp_path):
+    # Distinct from the case above: nothing failed to parse, KFD simply reports
+    # only a 4 MiB L2. Enumerating failure reasons would let this through,
+    # because there is no failure. gfx950 has a 256 MiB MALL, so any resolved
+    # value below it is wrong however cleanly it was obtained.
+    root = _gfx950_node(tmp_path, ["level 2\nsize 4096\n"])
+    _, provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), root)
+    assert "degraded" not in provenance
+
+    with pytest.raises(RuntimeError, match="no cache at or above"):
+        benchmark._resolve_llc(
+            _gfx950_torch(), _properties(), argparse.Namespace(llc_bytes=None), root
+        )
+
+
+def test_a_complete_gfx950_read_is_accepted_and_not_marked_degraded(tmp_path):
+    # The over-refusal negative case: three of the four gfx950 paths raise, so
+    # this pins the one that must not.
+    root = _gfx950_node(tmp_path, ["level 2\nsize 4096\n", "level 3\nsize 262144\n"])
+    value, provenance = benchmark._resolve_llc(
+        _gfx950_torch(), _properties(), argparse.Namespace(llc_bytes=None), root
+    )
+    assert value == 256 * 1024**2
+    assert provenance["source"] == "kfd_topology"
+    assert "degraded" not in provenance
+
+
+def test_override_still_wins_over_a_corrupt_topology(tmp_path):
+    # The documented escape hatch has to work in exactly the situation that
+    # makes the run fail closed, or fail-closed is just a wall.
+    root = _gfx950_node(tmp_path, ["level 2\nsize 4096\n", "level 3\nsize not-a-number\n"])
+    value, provenance = benchmark._resolve_llc(
+        _gfx950_torch(), _properties(), argparse.Namespace(llc_bytes=256 * 1024**2), root
+    )
+    assert value == 256 * 1024**2
+    assert provenance["source"] == "explicit_override"
 
 
 def test_explicit_override_bypasses_topology_and_is_recorded():

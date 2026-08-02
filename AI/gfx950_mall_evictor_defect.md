@@ -2,7 +2,9 @@
 
 Status: **confirmed by measurement**; the harness-side fix is **written and
 measured** (`31c1fd4` sized the rotation target and the gate against the MALL,
-`fad422c` made the LLC lookup fail closed; before/after cost is committed under
+`fad422c` and `4bd05e7` made the LLC lookup fail closed -- `fad422c` alone did
+not, it only caught whole-topology failure and let a corrupt MALL cache entry
+resolve to 4 MiB while still reporting `source: kfd_topology`; before/after cost is committed under
 `AI/gate_llc_before_after/`). What is *not* done is re-collection: no MI355X
 cell has been re-measured under the fixed harness. Blocks Experiment No.002
 (MI355X flydsl-vs-torch matrix) — any MI355X numbers taken before the fix are

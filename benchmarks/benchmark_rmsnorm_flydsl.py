@@ -316,7 +316,16 @@ def _last_level_cache_bytes(
     else:
         return fallback, {"source": "torch_l2_fallback", "reason": "no_matching_node"}
 
+    # Entries skipped inside the *matched* node are recorded, not just skipped.
+    # Skipping silently and then reporting success is how a corrupt level-3
+    # entry -- exactly the MALL line this helper exists to read -- degrades to
+    # torch's 4 MiB while the provenance still says "kfd_topology". @Reviewer
+    # demonstrated that against fad422c: a valid L2 entry beside an unparseable
+    # level-3 entry returned (4194304, source=kfd_topology) and _resolve_llc
+    # saw nothing to fail on. A skipped entry is missing evidence; the caller
+    # has to be able to tell that from a complete read.
     best = 0
+    skipped: list[str] = []
     try:
         cache_root = os.path.join(matched, "caches")
         for cache in sorted(os.listdir(cache_root)):
@@ -324,24 +333,43 @@ def _last_level_cache_bytes(
                 with open(os.path.join(cache_root, cache, "properties")) as handle:
                     cprops = dict(line.split()[:2] for line in handle if len(line.split()) >= 2)
             except OSError:
+                skipped.append(f"{cache}:unreadable")
                 continue
             try:
-                if int(cprops.get("level", 0)) >= 2:
-                    best = max(best, int(cprops.get("size", 0)) * 1024)  # KFD reports KB
+                level = int(cprops.get("level", 0))
             except ValueError:
-                continue  # unparseable cache entry: skip it, do not abort the run
+                skipped.append(f"{cache}:bad_level")
+                continue
+            if level < 2:
+                continue
+            try:
+                best = max(best, int(cprops["size"]) * 1024)  # KFD reports KB
+            except (KeyError, ValueError):
+                skipped.append(f"{cache}:bad_size_level{level}")
     except OSError:
         return fallback, {"source": "torch_l2_fallback", "reason": "no_caches_directory"}
     if best <= 0:
         return fallback, {"source": "torch_l2_fallback", "reason": "no_level2_plus_cache"}
-    return max(best, fallback), {
+    provenance: dict[str, Any] = {
         "source": "kfd_topology",
         "matched_by": key,
         "matched_node": matched,
     }
+    if skipped:
+        provenance["degraded"] = "unparseable_cache_entries"
+        provenance["skipped_cache_entries"] = skipped
+    return max(best, fallback), provenance
 
 
-def _resolve_llc(torch: Any, properties: Any, args: argparse.Namespace) -> tuple[int, dict]:
+GFX950_MALL_BYTES = 256 * 1024**2
+
+
+def _resolve_llc(
+    torch: Any,
+    properties: Any,
+    args: argparse.Namespace,
+    node_root: str = KFD_NODE_ROOT,
+) -> tuple[int, dict]:
     """Fail closed on gfx950 rather than silently reporting cache-warm numbers.
 
     Falling back to ``L2_cache_size`` on gfx950 reinstates the exact defect this
@@ -350,23 +378,54 @@ def _resolve_llc(torch: Any, properties: Any, args: argparse.Namespace) -> tuple
     because a crash is noticed. On any other architecture the fallback is just a
     conservative guess and is allowed through with the reason recorded.
 
+    Three ways to end up with a wrong number, not one. The first version of this
+    function only caught the first:
+
+    1. the whole topology read fails and we fall back;
+    2. the read *succeeds* but an individual cache entry was unparseable, so the
+       MALL line may be the one that was skipped;
+    3. the read succeeds completely and simply reports no cache above the
+       per-XCD L2.
+
+    On gfx950 all three are fatal, and the test for the last two is the value
+    itself: this part has a 256 MiB MALL, so any resolved figure below that is
+    wrong however confidently it was obtained. Keying on the number rather than
+    on the failure mode is what makes this robust to the next unanticipated
+    parse failure -- @Reviewer found (2) against ``fad422c`` after (1) was
+    fixed, and enumerating reasons would just wait for a third.
+
     ``--llc-bytes`` is the escape hatch for a gfx950 host whose topology this
     helper cannot read.
     """
     if args.llc_bytes is not None:
         return args.llc_bytes, {"source": "explicit_override", "flag": "--llc-bytes"}
-    llc_bytes, provenance = _last_level_cache_bytes(torch, properties)
-    if provenance["source"] != "torch_l2_fallback":
+    llc_bytes, provenance = _last_level_cache_bytes(torch, properties, node_root)
+    if _device_arch(torch) != "gfx950":
         return llc_bytes, provenance
-    if _device_arch(torch) == "gfx950":
-        raise RuntimeError(
-            "cannot determine the last-level cache from the KFD topology "
-            f"({provenance['reason']}); on gfx950 the fallback value "
-            f"({llc_bytes} B, torch's per-XCD L2) is known wrong -- the MALL is "
-            "256 MiB -- and using it would silently measure cache-warm. Pass "
-            "--llc-bytes to override explicitly."
+    if llc_bytes >= GFX950_MALL_BYTES and "degraded" not in provenance:
+        return llc_bytes, provenance
+    if provenance["source"] == "torch_l2_fallback":
+        detail = f"the KFD topology could not be read ({provenance['reason']})"
+    elif "degraded" in provenance:
+        detail = (
+            "the KFD topology was read but "
+            f"{len(provenance['skipped_cache_entries'])} cache entr"
+            f"{'y was' if len(provenance['skipped_cache_entries']) == 1 else 'ies were'} "
+            f"unparseable ({', '.join(provenance['skipped_cache_entries'])}), so the "
+            "MALL entry may be among them"
         )
-    return llc_bytes, provenance
+    else:
+        detail = (
+            f"the KFD topology was read cleanly from {provenance.get('matched_node')} "
+            "but reports no cache at or above the MALL size"
+        )
+    raise RuntimeError(
+        f"cannot determine the last-level cache on gfx950: {detail}. The best "
+        f"value available is {llc_bytes} B, below the known {GFX950_MALL_BYTES} B "
+        "MALL, so using it would size the rotation against a cache that is not "
+        "the last level and silently measure cache-warm. Pass --llc-bytes to "
+        "override explicitly."
+    )
 
 
 class _L2Evictor:
