@@ -3225,8 +3225,10 @@ in `check_disk_cache`, a layer *below* the harness, which cannot see it.
 
 **A hole neither of them had named: the disk cache key contains no device
 identity.** `cache_key = [VERSION, str(tuning_key)] + config_str_list`
-(`quack/autotuner.py:264`), and `tuning_key` is the declared keys plus each
-tensor's shape/stride/dtype (`:305-320`). No GPU name, no arch, no `num_cus`.
+(`quack/autotuner.py:264`), and `tuning_key` is the *values* of the declared
+keys — `key = [kwargs[k] for k in self.keys if k in kwargs]` at `:305`, which
+appends `kwargs[k]`, not `k` — plus each tensor's shape/stride/dtype
+(`:305-320`). No GPU name, no arch, no `num_cus`.
 Arch enters only indirectly, through the enumeration in `get_all_*_configs()` —
 and `_max_cluster_for` returns 16 for every `9 <= arch <= 11`, so on H100 and
 H200 (both sm_90) the enumerated config strings are byte-identical. **One
