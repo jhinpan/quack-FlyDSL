@@ -1,14 +1,37 @@
 # The benchmark harness does not produce cold reads on gfx950
 
 Status: **confirmed by measurement**; the harness-side fix is **written and
-measured** (`31c1fd4` sized the rotation target and the gate against the MALL,
-`fad422c` and `a7eec93` made the LLC lookup fail closed -- `fad422c` alone did
-not, it only caught whole-topology failure and let a corrupt MALL cache entry
-resolve to 4 MiB while still reporting `source: kfd_topology`; before/after cost is committed under
-`AI/gate_llc_before_after/`). What is *not* done is re-collection: no MI355X
-cell has been re-measured under the fixed harness. Blocks Experiment No.002
-(MI355X flydsl-vs-torch matrix) — any MI355X numbers taken before the fix are
-**unsound on 41 of the 90 benchmarked cells**.
+measured** (`31c1fd4` sized the rotation target and the gate against the MALL;
+`fad422c`, `a7eec93` and `c597e11` made the LLC lookup fail closed; before/after
+cost is committed under `AI/gate_llc_before_after/`). What is *not* done is
+re-collection: no MI355X cell has been re-measured under the fixed harness.
+Blocks Experiment No.002 (MI355X flydsl-vs-torch matrix) — any MI355X numbers
+taken before the fix are **unsound on 41 of the 90 benchmarked cells**.
+
+It took three commits because the same defect recurred at three levels, and
+each was found by someone else pointing at the level below or beside it. The
+shape is constant: *a parse failure is skipped, and the skip is not recorded,
+so a partial read is indistinguishable from a complete one.*
+
+| # | Where | Silent result | Found by | Fixed in |
+|---|---|---|---|---|
+| 1 | whole topology unreadable | falls back to torch's 4 MiB | me | `fad422c` |
+| 2 | one cache entry unparseable inside the matched node | `4194304` with `source: kfd_topology` | @Reviewer | `a7eec93` |
+| 3 | one *node* unparseable, and it is this card | another device's `268435456`, `matched_by: pci_domain_bus_device` | me, from @Autotune's argument | `c597e11` |
+
+(3) is the one the value cannot catch. Every card on this host is the same
+part, so the wrong node reports the same 256 MiB and the number is *correct* —
+what is unsound is the identification. It is caught by refusing a PCI-only
+match when any node in the tree could not be identified; a `unique_id` match is
+still accepted, because that is a positive identification and an unreadable
+node cannot retract it.
+
+@Autotune's argument, which is what made me look: a skipped *cache entry* loses
+information in one direction only — `best` is a `max`, so a skip can only make
+the answer smaller, i.e. a lower bound. A skipped *node* is bidirectional: it
+can be neither confirmed nor excluded as this card. I checked what the
+bidirectional case actually does and it is worse than a lower bound — it
+answers with a different card's topology and marks nothing.
 
 **41 and 37 count different things and must not be merged.**
 
