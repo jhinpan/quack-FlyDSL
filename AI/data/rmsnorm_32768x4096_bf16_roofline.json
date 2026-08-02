@@ -13,11 +13,11 @@
   "hip": "7.2.26015-fc0010cf6a",
   "python": "3.10.12",
   "host": "mia1-p02-g23",
-  "commit": "8f083dae8313ce1003ae794fc295e48f7f70f717",
+  "commit": "75a47eb2233d4f725d826e609077beee04076c5f",
   "worktree_dirty": true,
   "source_sha256_16": {
     "quack/rmsnorm_flydsl.py": "0c44997dc710d8e5",
-    "AI/probe_rmsnorm_roofline.py": "440447f8a174f6eb"
+    "AI/probe_rmsnorm_roofline.py": "d8e20db5c2609ea7"
   },
   "bytes_moved_min_traffic": 536870912,
   "bytes_moved_exact_including_weight": 536879104,
@@ -32,125 +32,125 @@
     "eviction": "cold rows copy a 512 MiB buffer once per round, outside the timed window -- not between calls",
     "exclusivity": "single visible device; caller is responsible for it being idle. rocm-smi utilisation at start is recorded below."
   },
-  "exclusivity_check": "\n\n============================ ROCm System Management Interface ============================\n=================================== % time GPU is busy ===================================\nGPU[0]\t\t: GPU use (%): 0\nGPU[0]\t\t: GFX Activity: 835457867\nGPU[1]\t\t: GPU use (%): 0\nGPU[1]\t\t: GFX Activity: 909724294\nGPU[2]\t\t: GPU use (%): 0\nGPU[2]\t\t: GFX Activity: 831501698\nGPU[3]\t\t: GPU use (%): 0\nGPU[3]\t\t: GFX Activity: 2229584722\nGPU[4]\t\t: GPU use (%): 48\nGPU[4]\t\t: GFX Activity: 902205975\nGPU[5]\t\t: GPU use (%): 0\nGPU[5]\t\t: GFX Activity: 873768643\nGPU[6]\t\t: GPU use (%): 0\nGPU[6]\t\t: GFX Activity: 853897683\nGPU[7]\t\t: GPU use (%): 0\nGPU[7]\t\t: GFX Activity: 866837622\n==========================================================================================\n================================== End of ROCm SMI Log ===================================\n",
+  "exclusivity_check": "\n\n============================ ROCm System Management Interface ============================\n=================================== % time GPU is busy ===================================\nGPU[0]\t\t: GPU use (%): 0\nGPU[0]\t\t: GFX Activity: 835579351\nGPU[1]\t\t: GPU use (%): 0\nGPU[1]\t\t: GFX Activity: 909844036\nGPU[2]\t\t: GPU use (%): 0\nGPU[2]\t\t: GFX Activity: 831620565\nGPU[3]\t\t: GPU use (%): 0\nGPU[3]\t\t: GFX Activity: 2229736099\nGPU[4]\t\t: GPU use (%): 48\nGPU[4]\t\t: GFX Activity: 931498951\nGPU[5]\t\t: GPU use (%): 0\nGPU[5]\t\t: GFX Activity: 873882798\nGPU[6]\t\t: GPU use (%): 0\nGPU[6]\t\t: GFX Activity: 854052900\nGPU[7]\t\t: GPU use (%): 0\nGPU[7]\t\t: GFX Activity: 866969401\n==========================================================================================\n================================== End of ROCm SMI Log ===================================\n",
   "copy_variability": {
     "states": {
       "history_cold_allocator_512MiB": {
         "samples_us": [
-          226.4082145690918,
-          227.2203254699707,
-          228.54192733764648,
-          228.28353881835938,
-          226.85552597045898,
-          227.7531623840332,
-          226.67795181274414
+          226.35623931884766,
+          226.29583358764648,
+          226.91905975341797,
+          225.8310317993164,
+          225.57903289794922,
+          224.8410987854004,
+          226.94829940795898
         ],
-        "min_us": 226.4082145690918,
-        "median_us": 227.2203254699707,
-        "max_us": 228.54192733764648,
-        "spread_pct_of_min": 0.9424184421115841,
+        "min_us": 224.8410987854004,
+        "median_us": 226.29583358764648,
+        "max_us": 226.94829940795898,
+        "spread_pct_of_min": 0.9371954833621462,
         "bytes_moved": 1073741824,
-        "TBps_at_min": 4.742503826743142
+        "TBps_at_min": 4.775558515771322
       },
       "history_three_buffers_live_512MiB": {
         "samples_us": [
-          224.68116760253906,
-          227.64915466308594,
-          225.8931541442871,
-          226.20311737060547,
-          227.03832626342773,
-          225.69992065429688,
-          225.77831268310547
+          224.8571014404297,
+          225.7411003112793,
+          227.01309204101562,
+          227.62540817260742,
+          224.74777221679688,
+          225.88857650756836,
+          226.4430046081543
         ],
-        "min_us": 224.68116760253906,
-        "median_us": 225.8931541442871,
-        "max_us": 227.64915466308594,
-        "spread_pct_of_min": 1.3209772284062737,
+        "min_us": 224.74777221679688,
+        "median_us": 225.88857650756836,
+        "max_us": 227.62540817260742,
+        "spread_pct_of_min": 1.280384640713908,
         "bytes_moved": 1073741824,
-        "TBps_at_min": 4.778957824802874
+        "TBps_at_min": 4.777541567638962
       },
       "history_cold_pair_remeasured_512MiB": {
         "samples_us": [
-          225.2775001525879,
-          226.43911361694336,
-          225.25171279907227,
-          227.15173721313477,
-          224.32373046875,
-          224.18054580688477,
-          226.45734786987305
+          226.43739700317383,
+          227.72220611572266,
+          227.60614395141602,
+          224.93331909179688,
+          226.13494873046875,
+          225.86374282836914,
+          227.02375411987305
         ],
-        "min_us": 224.18054580688477,
-        "median_us": 225.2775001525879,
-        "max_us": 227.15173721313477,
-        "spread_pct_of_min": 1.3253564869136618,
+        "min_us": 224.93331909179688,
+        "median_us": 226.43739700317383,
+        "max_us": 227.72220611572266,
+        "spread_pct_of_min": 1.2398727921618482,
         "bytes_moved": 1073741824,
-        "TBps_at_min": 4.78962980545578
+        "TBps_at_min": 4.773600586766777
       }
     },
     "TBps_by_state": {
-      "history_cold_allocator_512MiB": 4.743,
-      "history_three_buffers_live_512MiB": 4.779,
-      "history_cold_pair_remeasured_512MiB": 4.79
+      "history_cold_allocator_512MiB": 4.776,
+      "history_three_buffers_live_512MiB": 4.778,
+      "history_cold_pair_remeasured_512MiB": 4.774
     },
-    "history_swing_pct_of_min": 0.99,
+    "history_swing_pct_of_min": 0.08,
     "identical_buffers_by_size": {
       "64MiB": {
         "TBps_per_identical_buffer": [
-          6.863770134962642,
-          6.884047698356914,
-          6.830237948442552,
-          6.8632086441362565,
-          6.870516036530377
+          6.8433321532254,
+          6.875302236959514,
+          6.8531229179285305,
+          6.866298399770112,
+          6.895924733187126
         ],
         "TBps_per_identical_buffer_rounded_3dp": [
-          6.864,
-          6.884,
-          6.83,
-          6.863,
-          6.871
+          6.843,
+          6.875,
+          6.853,
+          6.866,
+          6.896
         ],
         "rounding_note": "The unrounded list is authoritative. A rounded copy of this field once made an interval-membership question undecidable against a 0.2%-wide band; 3 dp is a display choice, not a measurement.",
-        "spread_pct_of_min": 0.79,
+        "spread_pct_of_min": 0.77,
         "fits_in_mall": true,
         "n_identical_buffers": 5
       },
       "512MiB": {
         "TBps_per_identical_buffer": [
-          5.3295558610427385,
-          4.763399232214882,
-          5.574206195853353,
-          5.570711261202525,
-          4.889554032345599
+          5.352828426609784,
+          4.761286952595204,
+          5.586734755678825,
+          5.585385600204148,
+          4.892354320861402
         ],
         "TBps_per_identical_buffer_rounded_3dp": [
-          5.33,
-          4.763,
-          5.574,
-          5.571,
-          4.89
+          5.353,
+          4.761,
+          5.587,
+          5.585,
+          4.892
         ],
         "rounding_note": "The unrounded list is authoritative. A rounded copy of this field once made an interval-membership question undecidable against a 0.2%-wide band; 3 dp is a display choice, not a measurement.",
-        "spread_pct_of_min": 17.02,
+        "spread_pct_of_min": 17.34,
         "fits_in_mall": false,
         "n_identical_buffers": 5
       },
       "2048MiB": {
         "TBps_per_identical_buffer": [
-          4.824593330510698,
-          5.038772941848035,
-          4.944885132503186,
-          4.992314906518016,
-          4.779807495211804
+          4.83340197793276,
+          5.051331233132501,
+          4.932663623868328,
+          4.993192984829917,
+          4.781830227908121
         ],
         "TBps_per_identical_buffer_rounded_3dp": [
-          4.825,
-          5.039,
-          4.945,
-          4.992,
-          4.78
+          4.833,
+          5.051,
+          4.933,
+          4.993,
+          4.782
         ],
         "rounding_note": "The unrounded list is authoritative. A rounded copy of this field once made an interval-membership question undecidable against a 0.2%-wide band; 3 dp is a display choice, not a measurement.",
-        "spread_pct_of_min": 5.42,
+        "spread_pct_of_min": 5.64,
         "fits_in_mall": false,
         "n_identical_buffers": 5
       }
@@ -159,140 +159,141 @@
     "supersedes": "The '14% swing from allocation history alone' this field replaces. That claim was hand-typed, never re-ran, and is falsified by the history rows here. The rule it supported -- do not use copy as a denominator -- is unaffected, and is now supported by the reason that is true.",
     "how_to_read": "Every figure here is computed from this run's samples. The prose caveat below interpolates from this field and must not restate a number that is not in it -- the previous hand-typed version disagreed with this generator's own computed copy probe by 4.04% against a 0.31% spread."
   },
-  "copy_probe_caveat": "The copy probe is not a property of the card and must not be quoted as one. Every figure in this sentence is interpolated from copy_variability, measured in this process on this run. What it is NOT: allocation history. The same call before any large allocation, with three same-size buffers made live, and again afterwards reads 4.743 / 4.779 / 4.790 TB/s -- 0.99% apart, a null that reproduced across three processes. This supersedes an earlier hand-typed claim of a 14% swing 'from allocation history alone', which was never measured. What it IS: placement past the MALL. Across five identically-sized, identically-filled buffers read by one destination, the spread is 0.79% at 64 MiB (inside the 256 MiB working set), 17.02% at 512 MiB and 5.42% at 2 GiB; reversing the size order reproduces it, so it is not an order effect, and no allocator-state or per-op story predicts that identical buffers stop disagreeing exactly when they fit in cache. This is the mechanism behind the several different MI355X 'copy roofline' values that accumulated in the notes: each was one draw from that distribution, written down as a constant. Use write or two_read_one_write as denominators. Their advantage is measured, not assumed: across the three roofline processes run on device 5 at this commit, write spans 0.50% and two_read_one_write spans 1.37%, against 13.35% for copy. Those three figures are cross-process, so no single run can compute them and they are declared narrative below -- and they correct this sentence's own earlier claim that both reproduce 'to better than 1%', which was an untested constant of exactly the kind this field exists to remove. two_read_one_write does not meet it. Within THIS run the probe spreads are 0.82% / 0.34% / 0.53% for write / two_read_one_write / copy, and this run's copy probe reads 4.952, itself only one draw. Copy is retained here because the notes' history refers to it. These numbers were hand-typed until @Autotune found one disagreeing with this file's own computed probe by 4.04% against a 0.31% spread; they are computed now, so a machine that stops reproducing this changes the sentence.",
+  "copy_probe_caveat": "The copy probe is not a property of the card and must not be quoted as one. Every figure in this sentence is interpolated from copy_variability, measured in this process on this run. What it is NOT: allocation history. The same call before any large allocation, with three same-size buffers made live, and again afterwards reads 4.776 / 4.778 / 4.774 TB/s -- 0.08% apart, a null that reproduced across three processes. This supersedes an earlier hand-typed claim of a 14% swing 'from allocation history alone', which was never measured. What it IS: placement past the MALL. Across five identically-sized, identically-filled buffers read by one destination, the spread is 0.77% at 64 MiB (inside the 256 MiB working set), 17.34% at 512 MiB and 5.64% at 2 GiB; reversing the size order reproduces it, so it is not an order effect, and no allocator-state or per-op story predicts that identical buffers stop disagreeing exactly when they fit in cache. This is the mechanism behind the several different MI355X 'copy roofline' values that accumulated in the notes: each was one draw from that distribution, written down as a constant. Use write or two_read_one_write as denominators. Their advantage is measured, and the measurement had to be redone: an earlier version of this sentence gave write 0.50%, two_read_one_write 1.37% and copy 13.35% and called them cross-process spreads. They are not. Holding this generator fixed, six processes on device 5 give copy 0.63%, two_read_one_write 0.08% and write 0.22%. The three runs behind 13.35% straddled edits to _copy_variability, which allocates and frees buffers before the copy probe runs -- so that figure spans generator VERSIONS, not processes. What moves it is the allocator's peak high-water mark, a reversible staircase: 0, 6 and 11 live 512 MiB buffers are indistinguishable, 13 and 17 each shift the slots. See copy_axes_dev5.json. Within THIS run the probe spreads are 0.80% / 0.57% / 0.70% for write / two_read_one_write / copy, and this run's copy probe reads 4.959, itself only one draw. Copy is retained here because the notes' history refers to it. These numbers were hand-typed until @Autotune found one disagreeing with this file's own computed probe by 4.04% against a 0.31% spread; they are computed now, so a machine that stops reproducing this changes the sentence.",
   "roofline_probes": {
     "copy": {
       "samples_us": [
-        217.57200241088867,
-        216.85277938842773,
-        217.79359817504883,
-        216.8111801147461,
-        217.54638671875,
-        217.96958923339844,
-        217.00958251953125
+        217.7527618408203,
+        217.24075317382812,
+        217.60635375976562,
+        218.04155349731445,
+        216.5351676940918,
+        217.4407196044922,
+        217.76391983032227
       ],
-      "min_us": 216.8111801147461,
-      "median_us": 217.54638671875,
-      "max_us": 217.96958923339844,
-      "spread_pct_of_min": 0.5342939962963452,
+      "min_us": 216.5351676940918,
+      "median_us": 217.60635375976562,
+      "max_us": 218.04155349731445,
+      "spread_pct_of_min": 0.6956772053539081,
       "bytes_moved": 1073741824,
-      "TBps_at_min": 4.952428299277409
+      "TBps_at_min": 4.9587410462439045
     },
     "two_read_one_write": {
       "samples_us": [
-        268.3115577697754,
-        269.12755966186523,
-        268.33316802978516,
-        268.6219787597656,
-        268.9011764526367,
-        268.9371871948242,
-        269.21316146850586
+        268.6042785644531,
+        268.82991790771484,
+        268.07952880859375,
+        268.2635307312012,
+        269.615535736084,
+        268.7299156188965,
+        269.12269592285156
       ],
-      "min_us": 268.3115577697754,
-      "median_us": 268.9011764526367,
-      "max_us": 269.21316146850586,
-      "spread_pct_of_min": 0.33602864752627964,
+      "min_us": 268.07952880859375,
+      "median_us": 268.7299156188965,
+      "max_us": 269.615535736084,
+      "spread_pct_of_min": 0.5729668857284992,
       "bytes_moved": 1610612736,
-      "TBps_at_min": 6.002770620049046
+      "TBps_at_min": 6.0079661552597035
     },
     "write": {
       "samples_us": [
-        78.28695774078369,
-        78.51017951965332,
-        78.55338096618652,
-        77.91418075561523,
-        78.22775840759277,
-        78.28695774078369,
-        78.38697910308838
+        78.23895931243896,
+        77.94856071472168,
+        78.19096088409424,
+        78.01976203918457,
+        78.575758934021,
+        78.10135841369629,
+        78.24215888977051
       ],
-      "min_us": 77.91418075561523,
-      "median_us": 78.28695774078369,
-      "max_us": 78.55338096618652,
-      "spread_pct_of_min": 0.8203900809484186,
+      "min_us": 77.94856071472168,
+      "median_us": 78.19096088409424,
+      "max_us": 78.575758934021,
+      "spread_pct_of_min": 0.8046309175544035,
       "bytes_moved": 536870912,
-      "TBps_at_min": 6.8905417061875225
+      "TBps_at_min": 6.8875025667870275
     }
   },
   "measurements": {
     "flydsl_cold_l2": {
       "samples_us": [
-        92.25188255310059,
-        92.09188461303711,
-        90.99905967712402,
-        90.56466102600098,
-        90.57186126708984,
-        90.55746078491211,
-        90.57426452636719
+        92.5734806060791,
+        91.98386192321777,
+        90.89426040649414,
+        90.50146102905273,
+        90.44466018676758,
+        90.08303642272949,
+        90.48224449157715
       ],
-      "min_us": 90.55746078491211,
-      "median_us": 90.57426452636719,
-      "max_us": 92.25188255310059,
-      "spread_pct_of_min": 1.8711012361675963,
+      "min_us": 90.08303642272949,
+      "median_us": 90.50146102905273,
+      "max_us": 92.5734806060791,
+      "spread_pct_of_min": 2.7646095005754354,
       "bytes_moved": 536870912,
-      "TBps_at_min": 5.928511106060614
+      "TBps_at_min": 5.959733744771267
     },
     "flydsl_warm": {
       "samples_us": [
-        90.26548385620117,
-        90.42945861816406,
-        90.40145874023438,
-        90.49985885620117,
-        90.69665908813477,
-        90.83346366882324,
-        90.66865921020508
+        90.1486587524414,
+        90.63823699951172,
+        90.29583930969238,
+        90.5294418334961,
+        90.44143676757812,
+        90.55744171142578,
+        90.43024063110352
       ],
-      "min_us": 90.26548385620117,
-      "median_us": 90.49985885620117,
-      "max_us": 90.83346366882324,
-      "spread_pct_of_min": 0.62923255751545,
+      "min_us": 90.1486587524414,
+      "median_us": 90.44143676757812,
+      "max_us": 90.63823699951172,
+      "spread_pct_of_min": 0.5430787921257383,
       "bytes_moved": 536870912,
-      "TBps_at_min": 5.947687743581706
+      "TBps_at_min": 5.955395448248535
     },
     "torch_cold_l2": {
       "samples_us": [
-        155.99313735961914,
-        155.9019374847412,
-        155.5467414855957,
-        155.7867431640625,
-        155.29873847961426,
-        155.9451389312744,
-        155.79312324523926
+        155.84429740905762,
+        155.60669898986816,
+        155.33390045166016,
+        155.7907009124756,
+        155.9370994567871,
+        155.64590454101562,
+        155.56989669799805
       ],
-      "min_us": 155.29873847961426,
-      "median_us": 155.79312324523926,
-      "max_us": 155.99313735961914,
-      "spread_pct_of_min": 0.44713748920506213,
+      "min_us": 155.33390045166016,
+      "median_us": 155.64590454101562,
+      "max_us": 155.9370994567871,
+      "spread_pct_of_min": 0.38832412201911354,
       "bytes_moved": 536870912,
-      "TBps_at_min": 3.4570204320782296
+      "TBps_at_min": 3.4562378877949698
     },
     "torch_warm": {
       "samples_us": [
-        155.7395362854004,
-        155.32033920288086,
-        155.63154220581055,
-        155.72434425354004,
-        155.57071685791016,
-        156.11151695251465,
-        155.33632278442383
+        155.4619026184082,
+        155.13389587402344,
+        155.33949851989746,
+        155.72272300720215,
+        155.4090976715088,
+        155.67709922790527,
+        157.4170970916748
       ],
-      "min_us": 155.32033920288086,
-      "median_us": 155.63154220581055,
-      "max_us": 156.11151695251465,
-      "spread_pct_of_min": 0.5093845105503828,
+      "min_us": 155.13389587402344,
+      "median_us": 155.4619026184082,
+      "max_us": 157.4170970916748,
+      "spread_pct_of_min": 1.4717616706444618,
       "bytes_moved": 536870912,
-      "TBps_at_min": 3.4565396570421747
+      "TBps_at_min": 3.460693802442545
     }
   },
   "denominator_stability_across_processes": {
     "spread_pct_of_min": {
-      "write": 0.5,
-      "two_read_one_write": 1.37,
-      "copy": 13.35
+      "write": 0.22,
+      "two_read_one_write": 0.08,
+      "copy": 0.63
     },
-    "n_processes": 3,
+    "n_processes": 6,
     "device": "physical 5",
-    "commit": "7612899 (+ this working tree)",
-    "why_narrative": "A single run cannot compute a cross-process spread, so unlike every other figure in copy_probe_caveat these three are transcribed -- from the three roofline regenerations run while writing this change. They are recorded as a field anyway so the next reader can re-derive them from committed artifacts rather than trusting the sentence, which is the whole complaint that started this.",
-    "supersedes": "'write and two_read_one_write both reproduce across processes to better than 1%'. Measured, write does (0.50%) and two_read_one_write does not (1.37%). The claim that matters is the ordering against copy's 13.35%, which holds with room to spare."
+    "held_fixed": "this generator, byte for byte, across all six processes",
+    "why_narrative": "A single run cannot compute a cross-process spread, so these three are transcribed. They are recorded as a field anyway so the next reader can re-derive them rather than trust the sentence. The generator was held fixed across all six runs, which is the condition the previous version of this field silently violated.",
+    "supersedes": "This field's own previous values -- write 0.50%, two_read_one_write 1.37%, copy 13.35%, n_processes 3 -- which were not cross-process spreads at all. Those three runs straddled edits to _copy_variability, whose allocations precede the copy probe, so the figure measured generator versions. It was introduced by the change that removed hand-typed constants from copy_probe_caveat: the fix for untested numbers contributed a mislabelled one. Re-measured with the generator held fixed, copy reproduces to 0.63% -- so the ordering that motivated 'use write or two_read_one_write' survives, but the 21x gap it appeared to rest on does not exist. The real argument against copy is the allocation-slot and high-water-mark sensitivity in copy_axes_dev5.json, which write and two_read_one_write do not share.",
+    "full_decomposition": "AI/data/copy_placement_draws/copy_axes_dev5.json"
   }
 }

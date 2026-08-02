@@ -311,7 +311,16 @@ def _assert_caveat_is_derived(payload):
     and every entry in it must be a value no run could produce.
     """
     text = payload["copy_probe_caveat"]
-    narrative = {"4.04", "0.31", "0.50", "1.37", "13.35"}
+    narrative = {
+        "4.04",  # @Autotune's drift finding, the defect that created this guard
+        "0.31",  # the spread that drift was measured against
+        "0.50",  # superseded write value, quoted as the error
+        "1.37",  # superseded two_read_one_write value, quoted as the error
+        "13.35",  # superseded copy value, quoted as the error
+        "0.63",  # copy across six processes, generator held fixed
+        "0.08",  # two_read_one_write, same six
+        "0.22",  # write, same six
+    }
     cv = payload["copy_variability"]
     measured = {f"{v:.3f}" for v in cv["TBps_by_state"].values()}
     measured.add(f"{payload['roofline_probes']['copy']['TBps_at_min']:.3f}")
@@ -454,14 +463,17 @@ def main():
         "This is the mechanism behind the several different MI355X 'copy "
         "roofline' values that accumulated in the notes: each was one draw from "
         "that distribution, written down as a constant. Use write or "
-        "two_read_one_write as denominators. Their advantage is measured, not "
-        "assumed: across the three roofline processes run on device 5 at this "
-        "commit, write spans 0.50% and two_read_one_write spans 1.37%, against "
-        "13.35% for copy. Those three figures are cross-process, so no single run "
-        "can compute them and they are declared narrative below -- and they "
-        "correct this sentence's own earlier claim that both reproduce 'to better "
-        "than 1%', which was an untested constant of exactly the kind this field "
-        "exists to remove. two_read_one_write does not meet it. Within THIS run "
+        "two_read_one_write as denominators. Their advantage is measured, and the "
+        "measurement had to be redone: an earlier version of this sentence gave "
+        "write 0.50%, two_read_one_write 1.37% and copy 13.35% and called them "
+        "cross-process spreads. They are not. Holding this generator fixed, six "
+        "processes on device 5 give copy 0.63%, two_read_one_write 0.08% and "
+        "write 0.22%. The three runs behind 13.35% straddled edits to "
+        "_copy_variability, which allocates and frees buffers before the copy "
+        "probe runs -- so that figure spans generator VERSIONS, not processes. "
+        "What moves it is the allocator's peak high-water mark, a reversible "
+        "staircase: 0, 6 and 11 live 512 MiB buffers are indistinguishable, 13 "
+        "and 17 each shift the slots. See copy_axes_dev5.json. Within THIS run "
         "the probe spreads are {sp_write:.2f}% / {sp_trow:.2f}% / {sp_copy:.2f}% "
         "for write / two_read_one_write / copy, and this run's copy probe reads "
         "{inplace:.3f}, itself only one draw. Copy is retained here because "
@@ -483,24 +495,32 @@ def main():
         inplace=payload["roofline_probes"]["copy"]["TBps_at_min"],
     )
     payload["denominator_stability_across_processes"] = {
-        "spread_pct_of_min": {"write": 0.50, "two_read_one_write": 1.37, "copy": 13.35},
-        "n_processes": 3,
+        "spread_pct_of_min": {"write": 0.22, "two_read_one_write": 0.08, "copy": 0.63},
+        "n_processes": 6,
         "device": "physical 5",
-        "commit": "7612899 (+ this working tree)",
+        "held_fixed": "this generator, byte for byte, across all six processes",
         "why_narrative": (
-            "A single run cannot compute a cross-process spread, so unlike every "
-            "other figure in copy_probe_caveat these three are transcribed -- from "
-            "the three roofline regenerations run while writing this change. They "
-            "are recorded as a field anyway so the next reader can re-derive them "
-            "from committed artifacts rather than trusting the sentence, which is "
-            "the whole complaint that started this."
+            "A single run cannot compute a cross-process spread, so these three are "
+            "transcribed. They are recorded as a field anyway so the next reader can "
+            "re-derive them rather than trust the sentence. The generator was held "
+            "fixed across all six runs, which is the condition the previous version "
+            "of this field silently violated."
         ),
         "supersedes": (
-            "'write and two_read_one_write both reproduce across processes to "
-            "better than 1%'. Measured, write does (0.50%) and two_read_one_write "
-            "does not (1.37%). The claim that matters is the ordering against "
-            "copy's 13.35%, which holds with room to spare."
+            "This field's own previous values -- write 0.50%, two_read_one_write "
+            "1.37%, copy 13.35%, n_processes 3 -- which were not cross-process "
+            "spreads at all. Those three runs straddled edits to _copy_variability, "
+            "whose allocations precede the copy probe, so the figure measured "
+            "generator versions. It was introduced by the change that removed "
+            "hand-typed constants from copy_probe_caveat: the fix for untested "
+            "numbers contributed a mislabelled one. Re-measured with the generator "
+            "held fixed, copy reproduces to 0.63% -- so the ordering that motivated "
+            "'use write or two_read_one_write' survives, but the 21x gap it appeared "
+            "to rest on does not exist. The real argument against copy is the "
+            "allocation-slot and high-water-mark sensitivity in copy_axes_dev5.json, "
+            "which write and two_read_one_write do not share."
         ),
+        "full_decomposition": "AI/data/copy_placement_draws/copy_axes_dev5.json",
     }
 
     _assert_caveat_is_derived(payload)

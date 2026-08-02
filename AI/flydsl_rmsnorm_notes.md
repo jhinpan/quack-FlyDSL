@@ -794,8 +794,28 @@ committed JSON file rather than in a message.
 
 Every one of those three values is a **single allocation's draw**: the roofline
 probe allocates one source and one destination and times that pair, and so does
-the crossvendor probe. Pooling the 30 committed 512 MiB draws gives min 4.701,
-max 5.597 — a **19.06%** range — with 7 below the band, 21 at or above it, 1
+the crossvendor probe.
+
+**This argument was first published at the wrong buffer size**, which @Reviewer
+flagged in `f9014a94` and which is a real hole rather than a technicality. The
+historical `4.89` was measured over **2 GiB** buffers — the sentence at the top
+of the superseded roofline table says so explicitly — while every draw I pooled
+against it came from **512 MiB**. The placement effect is strongly
+size-dependent, so 512 MiB draws are not evidence about a 2 GiB number no matter
+how many of them there are.
+
+Re-measured at 2 GiB, sampling 5 allocation slots across 4 allocator high-water
+marks and 16 processes (`AI/data/copy_placement_draws/copy_axes_dev5.json`):
+**80 draws, min 4.7682, max 5.3318, an 11.82% range**, with **16 below the band
+and 64 at or above it**. The same collection at 512 MiB gives 18.51%. The band
+is 0.205% wide, so the confound is **58×** what it would have to resolve.
+
+The verdict survives at the size that matters; what changes is the number and
+its scope. The earlier text's **19.06%** was the 512 MiB figure quoted against a
+2 GiB cell.
+
+For the record of what the older 512-MiB-only artifact showed: 30 draws, min
+4.701, max 5.597 — a 19.06% range — with 7 below the band, 21 at or above it, 1
 inside, and **1 undecidable**.
 
 That last count is the honest part. The draw recorded as `4.895` was rounded to
@@ -808,7 +828,9 @@ either interval convention.
 
 So the band is not excluded by the data; it is straddled by it. The three
 distances the argument relies on (5–14%) are each smaller than the spread
-between *identical buffers in a single process* (16–18%). This is the same rule
+between *identical buffers in a single process* — 7.05% at 2 GiB within one
+fixed program, 11.82% once the allocator's peak is allowed to vary as it does
+across harnesses. This is the same rule
 that retired the equal-occupancy ratio's third digit: **a comparison must
 discriminate a gap larger than the confounds it cannot see.**
 
@@ -840,23 +862,78 @@ committed copy value at 512 MiB can neither confirm nor exclude any historical
 copy figure, because a ~17% between-slot placement term sits under a 0.2% band.
 
 The asymmetry is the useful part. `two_read_one_write` gets *stronger* under the
-same sweep — four committed values within 0.55%, 1.37% across processes, against
-copy's 13.35%. Copy is unreconstructable not because the committed values are
-far from the band, but because copy at that size is not a repeatable quantity.
+same sweep — four committed values within 0.55%. Copy is unreconstructable not
+because the committed values are far from the band, but because copy at that
+size is not a repeatable quantity.
 
-`write` and `two_read_one_write` are the denominators to use, and their
-advantage is now measured rather than assumed: across three roofline processes
-on device 5, `write` spans **0.50%**, `two_read_one_write` spans **1.37%**, and
-`copy` spans **13.35%**. That also retracts this section's previous claim that
-both reproduce "to better than 1%" — `two_read_one_write` does not. The ordering
-against copy is what justifies the choice and it holds by an order of magnitude.
+#### The cross-process figures were measuring the wrong axis
+
+The previous version of this section said `write` spans **0.50%**,
+`two_read_one_write` **1.37%** and `copy` **13.35%** "across three roofline
+processes on device 5", and used the 10× ordering to justify the denominator
+choice. **That is retracted.** Holding the generator fixed byte for byte, six
+processes give `copy` **0.63%**, `two_read_one_write` **0.08%**, `write`
+**0.22%**. The three runs behind 13.35% straddled edits to `_copy_variability`,
+which allocates and frees buffers *before* the copy probe runs, so the figure
+spanned **generator versions wearing a process label**.
+
+The mechanism is the allocator's **peak simultaneously-live bytes**, and it is a
+staircase rather than a drift. Sweeping 0–21 live 512 MiB buffers, two fresh
+processes per level: levels 0–12 are flat to within their across-process repeat
+spread (0.3–0.9%), then a **10.6% step at 13**, flat again through 16, a
+**10.5% step at 17**, flat through 20. A further 10.4% shift appears at 21,
+which is the last level sampled, so it is recorded as a step but cannot be
+distinguished from an edge effect. This is why "allocation history does nothing"
+and "editing the harness moved it 13%" were both true and never in conflict —
+the history rows never crossed a step.
+
+Two corrections to how that was established, both mine. The step locations were
+first written into this file from an exploratory script in `/tmp` — a number
+whose only home was prose, in the section about numbers whose only home is
+prose. And the sweep written to back them was **invalid on its first design**: I
+walked the peak grid up and back down *within one process* to test
+reversibility, and it reported a ~10% shift at every single level including
+0→1, i.e. no threshold anywhere. The measurement is not passive — each
+`_identical_buffer_spread` call allocates and frees six 2 GiB buffers, which
+re-rolls placement by itself. Repeating the identical call eight times in one
+process, changing nothing else, gives a different slot pattern every time. The
+sweep was measuring its own alloc/free cycles. The broken design looked *more*
+careful than the fix, which is the part worth remembering: controlling for
+process-level variation controlled away the effect. Reversibility is now only
+supported by repeats at the same level in separate processes, which is weaker,
+and the artifact says so rather than implying a within-process A-B-A.
+
+That number entered the tree **as part of the fix for hand-typed constants**.
+The sentence written to eliminate untested numbers contributed a mislabelled
+one, and it survived because a cross-process spread is exactly the kind of
+figure no single run can recompute — the guard that catches invented decimals
+cannot catch a real measurement of the wrong thing.
+
+The denominator choice is unchanged but now rests on the right evidence: not a
+21× stability gap, which does not exist, but the fact that copy is sensitive to
+allocation slot (7.05% at 2 GiB) and to the harness's high-water mark (9.58%),
+while `write` and `two_read_one_write` are not. Their ranges at 512 MiB and
+2 GiB overlap; copy's do not behave that way.
+
+A third correction from the same measurement, worth recording because it nearly
+went out: `two_read_one_write`'s **0.31%** apparent stability was measured at a
+single allocation slot with the peak held fixed. Sampled across slots it spreads
+**2.47%** at 512 MiB. I had been about to use that 0.31% as an error bar to
+argue, from a 4.04% gap, that the historical table must be 2 GiB. **No probe
+here can tell 512 MiB from 2 GiB** — all three patterns' ranges overlap once
+slot and peak are sampled. The table's size is known because notes:869 says so.
+That is documentary evidence and it is not dressed up as measured.
+
 The live figures are in `copy_variability` and
-`denominator_stability_across_processes` in the sidecar; every number in the
-caveat string is now interpolated from a computed field, and the generator
-refuses to write a caveat containing a decimal no field produced — the guard
-fired on my own first draft of the replacement text, which is the only reason
-I noticed I had typed the within-run spreads by hand while writing the fix for
-hand-typed numbers.
+`denominator_stability_across_processes` in the sidecar, and the full three-axis
+decomposition in `copy_axes_dev5.json`; every number in the caveat string is
+interpolated from a computed field, and the generator refuses to write a caveat
+containing a decimal no field produced — that guard has now fired on my own
+replacement text **twice**, once when I hand-typed within-run spreads while
+fixing hand-typed numbers, and once when I removed a superseded value from its
+allowlist while leaving it quoted in the retraction. The assembler has the same
+guard, with its false-negative rate measured (5.2% of plausible 2-dp values in
+[0, 20] would slip through) rather than described as a proof.
 
 The section below was written to argue that copy is too *low* to be a ceiling,
 which is true and insufficient — the stronger objection is that it is not stable
