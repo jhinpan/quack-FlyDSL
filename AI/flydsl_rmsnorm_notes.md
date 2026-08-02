@@ -734,12 +734,25 @@ same 512 MiB buffer, same op:
 ~~A 14% swing from **allocation history alone**.~~
 
 **Retracted: the table above, and the mechanism it asserted.** @Autotune found
-that those three constants appeared exactly once each in the whole tree, all
-inside one prose string in the roofline sidecar, with no samples and no
-`bytes_moved` behind any of them — and that one of them, 5.363, disagreed with
-the *same file's own computed* copy probe (5.579) by 4.04% against a 0.31%
-within-run spread. They had been hand-copied from there to four other sites,
-including this table. They were never measurements.
+that within `AI/data/rmsnorm_32768x4096_bf16_roofline.json` those three
+constants appeared exactly once each, all inside the single `copy_probe_caveat`
+prose string, with no samples and no `bytes_moved` behind any of them, and with
+no numeric field anywhere in that file equal to any of them (98 numeric fields
+at the audited revision, tolerance 5e-4) — and that one of them, 5.363,
+disagreed with the *same file's own computed* copy probe (5.579) by 4.04%
+against a 0.31% within-run spread. They had been hand-copied from there to four
+other sites, including this table. They were never measurements.
+
+*Correction (@Autotune, own error).* This paragraph said "exactly once each in
+the whole tree." That is false: tree-wide the exact-token counts were 6/6/6 at
+the revision audited, and the sentence contradicted itself two lines later by
+describing four propagation sites. The scoped claim above is the one that was
+actually checked and it holds; the generator's docstring
+(`AI/probe_rmsnorm_roofline.py`) states it correctly as "grepping the emitted
+sidecar." Dropping the scope turned a true statement into a false one. Note
+also that 4.833 is no longer a bare constant at current head — it now appears
+as a genuine measured value in `copy_variability`, which is why the claim is
+pinned to the audited revision rather than to whatever the sidecar says today.
 
 Measuring them falsified the mechanism as well as the numbers. Allocation
 history does nothing: the identical call before any large allocation, with three
