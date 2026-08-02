@@ -537,8 +537,8 @@ pure launch path, where the CuTe kernel is about 2.2x ahead (6.1 us against
 > constraint there; and `M=32768` contains no exposed cell but is still not
 > clean — the four 16-bit `32768x1024` forward cells land a few KiB *past* the
 > MALL (256.003906 and 256.007812 MiB), so the threshold excludes them, yet
-> measuring those exact working sets gives 6191 and 6373 GB/s against a ~4900
-> GB/s HBM reference: inflated. The 256→288 MiB decay is gradual, so a
+> measuring those exact working sets gives 6068 and 6398 GB/s against a ~4935
+> GB/s HBM reference: inflated by 1.23x and 1.30x. The 256→288 MiB decay is gradual, so a
 > threshold misclassifies cells sitting either side of it. Full analysis in
 > [`gfx950_mall_evictor_defect.md`](gfx950_mall_evictor_defect.md). All three
 > rows should be re-measured before being cited; do not assume the large-m

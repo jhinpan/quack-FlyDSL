@@ -73,10 +73,12 @@ eviction happens, and 128 MiB fits comfortably in the 256 MiB MALL.
 The evictor is also only 12 MiB, which on the face of it cannot flush a 256 MiB
 cache even when it does run. That reasoning turns out not to survive
 measurement: forcing a 12 MiB evictor to run at the boundary recovers almost
-all of the gap — 4834.85 GB/s against a 4951.72 GB/s HBM reference, 2.36%
-below it, and in fact 0.57% *above* the 4807.23 GB/s that a 256 MiB evictor
+all of the gap — 4898.37 GB/s against a 4935.34 GB/s HBM reference, 0.75%
+below it, and in fact 1.46% *above* the 4827.98 GB/s that a 256 MiB evictor
 reaches. (Percentages are computed from the raw medians in the sidecar, not
-from rounded GB/s; rounding first shifted these by ~1.4 points.) A
+from rounded GB/s; rounding first shifted these by over a point. The exact
+values move run to run — see the spread note below — so read them to the
+nearest point, not the nearest hundredth.) A
 copy-based evictor evidently disturbs MALL
 residency out of proportion to its own footprint. The binding problem is the
 gate, not the size.
@@ -274,18 +276,18 @@ probe on a shared box, not a PR-grade number.
 
 A correctly-sized evictor recovers the HBM number:
 
-    64 MiB x2 bufs (WS=256 MiB), evictor=0 MiB      6452.78 GB/s  <- current behaviour
-    64 MiB x2 bufs (WS=256 MiB), evictor=12 MiB     4834.85 GB/s  <- current evictor size
-    64 MiB x2 bufs (WS=256 MiB), evictor=256 MiB    4807.23 GB/s
-    64 MiB x2 bufs (WS=256 MiB), evictor=512 MiB    4699.50 GB/s
-    64 MiB x2 bufs (WS=256 MiB), evictor=1024 MiB   4735.98 GB/s
-    64 MiB x8 bufs (WS=1024 MiB), no evictor        4951.72 GB/s  <- HBM reference
+    64 MiB x2 bufs (WS=256 MiB), evictor=0 MiB      6458.99 GB/s  <- current behaviour
+    64 MiB x2 bufs (WS=256 MiB), evictor=12 MiB     4898.37 GB/s  <- current evictor size
+    64 MiB x2 bufs (WS=256 MiB), evictor=256 MiB    4827.98 GB/s
+    64 MiB x2 bufs (WS=256 MiB), evictor=512 MiB    4637.79 GB/s
+    64 MiB x2 bufs (WS=256 MiB), evictor=1024 MiB   4709.39 GB/s
+    64 MiB x8 bufs (WS=1024 MiB), no evictor        4935.34 GB/s  <- HBM reference
 
 Evicting at all is what matters here: with no evictor the boundary cell reads
-6452.78 GB/s against a 4951.72 GB/s HBM reference (1.303x), and *any* of the
-evictor sizes brings it to 4699.50–4834.85 GB/s. The worst of those, the
-512 MiB evictor, is 5.09% below the reference; the best, the 12 MiB one, is
-2.36% below it. Which
+6458.99 GB/s against a 4935.34 GB/s HBM reference (1.309x), and *any* of the
+evictor sizes brings it to 4637.79–4898.37 GB/s. The worst of those, the
+512 MiB evictor, is 6.03% below the reference; the best, the 12 MiB one, is
+0.75% below it. Which
 of the large evictors comes last is not stable across runs (the 1 GiB one was
 worst last run, mid-pack this one), so read only the grouping, not the order. The
 12 MiB evictor is not obviously worse than the 256–1024 MiB ones on this
@@ -387,8 +389,8 @@ agent, and it parses cleanly:
    The gate is the part the measurement actually indicts. `use_evictor =
    ws < l2_target_bytes` switches eviction off precisely where it is needed, and
    the evictor-control block shows that *running an evictor at all* is what
-   recovers the HBM number — the 12 MiB evictor lands 0.57% above the 256 MiB
-   one and 2.36% below the HBM reference.
+   recovers the HBM number — the 12 MiB evictor lands 1.46% above the 256 MiB
+   one and 0.75% below the HBM reference.
    So the gate should be driven by whether the working set fits the effective
    LLC, not by whether it is smaller than a multiple of the per-XCD L2.
 
@@ -429,16 +431,14 @@ weight) and 256.007812 MiB (fp32 weight) — a few KiB *past* MALL capacity, so
 the `ws <= MALL` test excludes them, yet they are still measured inflated. The
 fine-boundary block measures those exact working sets:
 
-    268435456   256.000000 MiB   6453 GB/s
+    268435456   256.000000 MiB   6440 GB/s
     268437504   256.001953 MiB   6349
-    268439552   256.003906 MiB   6191   <- 32768x1024 fwd, 16-bit weight
-    268443648   256.007812 MiB   6373   <- 32768x1024 fwd, fp32 weight
-    268500992   256.062500 MiB   5617
-    269484032   257.000000 MiB   5050
-    301989888   288.000000 MiB   4830
+    268439552   256.003906 MiB   6068   <- 32768x1024 fwd, 16-bit weight
+    268443648   256.007812 MiB   6398   <- 32768x1024 fwd, fp32 weight
+    301989888   288.000000 MiB   5006
 
-Against a ~4900 GB/s HBM reference both variants are firmly on the inflated
-side. The decay from 256 to 288 MiB is gradual, not a cliff, which is why a
+Against a ~4935 GB/s HBM reference both variants are firmly on the inflated
+side (6068 and 6398 GB/s, i.e. 1.23x and 1.30x). The decay from 256 to 288 MiB is gradual, not a cliff, which is why a
 threshold test misclassifies cells sitting a few KiB either side of it — and
 why these were measured rather than classified. Whether this shifts the
 published median depends on how many cells feed it, and should be recomputed
