@@ -8,6 +8,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -84,12 +85,49 @@ def test_module_import_is_provider_lazy():
 # where every one of them happens to take its happy path.
 
 
+def _with_caches_count(properties, count):
+    """Add the `caches_count` line the driver always writes, unless the test
+    is deliberately saying something else about it.
+
+    Every real node publishes this field and it agrees exactly with its
+    `caches/` listing -- measured on all 10 nodes of this host (0/0 twice, then
+    546/546 seven times and 548/548). A fixture that omits it is not a smaller
+    version of a real node, it is a node in a state the driver never produces,
+    and building the whole suite on one would mean the enumeration check is
+    only ever exercised by its failure path.
+    """
+    if any(line.startswith("caches_count ") for line in properties.splitlines()):
+        return properties
+    return properties + f"caches_count {count}\n"
+
+
+def _extra_cache(node, name, body):
+    """Add one `caches/` entry to an already-written node, keeping the node's
+    declared `caches_count` in step with the directory.
+
+    Tests that appended an entry by hand used to leave the count behind. That
+    is now a mismatch the reader refuses -- correctly, since it is exactly the
+    partial-listing case the check exists for -- so a fixture that wants a node
+    with a *bad entry* rather than a *bad count* has to say so here.
+    """
+    cache = node / "caches" / name
+    cache.mkdir()
+    (cache / "properties").write_text(body)
+    properties = node / "properties"
+    text = properties.read_text()
+    count = len(list((node / "caches").iterdir()))
+    kept = [line for line in text.splitlines() if not line.startswith("caches_count ")]
+    properties.write_text("\n".join([*kept, f"caches_count {count}"]) + "\n")
+    return cache
+
+
 def _write_node(root, index, *, gfx=90000, domain=0, location=29952, unique_id=None, caches=()):
     node = root / str(index)
     (node / "caches").mkdir(parents=True)
     lines = [f"gfx_target_version {gfx}", f"domain {domain}", f"location_id {location}"]
     if unique_id is not None:
         lines.append(f"unique_id {unique_id}")
+    lines.append(f"caches_count {len(caches)}")
     (node / "properties").write_text("\n".join(lines) + "\n")
     for cache_index, (level, size_kb) in enumerate(caches):
         cache = node / "caches" / str(cache_index)
@@ -182,7 +220,13 @@ def _gfx950_node(tmp_path, caches):
     node = root / "2"
     (node / "caches").mkdir(parents=True)
     (node / "properties").write_text(
-        "gfx_target_version 90500\nunique_id 11964983762810164421\ndomain 0\nlocation_id 30720\n"
+        _with_caches_count(
+            "gfx_target_version 90500\n"
+            "unique_id 11964983762810164421\n"
+            "domain 0\n"
+            "location_id 30720\n",
+            len(caches),
+        )
     )
     for index, body in enumerate(caches):
         cache = node / "caches" / str(index)
@@ -197,7 +241,7 @@ def _node(root, index, properties, caches=()):
     express, and therefore the case that went untested."""
     node = root / str(index)
     (node / "caches").mkdir(parents=True)
-    (node / "properties").write_text(properties)
+    (node / "properties").write_text(_with_caches_count(properties, len(caches)))
     for cache_index, (level, size_kb) in enumerate(caches):
         cache = node / "caches" / str(cache_index)
         cache.mkdir()
@@ -358,10 +402,8 @@ def test_all_applicable_reasons_are_named_not_just_the_first(tmp_path):
     root = tmp_path / "nodes"
     root.mkdir()
     _node(root, 2, "gfx_target_version 90500\ndomain 0\nlocation_id not-a-number\n")
-    _node(root, 5, "gfx_target_version 90500\ndomain 0\nlocation_id 29952\n", ((2, 4096),))
-    bad = root / "5" / "caches" / "1"
-    bad.mkdir()
-    (bad / "properties").write_text("level 3\nsize 0\n")
+    good = _node(root, 5, "gfx_target_version 90500\ndomain 0\nlocation_id 29952\n", ((2, 4096),))
+    _extra_cache(good, "1", "level 3\nsize 0\n")
 
     _, provenance = benchmark._last_level_cache_bytes(
         _hip_torch(), _properties(uuid_text=None), str(root)
@@ -688,9 +730,8 @@ def test_both_degradations_are_reported_when_both_occur(tmp_path):
     bad = root / "2"
     (bad / "caches").mkdir(parents=True)
     (bad / "properties").write_text("gfx_target_version 90500\nlocation_id not-a-number\n")
-    _write_node(root, 5, gfx=90500, location=29952, caches=((2, 4096),))
-    (root / "5" / "caches" / "1").mkdir()
-    (root / "5" / "caches" / "1" / "properties").write_text("level 3\nsize not-a-number\n")
+    good = _write_node(root, 5, gfx=90500, location=29952, caches=((2, 4096),))
+    _extra_cache(good, "1", "level 3\nsize not-a-number\n")
 
     _, provenance = benchmark._last_level_cache_bytes(
         _hip_torch(), _properties(uuid_text=None), str(root)
@@ -1243,6 +1284,19 @@ def test_a_malformed_domain_still_cannot_hand_the_read_to_a_pci_neighbour(tmp_pa
         ("level 3\nsize +262144\n", "bad_size_level3"),
         ("level 3\n  size 262144  \n", "bad_size_level3"),
         ("level 3\nsize\t262144\n", "bad_size_level3"),
+        # A repeated key whose copies AGREE. This was on the accept list until
+        # @Reviewer pointed out that agreement between two copies is a fact
+        # about the corruption, not about the value: the measured grammar has
+        # no duplicates at all, so the file is not one this driver wrote and
+        # the reader should not be the one deciding that is fine.
+        ("level 3\nsize 262144\nsize 262144\n", "bad_size_level3"),
+        # Lexical signedness, which no numeric range check can recover:
+        # `int("-0") == 0` passes every `0 <= value` test. Here it is the
+        # narrow case -- `size -0` -- but the same grammar hole let
+        # `gfx_target_version -0` classify a GPU node as a CPU one.
+        ("level 3\nsize -0\n", "bad_size_level3"),
+        ("level 3\nsize -1\n", "bad_size_level3"),
+        ("level -0\nsize 262144\n", "bad_level"),
     ],
 )
 def test_a_value_the_driver_could_not_have_written_is_not_read_as_clean(tmp_path, body, tag):
@@ -1268,12 +1322,18 @@ def test_a_value_the_driver_could_not_have_written_is_not_read_as_clean(tmp_path
         # writes. Measured on this host before tightening: 39702 lines across
         # 10 nodes and 4370 cache entries, every non-conforming line a
         # sibling_map CSV row, and zero duplicate keys anywhere. A trailing
-        # blank line and a repeated *identical* key are the shapes a reader
-        # could plausibly meet without the file being wrong.
+        # blank line is the shape a reader could plausibly meet without the
+        # file being wrong.
+        #
+        # A repeated *identical* key used to be in this list, on the reasoning
+        # that the two copies agree so nothing is being chosen between them. It
+        # has moved to the rejection list above: the measured grammar has zero
+        # duplicates of any kind, so the repeat itself is the evidence that
+        # this file is not one the driver wrote, and the agreement of its two
+        # copies is a property of the corruption rather than of the value.
         "level 3\nsize 262144\nsibling_map 1,0,0,1\n",
         "level 3\nsize 262144\n\n",
         "level 3\nsize 262144\n   \n",
-        "level 3\nsize 262144\nsize 262144\n",
     ],
 )
 def test_the_strict_parser_still_accepts_what_the_driver_writes(tmp_path, body):
@@ -1540,3 +1600,205 @@ def test_a_run_records_the_card_and_not_just_the_ordinal():
     assert benchmark._reported_device_uuid(types.SimpleNamespace(uuid=nvidia)) == str(nvidia)
     # A runtime exposing nothing records None rather than a fabricated value.
     assert benchmark._reported_device_uuid(types.SimpleNamespace()) is None
+
+
+@pytest.mark.parametrize(
+    "field,line",
+    [
+        # `int("-0") == 0`, so a negative-zero field passes every `0 <= value`
+        # range check ever written. @Reviewer's four cases, each of which
+        # returned a clean, undegraded read before the grammar was tightened:
+        #
+        #   gfx_target_version -0  -- the worst. The node is silently
+        #     classified a CPU, drops out of the scan without being recorded,
+        #     and the search falls through to a same-BDF neighbour: the
+        #     c597e11 wrong-device answer with skipped=None.
+        ("gfx_target_version", "gfx_target_version -0\n"),
+        #   unique_id -0 -- clean-matches torch bytes 0000000000000000.
+        ("unique_id", "unique_id -0\n"),
+        #   domain -0 / location_id -0 -- clean PCI matches.
+        ("domain", "domain -0\n"),
+        ("location_id", "location_id -0\n"),
+    ],
+)
+def test_a_negative_zero_field_is_not_read_as_a_valid_zero(field, line):
+    # Asserted at the reader, because that is where the fix has to live: a
+    # numeric range check downstream cannot recover lexical signedness, so the
+    # grammar is the only place the sign can be rejected. The withheld-key set
+    # is the difference between "the driver did not publish this" and "the file
+    # says something we refuse to read", and -0 must land in the second.
+    path = Path(tempfile.mkdtemp()) / "properties"
+    path.write_text(line)
+    fields, malformed = benchmark._read_kfd_properties(str(path))
+    assert field not in fields
+    assert field in malformed
+
+
+def test_a_negative_zero_gfx_version_cannot_hand_the_read_to_a_pci_neighbour(tmp_path):
+    # The end-to-end shape of the case above, since the reader-level assertion
+    # only shows the field is withheld and not what the pipeline then does with
+    # it. Two nodes at one PCI address, as under CPX. The card we want has
+    # `gfx_target_version -0`; before the tightening that parsed to 0, read as
+    # "this is a CPU node", and skipped it with no record -- leaving the
+    # neighbour as the sole surviving candidate at that address, which then won
+    # the PCI match and answered with its 256 MiB. Right-looking number, wrong
+    # device, `degraded` absent.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    _node(
+        root,
+        2,
+        f"gfx_target_version -0\nunique_id {REAL_UID}\ndomain 0\nlocation_id 29952\n",
+        ((3, 262144),),
+    )
+    _node(
+        root,
+        3,
+        "gfx_target_version 90500\nunique_id 1\ndomain 0\nlocation_id 29952\n",
+        ((3, 262144),),
+    )
+
+    # torch supplies no UUID, so the PCI key is the only one available -- which
+    # is exactly the situation the neighbour wins in.
+    value, provenance = benchmark._last_level_cache_bytes(
+        _hip_torch(), _properties(uuid_text=None), str(root)
+    )
+    # The neighbour still wins the address, and the value is still the
+    # plausible 256 MiB -- no assertion on the number can catch this, because
+    # every card on this host is the same part. What changes is that the answer
+    # now carries the fact that a candidate at this address went unread, which
+    # is the whole difference between an elimination and a guess.
+    assert value == 256 * 1024**2
+    assert provenance["matched_by"] == "pci_domain_bus_device"
+    assert provenance["degraded"] == ["unidentified_nodes"]
+    assert provenance["skipped_nodes"] == ["2:unparseable_properties"]
+
+    # Before the grammar was tightened this returned byte-identical provenance
+    # with `degraded` absent and `skipped_nodes` absent: `-0` parsed to 0, the
+    # node read as a CPU, and it left the scan without being recorded at all.
+    # On gfx950 that difference is the difference between a run that stops and
+    # a run that reports another card's cache as its own.
+    with pytest.raises(RuntimeError, match="may belong to a different device"):
+        benchmark._resolve_llc(
+            _gfx950_torch(),
+            _properties(uuid_text=None),
+            argparse.Namespace(llc_bytes=None),
+            str(root),
+        )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        b"+a60c2956cd9dd4c5",  # int() takes a sign
+        b"a60c2956_cd9dd4c5",  # int() takes underscore separators
+        b" a60c2956cd9dd4c5 ",  # int() takes surrounding whitespace, as did strip()
+        b"0a60c2956cd9dd4c5",  # 17 digits: a different field padded to look like this one
+        b"a60c2956cd9dd4c",  # 15 digits
+        b"",
+    ],
+)
+def test_a_uuid_shape_the_runtime_could_not_have_reported_is_refused(text):
+    # All four of @Reviewer's shapes decoded to the same 11964983762810164421
+    # under `.strip()` + `int(text, 16)` and each returned a clean
+    # matched_by=unique_id. `int` is a far wider grammar than the format being
+    # recognised, and this is the identity key: a false match here answers with
+    # another card's topology, silently.
+    assert benchmark._torch_unique_id(_properties(uuid_text=text)) is None
+
+
+def test_the_uid_shape_check_still_accepts_what_the_runtime_reports(tmp_path):
+    # The over-refusal control. Exactly sixteen ASCII hex bytes is what
+    # torch 2.9.1+rocm7.2 hands over on this host, verified 8/8, and both cases
+    # must keep resolving -- the driver prints unique_id in lowercase but the
+    # hex text itself is case-insensitive, so refusing uppercase would be
+    # inventing a constraint rather than enforcing one.
+    assert benchmark._torch_unique_id(_properties()) == REAL_UID
+    assert benchmark._torch_unique_id(_properties(uuid_text=b"A60C2956CD9DD4C5")) == REAL_UID
+    root = tmp_path / "nodes"
+    root.mkdir()
+    _node(root, 2, GPU_AT_BDF, ((3, 262144),))
+    value, provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), str(root))
+    assert value == 256 * 1024**2
+    assert provenance["matched_by"] == "unique_id"
+    assert "degraded" not in provenance
+
+
+def test_a_partial_cache_listing_is_not_read_as_a_complete_one(tmp_path):
+    # Recording rejected entries only covers entries the loop saw. An entry
+    # that never appeared in the listing is invisible to it, so a `caches/`
+    # missing its level-3 entry returned a clean 4 MiB kfd_topology read: no
+    # skip, no degradation, and provenance asserting a complete read of a
+    # topology one line of which was never there. The count was in the file the
+    # whole time and nothing consulted it. @Reviewer's two cases:
+    #
+    #   caches_count 546 beside a single directory -> clean 256 MiB.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    node = _node(root, 2, GPU_AT_BDF, ((3, 262144),))
+    (node / "properties").write_text(GPU_AT_BDF + "caches_count 546\n")
+    value, provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), str(root))
+    assert value == 4 * 1024**2
+    assert provenance["reason"] == "caches_count_mismatch"
+    assert provenance["declared_cache_entries"] == 546
+    assert provenance["enumerated_cache_entries"] == 1
+
+    #   caches_count 0 beside a single directory -> also clean 256 MiB. Worth
+    #   its own case: an under-count is the direction a `>=` check would miss,
+    #   and the reason it must be equality rather than a floor.
+    (node / "properties").write_text(GPU_AT_BDF + "caches_count 0\n")
+    value, provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), str(root))
+    assert value == 4 * 1024**2
+    assert provenance["reason"] == "caches_count_mismatch"
+    assert provenance["declared_cache_entries"] == 0
+
+    # And on gfx950 the disagreement stops the run rather than sizing every
+    # rotation buffer against a cache we could not confirm we finished reading.
+    with pytest.raises(RuntimeError, match="could not be read"):
+        benchmark._resolve_llc(
+            _gfx950_torch(), _properties(), argparse.Namespace(llc_bytes=None), str(root)
+        )
+
+
+def test_an_unreadable_cache_count_is_told_apart_from_an_absent_one(tmp_path):
+    # Same absent-vs-withheld distinction as everywhere else in this reader,
+    # applied to the count itself: one sends a reader to the driver, the other
+    # to the file. Both refuse -- the count is what makes the enumeration
+    # checkable, so a node that does not supply one readably cannot be read
+    # completely -- but they are not the same observation.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    node = _node(root, 2, GPU_AT_BDF, ((3, 262144),))
+
+    (node / "properties").write_text(GPU_AT_BDF)  # no caches_count line at all
+    provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), str(root))[1]
+    assert provenance["reason"] == "caches_count_absent"
+    assert provenance["enumerated_cache_entries"] == 1
+
+    (node / "properties").write_text(GPU_AT_BDF + "caches_count not-a-number\n")
+    provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), str(root))[1]
+    assert provenance["reason"] == "caches_count_unreadable"
+
+
+def test_the_enumeration_check_accepts_the_agreement_this_host_actually_has(tmp_path):
+    # Over-refusal control, and the reason exact equality is safe to require:
+    # measured live on all 10 KFD nodes of this host before tightening, every
+    # node's caches_count equals its directory count exactly -- 0/0 twice, then
+    # 546/546 seven times and 548/548. Nothing real is reclassified.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    _node(root, 2, GPU_AT_BDF, ((2, 4096), (3, 262144)))
+    value, provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), str(root))
+    assert value == 256 * 1024**2
+    assert provenance["source"] == "kfd_topology"
+    assert "degraded" not in provenance
+
+    # Including the node that legitimately has none, which the live host has
+    # two of. `caches_count 0` with an empty directory agrees, so this must
+    # reach the hardware statement rather than the mismatch refusal.
+    elsewhere = tmp_path / "empty"
+    elsewhere.mkdir()
+    empty = benchmark._last_level_cache_bytes(
+        _hip_torch(), _properties(), _gfx950_node(elsewhere, [])
+    )[1]
+    assert empty["reason"] == "no_level2_plus_cache"

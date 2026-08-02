@@ -231,6 +231,9 @@ def _rotation_count(
     return max(1, min(max_buffers, by_memory, desired))
 
 
+_TORCH_UID_TEXT = re.compile(r"\A[0-9a-fA-F]{16}\Z")
+
+
 def _torch_unique_id(properties: Any) -> int | None:
     """KFD's ``unique_id`` for this device, from torch's misnamed ``uuid``.
 
@@ -242,19 +245,33 @@ def _torch_unique_id(properties: Any) -> int | None:
 
     Returns ``None`` rather than guessing if the field is missing or does not
     look like the hex text this decoding assumes.
+
+    The shape is checked exactly -- sixteen bytes, every one an ASCII hex digit
+    -- and not left to ``int(text, 16)``, which is far more permissive than the
+    thing it is being used to recognise. @Reviewer's four shapes all decoded to
+    the same ``11964983762810164421`` under the old ``.strip()`` + ``int``
+    version and each returned a clean ``matched_by=unique_id``:
+    ``+a60c2956cd9dd4c5`` (``int`` takes a sign), ``a60c2956_cd9dd4c5``
+    (``int`` takes underscore separators), `` a60c2956cd9dd4c5 `` (``int``
+    takes surrounding whitespace, as did the strip), and
+    ``0a60c2956cd9dd4c5`` (seventeen digits, a *different* field padded to look
+    like this one). None of those is a string this driver writes, so a match
+    against one is a match against a value nothing measured -- and it is the
+    identity key, so a false match here silently answers with another card's
+    topology. Recognising the format is the whole job; delegating it to a
+    parser that also accepts four other formats is not doing it.
     """
     raw = getattr(properties, "uuid", None)
     data = getattr(raw, "bytes", None)
     if data is None:
         return None
     try:
-        text = bytes(data).decode("ascii").strip()
+        text = bytes(data).decode("ascii")
     except (UnicodeDecodeError, TypeError, ValueError):
         return None
-    try:
-        return int(text, 16)
-    except ValueError:
+    if _TORCH_UID_TEXT.match(text) is None:
         return None
+    return int(text, 16)
 
 
 def _reported_device_uuid(properties: Any) -> str | None:
@@ -308,9 +325,13 @@ KFD_NODE_ROOT = "/sys/class/kfd/kfd/topology/nodes"
 
 # Ceilings for the two cache fields, in the units KFD publishes them in. These
 # bound what a cache hierarchy can physically be, not what the field is wide
-# enough to hold -- a `size` of 2**32 KB fits the driver's u32 and is still not
-# a cache. That distinction is the whole point: the width check stops a
-# corrupt read, and these stop a well-formed impossible one.
+# enough to hold -- a `size` of 2**32 - 1 KB (4 TiB, the largest value the
+# driver's u32 can hold) is a perfectly well-formed field and still not a
+# cache. That distinction is the whole point: the width check stops a corrupt
+# read, and these stop a well-formed impossible one. The earlier wording said
+# 2**32 "fits" u32, which is off by one in the direction that makes the
+# argument look weaker than it is -- the point does not need the boundary value
+# to hold, it holds for every value up to it.
 #
 # Live topology for scale: the deepest level published is 3 and the largest
 # entry is 262144 KB (the 256 MiB MALL). 8 and 16 GiB leave several orders of
@@ -320,7 +341,27 @@ MAX_CACHE_LEVEL = 8
 MAX_CACHE_SIZE_KB = 16 * 1024 * 1024
 
 
-_KFD_LINE = re.compile(r"\A([a-z0-9_]+) (-?[0-9]+)\Z")
+# Unsigned by grammar, not by range check. The first strict version allowed
+# `-?` and left the sign to the numeric bounds -- which cannot recover it,
+# because `int("-0") == 0` passes every `0 <= value` test ever written.
+# @Reviewer's counterexamples, all reproduced: `domain -0` clean PCI-matches,
+# `location_id -0` clean-matches a bus/device-0 query, `unique_id -0`
+# clean-matches torch bytes `0000000000000000`, and `gfx_target_version -0` is
+# silently classified a CPU node -- letting a same-BDF neighbour win with no
+# skip and no degradation, which is the c597e11 wrong-device answer arriving
+# through the one door the range checks structurally could not close.
+#
+# Every field this module reads is unsigned in the driver, so the sign has no
+# meaning to recover and the honest place to reject it is the grammar. A
+# signed value now fails to match, the key is withheld, and the existing
+# absent-or-malformed policy records it -- `size -1` still reports
+# `bad_size`, but now via the withheld-key set rather than via ``_bounded``'s
+# lower bound. That lower bound is kept anyway: the two helpers state their own
+# contract, and a later loosening of this pattern should not silently reopen
+# what it closes. Measured live before tightening: 35332 integer fields across
+# all 10 nodes and their 4370 cache entries, zero of them signed, so the strict
+# form reclassifies nothing this driver writes.
+_KFD_LINE = re.compile(r"\A([a-z0-9_]+) ([0-9]+)\Z")
 
 
 def _read_kfd_properties(path: str) -> tuple[dict[str, str], set[str]]:
@@ -347,9 +388,9 @@ def _read_kfd_properties(path: str) -> tuple[dict[str, str], set[str]]:
     them, a field nothing here reads), and there are **zero** duplicate keys in
     any file. So the strict form reclassifies nothing that exists.
 
-    A malformed or contradicted line **withholds that one field** rather than
-    condemning the file, and the field's name is returned in the second element
-    so the caller can tell *withheld* from *never present*.
+    A malformed, repeated or contradicted line **withholds that one field**
+    rather than condemning the file, and the field's name is returned in the
+    second element so the caller can tell *withheld* from *never present*.
 
     Both halves of that were learned by getting it wrong. The first version
     returned an anomaly list and every caller refused the whole node on
@@ -399,10 +440,22 @@ def _read_kfd_properties(path: str) -> tuple[dict[str, str], set[str]]:
                     dropped.add(parts[0])
                 continue
             key, value = match.group(1), match.group(2)
-            if key in fields and fields[key] != value:
-                # Last-wins would pick one silently. Two different values for
-                # one key is a contradiction in the file, and the honest read
-                # of a contradiction is that the field is unavailable.
+            if key in fields:
+                # Last-wins would pick one silently. Two values for one key is
+                # a contradiction in the file, and the honest read of a
+                # contradiction is that the field is unavailable.
+                #
+                # Repeated *identical* values were allowed through at first, on
+                # the reasoning that they agree so nothing is being chosen. But
+                # the measured grammar has zero duplicate keys of any kind, so
+                # a repeat is a file this driver did not write, and the fact
+                # that its two copies happen to agree is not evidence about the
+                # value -- it is a property of the corruption. Accepting it
+                # means the reader's contract is "no contradictory duplicates"
+                # while its comment claims the driver's format, and a later
+                # reader would have to guess which. @Reviewer's point, and the
+                # narrow one: this is the only remaining spot where a
+                # driver-impossible file still reads as clean.
                 dropped.add(key)
                 continue
             fields[key] = value
@@ -469,6 +522,11 @@ def _last_level_cache_bytes(
     by_bdf: list[str] = []
     unparsed_nodes: list[str] = []
     contradicted: list[str] = []
+    # Kept so the matched node's own declaration can be checked against what
+    # its `caches/` directory actually contains. Re-reading the file after the
+    # match would work too, but then the count checked is not the count the
+    # match was made from.
+    node_fields: dict[str, tuple[dict[str, str], set[str]]] = {}
 
     def _field(props: dict[str, str], name: str, bits: int = 32) -> int | None:
         """An unsigned integer field that must be present, parse, and be in range.
@@ -537,6 +595,7 @@ def _last_level_cache_bytes(
             # answer c597e11 closed, reached through a missing field instead of
             # a bad integer. Absent and malformed are the same amount of
             # evidence, so they take the same path.
+            node_fields[base] = (props, malformed)
             gfx_version = _field(props, "gfx_target_version")
             if gfx_version is None:
                 unparsed_nodes.append(f"{node}:unparseable_properties")
@@ -678,72 +737,124 @@ def _last_level_cache_bytes(
     # has to be able to tell that from a complete read.
     best = 0
     skipped: list[str] = []
+    cache_root = os.path.join(matched, "caches")
     try:
-        cache_root = os.path.join(matched, "caches")
-        for cache in sorted(os.listdir(cache_root)):
-            try:
-                cprops, cmalformed = _read_kfd_properties(
-                    os.path.join(cache_root, cache, "properties")
-                )
-            except OSError:
-                skipped.append(f"{cache}:unreadable")
-                continue
-            # Validate the fields, do not just catch what int() happens to
-            # raise on. `.get("level", 0)` silently turns a *missing* level into
-            # L0 and drops the entry as uninteresting -- but a missing level is
-            # unknown, not small, and the MALL is exactly the entry we cannot
-            # afford to drop. @Reviewer found this against a7eec93, along with
-            # nonpositive sizes, which parse fine and then vanish into `max`.
-            # Absent and malformed take the same path -- both are missing
-            # evidence and both are recorded -- but they are tagged apart,
-            # because the tag is what a reader uses to decide where to look. A
-            # `caches/` entry with no `level` line is a driver that did not
-            # publish one; a `level` line that does not parse is a file to go
-            # read. Same treatment, different observation.
-            if "level" not in cprops:
-                tag = "bad_level" if "level" in cmalformed else "missing_level"
-                skipped.append(f"{cache}:{tag}")
-                continue
-            # Bounded above as well as below, and bounded by what a cache
-            # hierarchy can actually be rather than by the field's width. A
-            # `level` of 2**32 parsed cleanly and passed `level >= 2`, so the
-            # entry was consulted as if it were a last level.
-            level_value = _bounded(cprops, "level", MAX_CACHE_LEVEL)
-            if level_value is None:
-                skipped.append(f"{cache}:bad_level")
-                continue
-            level = level_value
-            if level < 1:
-                # A cache cannot be below L1. `level < 2 -> skip` treated 0 and
-                # -1 as ordinary low-level entries and dropped them silently,
-                # so a topology carrying nonsense still read as complete
-                # (@Reviewer, against 337bdbd). Only levels that are genuinely
-                # below the last level may be discarded without a record.
-                skipped.append(f"{cache}:invalid_level{level}")
-                continue
-            if level < 2:
-                continue  # genuinely known to be below the last level
-            if "size" not in cprops:
-                tag = "bad_size" if "size" in cmalformed else "missing_size"
-                skipped.append(f"{cache}:{tag}_level{level}")
-                continue
-            # The upper bound matters more here than anywhere else in this
-            # function, because this value is not just an identity check -- it
-            # is returned and then used to size every rotation buffer the
-            # harness allocates. `size 4294967296` parsed, passed `> 0`, and
-            # came back as a clean 4 TiB `kfd_topology` read with no
-            # degradation recorded.
-            size_value = _bounded(cprops, "size", MAX_CACHE_SIZE_KB)
-            if size_value is None:
-                skipped.append(f"{cache}:bad_size_level{level}")
-                continue
-            size_kb = size_value  # KFD reports KB
-            if size_kb <= 0:
-                skipped.append(f"{cache}:nonpositive_size_level{level}")
-                continue
-            best = max(best, size_kb * 1024)
+        entries = sorted(os.listdir(cache_root))
     except OSError:
         return fallback, {"source": "torch_l2_fallback", "reason": "no_caches_directory"}
+
+    # The node states how many cache entries it has; check that against what is
+    # actually there before reading any of them.
+    #
+    # Recording *rejected* entries -- which the loop below does -- only covers
+    # entries the loop saw. An entry that never appeared in `os.listdir` is
+    # invisible to it, so a `caches/` directory missing the level-3 entry
+    # entirely returns a clean 4 MiB `kfd_topology` read: no skip, no
+    # degradation, and the provenance says the topology was read completely
+    # when one line of it was never there. @Reviewer's counterexamples, both
+    # reproduced: `caches_count 546` beside a single directory, and
+    # `caches_count 0` beside a single directory, each returned 256 MiB with
+    # `degraded=None`. The count was already in the file; nothing read it.
+    #
+    # This is the defect class at the level of the enumeration rather than the
+    # field: *a partial listing must not be indistinguishable from a complete
+    # one.* The per-entry tags answer "what did we fail to parse"; this answers
+    # the prior question, "did we see everything there was to parse".
+    #
+    # Refusal rather than degradation, and exact equality rather than a
+    # tolerance, because the driver publishes the count and it is either right
+    # or the file is not describing this directory. Measured live on all 10
+    # nodes of this host before tightening -- 0/0, 0/0, then 546/546 x7 and
+    # 548/548 -- so exact agreement reclassifies nothing that exists here. On
+    # gfx950 the fallback is fatal in ``_resolve_llc``, so a disagreement stops
+    # the run instead of sizing rotations against a cache we could not confirm
+    # we had finished reading.
+    mprops, mmalformed = node_fields.get(matched, ({}, set()))
+    declared_caches = _field(mprops, "caches_count")
+    if declared_caches is None:
+        # Absent and withheld are tagged apart for the same reason they are
+        # everywhere else in this function: one sends a reader to the driver,
+        # the other to the file.
+        stated = "caches_count" in mprops or "caches_count" in mmalformed
+        return fallback, {
+            "source": "torch_l2_fallback",
+            "reason": "caches_count_unreadable" if stated else "caches_count_absent",
+            "matched_node": matched,
+            "enumerated_cache_entries": len(entries),
+        }
+    if declared_caches != len(entries):
+        return fallback, {
+            "source": "torch_l2_fallback",
+            "reason": "caches_count_mismatch",
+            "matched_node": matched,
+            "declared_cache_entries": declared_caches,
+            "enumerated_cache_entries": len(entries),
+        }
+
+    # No outer try/except here any more: the `os.listdir` that could raise
+    # OSError is hoisted above, and each entry's own read is guarded below. A
+    # handler that can no longer fire is a reason to think a failure is covered
+    # when nothing would produce it.
+    for cache in entries:
+        try:
+            cprops, cmalformed = _read_kfd_properties(os.path.join(cache_root, cache, "properties"))
+        except OSError:
+            skipped.append(f"{cache}:unreadable")
+            continue
+        # Validate the fields, do not just catch what int() happens to
+        # raise on. `.get("level", 0)` silently turns a *missing* level into
+        # L0 and drops the entry as uninteresting -- but a missing level is
+        # unknown, not small, and the MALL is exactly the entry we cannot
+        # afford to drop. @Reviewer found this against a7eec93, along with
+        # nonpositive sizes, which parse fine and then vanish into `max`.
+        # Absent and malformed take the same path -- both are missing
+        # evidence and both are recorded -- but they are tagged apart,
+        # because the tag is what a reader uses to decide where to look. A
+        # `caches/` entry with no `level` line is a driver that did not
+        # publish one; a `level` line that does not parse is a file to go
+        # read. Same treatment, different observation.
+        if "level" not in cprops:
+            tag = "bad_level" if "level" in cmalformed else "missing_level"
+            skipped.append(f"{cache}:{tag}")
+            continue
+        # Bounded above as well as below, and bounded by what a cache
+        # hierarchy can actually be rather than by the field's width. A
+        # `level` of 2**32 parsed cleanly and passed `level >= 2`, so the
+        # entry was consulted as if it were a last level.
+        level_value = _bounded(cprops, "level", MAX_CACHE_LEVEL)
+        if level_value is None:
+            skipped.append(f"{cache}:bad_level")
+            continue
+        level = level_value
+        if level < 1:
+            # A cache cannot be below L1. `level < 2 -> skip` treated 0 and
+            # -1 as ordinary low-level entries and dropped them silently,
+            # so a topology carrying nonsense still read as complete
+            # (@Reviewer, against 337bdbd). Only levels that are genuinely
+            # below the last level may be discarded without a record.
+            skipped.append(f"{cache}:invalid_level{level}")
+            continue
+        if level < 2:
+            continue  # genuinely known to be below the last level
+        if "size" not in cprops:
+            tag = "bad_size" if "size" in cmalformed else "missing_size"
+            skipped.append(f"{cache}:{tag}_level{level}")
+            continue
+        # The upper bound matters more here than anywhere else in this
+        # function, because this value is not just an identity check -- it
+        # is returned and then used to size every rotation buffer the
+        # harness allocates. `size 4294967296` parsed, passed `> 0`, and
+        # came back as a clean 4 TiB `kfd_topology` read with no
+        # degradation recorded.
+        size_value = _bounded(cprops, "size", MAX_CACHE_SIZE_KB)
+        if size_value is None:
+            skipped.append(f"{cache}:bad_size_level{level}")
+            continue
+        size_kb = size_value  # KFD reports KB
+        if size_kb <= 0:
+            skipped.append(f"{cache}:nonpositive_size_level{level}")
+            continue
+        best = max(best, size_kb * 1024)
     if best <= 0:
         # Carry the skips out with the failure. Without this the caller is told
         # "this node reports no cache above L2" -- a statement about the
