@@ -859,13 +859,30 @@ an earlier version of this section said "it is straddled by it", and that
 overclaims. @Autotune caught it against the 512 MiB artifact and it applied to
 the 2 GiB one too, which I had written an hour earlier. Draws sit below and
 above the band, but *zero* land inside, and the draws are not a continuum: they
-cluster on allocation slots whose means are separated by gaps an order of
-magnitude wider than the band. With 20 distinct slot means spanning 11.34% and
-a band 0.2047% wide, a uniform model expects **0.36** of them in band and gives
-only a **30%** chance that any lands there. Observing zero in-band is the
-expected outcome even if the band is perfectly reachable, so it carries almost
-no evidence either way. And per the subsection above, a single draw could not
-resolve the band regardless of where it landed.
+cluster on allocation slots. At 2 GiB the 20 slot means span 11.34% against a
+0.2047% band, and their spacing is **clustered rather than even** — 7 of 19
+adjacent gaps are *narrower* than the band, while the largest is 10.3× it. A
+narrow window can sit in one of the sparse stretches and be missed by every
+draw, so zero in-band carries almost no evidence either way. And per the
+subsection above, a single draw could not resolve the band regardless of where
+it landed.
+
+An earlier version of this paragraph put a number on that — "a uniform model
+expects 0.36 of them in band and gives only a 30% chance any lands there" — and
+**that is retracted.** @Reviewer's objection in `5c2e0083`: it treats five fixed
+ordinals under four selected prefixes as 20 iid uniform draws, and divides
+relative widths taken about different denominators. He is right, and the part
+that makes it indefensible rather than merely unproven is that **the assumption
+was testable on the same payload the model was printed into.** The gap list
+above refutes uniformity outright — two orders of magnitude of spacing, a third
+of the gaps narrower than the band. I had the data to check the model and
+reported the model instead.
+
+The qualitative conclusion never needed it. That is the recurring shape here in
+its cheapest form: a probability was added because it read as more rigorous than
+the sentence it replaced, and it was strictly worse. The artifact now reports
+the measured spacing and keeps the uniform figure only under a field named
+`uniform_model_ILLUSTRATIVE_NOT_MEASURED_POWER`.
 
 The honest statement is symmetric and weaker than what I first published: **at
 this sample size the data neither authenticate nor exclude the historical
@@ -1030,11 +1047,34 @@ The live figures are in `copy_variability` and
 decomposition in `copy_axes_dev5.json`; every number in the caveat string is
 interpolated from a computed field, and the generator refuses to write a caveat
 containing a decimal no field produced — that guard has now fired on my own
-replacement text **twice**, once when I hand-typed within-run spreads while
-fixing hand-typed numbers, and once when I removed a superseded value from its
-allowlist while leaving it quoted in the retraction. The assembler has the same
-guard, with its false-negative rate measured (5.2% of plausible 2-dp values in
-[0, 20] would slip through) rather than described as a proof.
+replacement text **three** times: once when I hand-typed within-run spreads
+while fixing hand-typed numbers, once when I removed a superseded value from its
+allowlist while leaving it quoted in the retraction, and once when a re-collection
+moved a spread I had carried by hand into a verdict string.
+
+The assembler has the same guard, and its false-negative rate is now **computed
+at write time** (`prose_guard` in the artifact) rather than stated in a
+docstring. It had to be: the docstring said **5.2%**, @Reviewer recomputed
+**8.246%**, and he was right. That figure was measured once on a smaller payload
+and then quoted as a property of the guard — a number that appears only inside a
+prose string has no error bar and never re-runs, which is @Autotune's rule
+applied to the very mechanism built to enforce it.
+
+What moved it is not what I would have guessed. Across the artifact's own
+history the rate runs 7.996% → 8.546% → 8.296% → 9.445%: it rises because **the
+payload grows**, since more measured values cover more of the grid by accident.
+The last of those jumps happened while writing this paragraph — adding the
+measured gap list that replaced the uniform prior widened the accept-set by
+another point. Improving the artifact degrades its own tripwire, monotonically,
+and nothing warned you — so the assembler now **refuses to write** once the rate
+passes a 12% ceiling (headroom is 2.6 points), with the error saying explicitly
+that raising the ceiling to make it pass is the failure mode being interrupted.
+A tripwire that decays as a side effect of good changes needs a hard stop, not a
+field reporting its own decline. Widening
+the accept rule from 0–3 dp to 0–5 dp — the change I had written a code comment
+to worry about — costs exactly **0.0000 pp** on a 2-dp grid and shows up only at
+4 dp (+0.21 pp). The risk I annotated was harmless; the mechanism that actually
+degraded the guard was routine growth, and it had no comment at all.
 
 The section below was written to argue that copy is too *low* to be a ceiling,
 which is true and insufficient — the stronger objection is that it is not stable

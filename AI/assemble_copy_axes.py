@@ -338,12 +338,28 @@ def _band_reachability(runs, size):
     """Could this protocol have produced an in-band value at all? Power, not outcome.
 
     Zero draws in band is weak evidence of anything. The draws are not a
-    continuum: they cluster on allocation slots whose means are separated by gaps
-    far wider than the band. Under a uniform-slot model the expected number of
-    slot means landing in a 0.2%-wide window is well under one, so observing
-    zero in-band is the *expected* outcome even if the band is perfectly
-    reachable. @Autotune's argument, recomputed here for this dataset rather
-    than transcribed.
+    continuum: they cluster on allocation slots, and the band is narrow against
+    the spacing between them. @Autotune's argument, recomputed here for this
+    dataset rather than transcribed.
+
+    The uniform-slot model that computed a "30.4% chance any lands in band" is
+    demoted to an illustration and is no longer the basis of the conclusion.
+    @Reviewer's objection in 5c2e0083 is correct on both counts. It treats five
+    fixed ordinals under four selected prefixes as 20 iid uniform draws, which
+    they are not -- and the assumption is testable on this very payload, which is
+    what makes keeping it indefensible rather than merely unproven. The observed
+    gaps between adjacent slot means are strongly clustered: at 2 GiB, 7 of 19
+    gaps are *narrower* than the band and the largest is only ~10x it, so the
+    means are neither uniform nor uniformly far apart. A uniform model both
+    overstates the chance of landing in a sparse region and understates it in a
+    dense one.
+
+    What replaces it is the empirical spacing itself, reported without a
+    generative model: how many gaps are narrower than the band, how wide the
+    largest is, and how the band width compares to a single draw's own noise.
+    Those are measurements. The qualitative conclusion -- that zero in-band is
+    uninformative here -- does not need the model and never did, which is the
+    part I should have noticed before publishing a probability.
     """
     lo, hi = BAND
     axis = _decompose(runs, size)
@@ -353,13 +369,34 @@ def _band_reachability(runs, size):
     p_one = band_w / span
     floor = axis["within_draw_instrument_floor"]
     fl = floor.get("round_spread_pct_median")
+    gaps = sorted((means[i + 1] / means[i] - 1) * 100.0 for i in range(len(means) - 1))
     return {
         "n_slot_means": len(means),
         "slot_mean_span_pct": round(span, 2),
         "band_width_pct": round(band_w, 4),
-        "p_single_slot_in_band_uniform_model": round(p_one, 4),
-        "expected_slot_means_in_band": round(len(means) * p_one, 3),
-        "p_at_least_one_in_band_pct": round((1 - (1 - p_one) ** len(means)) * 100.0, 1),
+        # Measured spacing, no generative model. This is what the retracted
+        # uniform prior was standing in for.
+        "adjacent_slot_mean_gaps_pct": [round(g, 3) for g in gaps],
+        "n_gaps_narrower_than_band": sum(1 for g in gaps if g < band_w),
+        "n_gaps": len(gaps),
+        "largest_gap_pct": round(max(gaps), 3),
+        "largest_gap_in_band_widths": round(max(gaps) / band_w, 1),
+        "median_gap_in_band_widths": round(statistics.median(gaps) / band_w, 1),
+        "slot_means_are_clustered_not_uniform": (
+            "the gaps span two orders of magnitude and a third of them are narrower "
+            "than the band itself, so the uniform-draw model below does not describe "
+            "these means. It is retained as a labelled illustration only."
+        ),
+        "uniform_model_ILLUSTRATIVE_NOT_MEASURED_POWER": {
+            "p_single_slot_in_band": round(p_one, 4),
+            "expected_slot_means_in_band": round(len(means) * p_one, 3),
+            "p_at_least_one_in_band_pct": round((1 - (1 - p_one) ** len(means)) * 100.0, 1),
+            "why_not_load_bearing": (
+                "treats five fixed ordinals under four selected prefixes as iid uniform "
+                "draws over the span, and divides relative widths taken about different "
+                "denominators. @Reviewer, 5c2e0083. The conclusion below does not use it."
+            ),
+        },
         # The second reason this protocol has no power, and the stronger one. The
         # argument above is about placement scattering draws past a narrow window.
         # This is about a single draw not being repeatable to the window's width in
@@ -376,12 +413,16 @@ def _band_reachability(runs, size):
             }
         ),
         "conclusion": (
-            f"with {len(means)} slot means spanning {span:.2f}% and a band {band_w:.4f}% wide, a uniform "
-            f"model expects {len(means) * p_one:.2f} of them in band and gives only a {(1 - (1 - p_one) ** len(means)) * 100.0:.0f}% chance that "
-            "any lands there. Zero in-band is therefore not evidence against the "
-            "historical value -- this protocol has almost no power in that direction. "
-            "The defensible statement is symmetric: at this size and sample size the "
-            "data neither authenticate nor exclude a value in the band."
+            f"the {len(means)} slot means span {span:.2f}% and the band is {band_w:.4f}% wide. "
+            f"Their spacing is clustered rather than even: {sum(1 for g in gaps if g < band_w)} of "
+            f"{len(gaps)} adjacent gaps are narrower than the band and the largest is "
+            f"{round(max(gaps) / band_w, 1)}x it. Zero draws in band is therefore not evidence "
+            "against the historical value -- with means bunched this way, a narrow window "
+            "can sit in a sparse stretch and be missed by every draw. No probability is "
+            "claimed for that; an earlier version asserted one from a uniform model that "
+            "this same spacing refutes. The defensible statement is symmetric: at this "
+            "size and sample size the data neither authenticate nor exclude a value in "
+            "the band."
             + (
                 ""
                 if fl is None
@@ -464,6 +505,57 @@ def _size_discrimination(runs):
     return out
 
 
+# Above this, the guard is weak enough that it should not be described as a
+# check. Not a physical threshold -- a line drawn so that degradation announces
+# itself instead of accumulating silently. It has moved 7.996 -> 8.546 -> 8.296
+# -> 9.445 across four regenerations, entirely from the artifact growing, and
+# every one of those was an improvement to the artifact. That is the trap: the
+# tripwire decays as a side effect of good changes, monotonically, and reporting
+# the rate in a field nobody reads is not the same as noticing.
+GUARD_FALSE_NEGATIVE_CEILING_PCT = 12.0
+
+
+def _guard_false_negative_rate(measured, dp=2, hi=20):
+    """How often a value the prose did not mean would still be accepted.
+
+    Computed on the payload actually being written, because it is a property of
+    that payload and not of the guard. The docstring version of this number was
+    stale within one commit of being written -- see `_assert_prose_is_derived`.
+    """
+    grid = [f"{i / 10**dp:.{dp}f}" for i in range(hi * 10**dp + 1)]
+    hits = sum(1 for g in grid if g in measured)
+    rate = hits / len(grid) * 100.0
+    if rate > GUARD_FALSE_NEGATIVE_CEILING_PCT:
+        raise SystemExit(
+            f"the prose guard's own false-negative rate is now {rate:.3f}%, above the "
+            f"{GUARD_FALSE_NEGATIVE_CEILING_PCT}% ceiling. The accept-set has grown "
+            f"to {len(measured)} strings and covers {hits} of {len(grid)} plausible "
+            f"{dp}-dp values, so 'this decimal matches a computed field' no longer "
+            "carries much information. Narrow the accept-set (fewer rendered "
+            "precisions), split the payload, or check prose against the specific "
+            "field it cites rather than against every number in the artifact. Do not "
+            "raise the ceiling to make this pass -- that is the failure mode this "
+            "check exists to interrupt."
+        )
+    return {
+        "accept_set_size": len(measured),
+        "grid": f"{dp}-dp values in [0, {hi}]",
+        "grid_size": len(grid),
+        "accepted_without_being_meant": hits,
+        "false_negative_rate_pct": round(rate, 3),
+        "ceiling_pct": GUARD_FALSE_NEGATIVE_CEILING_PCT,
+        "headroom_pct": round(GUARD_FALSE_NEGATIVE_CEILING_PCT - rate, 3),
+        "note": (
+            "a tripwire, not a proof. This rate rises as the artifact grows -- more "
+            "measured values cover more of the grid by accident -- so it is computed "
+            "at write time rather than quoted from a docstring, and the assembler "
+            "now refuses to write once it passes the ceiling. Every increase so far "
+            "came from an improvement to the artifact, which is why silent decay was "
+            "the likely outcome without a hard stop."
+        ),
+    }
+
+
 def _assert_prose_is_derived(payload):
     """Refuse to write prose containing a decimal no field on this payload produced.
 
@@ -476,12 +568,32 @@ def _assert_prose_is_derived(payload):
     The allowlist is values no run here can compute: figures measured elsewhere
     and cited, which must carry their provenance in the surrounding text.
 
-    Known limit, measured rather than assumed: the accept-set is every payload
-    number rendered at 0-3 dp, which for this artifact is 406 strings. Sweeping
-    the 2-dp values in [0, 20] -- the range these percentages live in -- 5.2% are
-    accepted without having been the number the prose meant. So this catches a
-    fabricated or drifted constant about 19 times in 20, not always. It is a
-    tripwire, not a proof, and a coincidental match is still possible.
+    Known limit, and `_guard_false_negative_rate` below now computes it on the
+    payload being written rather than leaving it in this docstring. That change
+    is the point of the entry, so the reasoning is here rather than in a commit
+    message.
+
+    This docstring previously said "406 strings ... 5.2% are accepted", and
+    @Reviewer recomputed 8.246% against a later payload. He is right, and the
+    stale figure is a clean instance of the defect this whole file is about: a
+    number that appears only inside a prose string has no error bar and never
+    re-runs (@Autotune's rule). It was measured once on a smaller payload and
+    then quoted as a property of the guard.
+
+    What actually moved it is not what I would have guessed. Recomputing across
+    the artifact's own history: 7.996% at 9899e9d, 8.546% at be86f90, 8.296% at
+    682e103. The rate rises because *the payload grows* -- more measured values
+    means more accidental coverage of the grid -- not because the accept rule
+    loosened. Widening the rule from 0-3 dp to 0-5 dp, which I flagged in the
+    code below as the risky change, costs exactly 0.0000 pp on a 2-dp grid and
+    only shows up at 4 dp (+0.21 pp). So the thing I wrote a comment to worry
+    about was harmless, and the thing that actually degraded the guard -- routine
+    growth of the artifact -- had no comment at all.
+
+    The consequence is that this rate is a moving property of each payload, and
+    that is why it is computed at write time now. It remains a tripwire, not a
+    proof: a coincidental match is possible, and on the current payload roughly
+    one 2-dp value in twelve would pass unexplained.
     """
     cited = {
         "4.89": "historical copy cell, notes:869",
@@ -551,6 +663,7 @@ def _assert_prose_is_derived(payload):
             "turned out to measure the wrong axis entirely. Interpolate from a "
             "computed field, or add the value to `cited` with its provenance."
         )
+    return _guard_false_negative_rate(measured)
 
 
 def _staircase(path=REPO / "AI/data/copy_placement_draws/raw_dev5/_peak_sweep.json"):
@@ -853,7 +966,14 @@ def main():
         ),
     }
 
-    _assert_prose_is_derived(payload)
+    fn = _assert_prose_is_derived(payload)
+    # Added after the guard runs, so the rate describes the payload the guard
+    # actually checked. Writing it in first would make the guard's own accept-set
+    # include the digits of its own error rate -- a small self-reference, but this
+    # file has been bitten twice by numbers that described a slightly different
+    # object than the one they were attached to.
+    fn["measured_on"] = "the payload as checked, before this field was added"
+    payload["prose_guard"] = fn
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps(payload, indent=2) + "\n")
     print(f"wrote {OUT}")
