@@ -13,7 +13,9 @@
       "group_segment_fixed_size": 8,
       "private_segment_fixed_size": 0,
       "max_flat_workgroup_size": 256,
-      "waves_per_simd": 21
+      "vgpr_alloc": 24,
+      "waves_per_simd_register_limited": 21,
+      "occupancy_upper_bound_waves_per_simd": 8
     },
     {
       "n": 2048,
@@ -25,7 +27,9 @@
       "group_segment_fixed_size": 16,
       "private_segment_fixed_size": 0,
       "max_flat_workgroup_size": 256,
-      "waves_per_simd": 21
+      "vgpr_alloc": 24,
+      "waves_per_simd_register_limited": 21,
+      "occupancy_upper_bound_waves_per_simd": 8
     },
     {
       "n": 4096,
@@ -37,7 +41,9 @@
       "group_segment_fixed_size": 16,
       "private_segment_fixed_size": 0,
       "max_flat_workgroup_size": 256,
-      "waves_per_simd": 12
+      "vgpr_alloc": 40,
+      "waves_per_simd_register_limited": 12,
+      "occupancy_upper_bound_waves_per_simd": 8
     },
     {
       "n": 8192,
@@ -49,7 +55,9 @@
       "group_segment_fixed_size": 16,
       "private_segment_fixed_size": 0,
       "max_flat_workgroup_size": 256,
-      "waves_per_simd": 8
+      "vgpr_alloc": 64,
+      "waves_per_simd_register_limited": 8,
+      "occupancy_upper_bound_waves_per_simd": 8
     },
     {
       "n": 16384,
@@ -61,7 +69,9 @@
       "group_segment_fixed_size": 16,
       "private_segment_fixed_size": 0,
       "max_flat_workgroup_size": 256,
-      "waves_per_simd": 5
+      "vgpr_alloc": 96,
+      "waves_per_simd_register_limited": 5,
+      "occupancy_upper_bound_waves_per_simd": 5
     },
     {
       "n": 32768,
@@ -73,7 +83,9 @@
       "group_segment_fixed_size": 16,
       "private_segment_fixed_size": 0,
       "max_flat_workgroup_size": 256,
-      "waves_per_simd": 3
+      "vgpr_alloc": 160,
+      "waves_per_simd_register_limited": 3,
+      "occupancy_upper_bound_waves_per_simd": 3
     },
     {
       "n": 49152,
@@ -85,7 +97,9 @@
       "group_segment_fixed_size": 16,
       "private_segment_fixed_size": 0,
       "max_flat_workgroup_size": 256,
-      "waves_per_simd": 2
+      "vgpr_alloc": 232,
+      "waves_per_simd_register_limited": 2,
+      "occupancy_upper_bound_waves_per_simd": 2
     },
     {
       "n": 57344,
@@ -97,7 +111,9 @@
       "group_segment_fixed_size": 16,
       "private_segment_fixed_size": 0,
       "max_flat_workgroup_size": 256,
-      "waves_per_simd": 1
+      "vgpr_alloc": 264,
+      "waves_per_simd_register_limited": 1,
+      "occupancy_upper_bound_waves_per_simd": 1
     },
     {
       "n": 65536,
@@ -109,7 +125,12 @@
       "group_segment_fixed_size": 16,
       "private_segment_fixed_size": 0,
       "max_flat_workgroup_size": 256,
-      "waves_per_simd": 1
+      "vgpr_alloc": 304,
+      "waves_per_simd_register_limited": 1,
+      "occupancy_upper_bound_waves_per_simd": 1
     }
-  ]
+  ],
+  "max_waves_per_simd_hw": 8,
+  "max_waves_per_simd_hw_source": "/sys/class/kfd/kfd/topology/nodes/*/properties: max_waves_per_simd 8 (simd_per_cu 4, wave_front_size 64) on every GPU node of this host",
+  "derived_field_note": "occupancy_upper_bound_waves_per_simd = min(floor(vgprs_per_simd / vgpr_alloc), max_waves_per_simd_hw), where vgpr_alloc = roundup(vgpr_count, alloc_granularity_wave64). It is an UPPER BOUND from the register file only -- it is not measured occupancy, and it ignores workgroup-slot, LDS and barrier limits. A previous version of this file stored this as 'waves_per_simd' WITHOUT the hardware cap, giving 21/21/12 for N=1024/2048/4096, which exceeds what the hardware can hold; @Reviewer caught it."
 }

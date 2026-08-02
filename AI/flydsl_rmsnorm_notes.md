@@ -1039,13 +1039,39 @@ three rows where it happened to hold.** The five differences are 0.30, 8.91,
 17.16, 17.49 and 17.62 us. They saturate near 17.6 us at small shapes and fall
 away as the kernel grows, which is the shape of a fixed host cost being
 progressively hidden behind device work, not of a constant addend. Round-to-
-round spread is 0.40-1.25 us, so the 8.91 us row is a real intermediate and not
-noise. Quoting a single number across the range asserted an overlap model I had
-not tested; the honest summary is "up to ~17.6 us, fully hidden by 32768x4096".
+round spread across the ten series is 0.40-2.69 us -- an earlier version of this
+line said "0.40-1.25", which is the spread of six of the ten and omits the two
+widest (`_launch` at 1024x1024, 2.69 us, and at 32768x4096, 1.85 us), i.e. it
+quoted a range computed over a subset that excluded exactly the series the next
+sentence rests on. The 8.91 us row still stands clear of it: those two series
+are [20.50, 21.12] and [29.41, 30.63], which do not overlap, so it is a real
+intermediate and not noise. Quoting a single number across the range asserted an
+overlap model I had not tested; the honest summary is "up to ~17.6 us, and
+unresolved at 32768x4096".
 
-The consequence for the published tables is unchanged in direction and
-unproven in size. At 32768x4096 the level choice is worth 0.3%, inside the
-spread, so the large-shape results stand. At small shapes the harness compares
+**The 32768x4096 row does not support a number at all, and I stated one.**
+"+0.30 us (+0.3%)" is a difference of two minima, and at that shape the two
+round distributions overlap: `_launch` spans 89.63-91.48 us across its seven
+rounds and `rmsnorm()` spans 89.93-90.33, so the `rmsnorm()` interval sits
+*inside* the `_launch` interval. Nothing separates them. The honest reading is
+that at 32768x4096 the level choice is **below this protocol's resolution** --
+not that it costs 0.3%. Writing "inside the spread" and then quoting the point
+estimate anyway is having it both ways: if it is inside the spread, the point
+estimate is noise and does not belong in the table as a measurement.
+@Reviewer raised this; the intervals are in the sidecar and they do overlap.
+
+Worth stating what this does *not* touch, because the blocker is narrower than
+the table: the other four rows separate cleanly. 8192x4096 is
+[20.50, 21.12] against [29.41, 30.63], and the three small shapes are further
+apart still. Only the largest shape is unresolved, which is also the only shape
+where the argument needed it.
+
+The consequence for the published tables is therefore unchanged in direction and
+unproven in size at every shape. At 32768x4096 the level choice is unresolved
+rather than small, so the large-shape results are **not** shown to stand by this
+probe -- they are merely not shown to move by it, which is a weaker claim and
+the one I should have made. Separating them needs more rounds or a paired
+per-round design, not a re-reading of these seven. At small shapes the harness compares
 a preallocated FlyDSL launcher against an allocating quack wrapper, and **how
 much that is worth on the quack side has not been measured** -- it needs a CUDA
 box, and until then no small-shape speedup from this harness should be quoted
@@ -1066,20 +1092,53 @@ pointing `FLYDSL_RUNTIME_CACHE_DIR` at an empty directory; without that every
 row reads "cache hit" and the probe silently measures nothing. bf16 forward,
 weight only:
 
-| N | vgpr | alloc (gran 8) | waves/SIMD | vgpr spill | sgpr spill | scratch |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1024 | 20 | 24 | 21 | 0 | 0 | 0 |
-| 2048 | 20 | 24 | 21 | 0 | 0 | 0 |
-| 4096 | 36 | 40 | 12 | 0 | 0 | 0 |
-| 8192 | 60 | 64 | 8 | 0 | 0 | 0 |
-| 16384 | 94 | 96 | 5 | 0 | 0 | 0 |
-| 32768 | 156 | 160 | 3 | 0 | 0 | 0 |
-| 49152 | 230 | 232 | **2** | 0 | 0 | 0 |
-| 57344 | 264 | 264 | **1** | 0 | 0 | 0 |
-| 65536 | 300 | 304 | 1 | 0 | 0 | 0 |
+| N | vgpr | alloc (gran 8) | reg-limited waves/SIMD | occupancy bound (cap 8) | vgpr spill | sgpr spill | scratch |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1024 | 20 | 24 | 21 | **8** | 0 | 0 | 0 |
+| 2048 | 20 | 24 | 21 | **8** | 0 | 0 | 0 |
+| 4096 | 36 | 40 | 12 | **8** | 0 | 0 | 0 |
+| 8192 | 60 | 64 | 8 | 8 | 0 | 0 | 0 |
+| 16384 | 94 | 96 | 5 | 5 | 0 | 0 | 0 |
+| 32768 | 156 | 160 | 3 | 3 | 0 | 0 | 0 |
+| 49152 | 230 | 232 | 2 | **2** | 0 | 0 | 0 |
+| 57344 | 264 | 264 | 1 | **1** | 0 | 0 | 0 |
+| 65536 | 300 | 304 | 1 | 1 | 0 | 0 | 0 |
 
 Bit-identical across two fresh processes.
 Raw at `AI/data/rmsnorm_fwd_vgpr_by_n.json`.
+
+**The first three rows used to read 21, 21 and 12 waves/SIMD, which the hardware
+cannot do.** `floor(512 / vgpr_alloc)` is the register file's limit and I stored
+it as though it were occupancy. This host reports `max_waves_per_simd 8` for
+every GPU node (`/sys/class/kfd/kfd/topology/nodes/*/properties`, with
+`simd_per_cu 4`, `wave_front_size 64`), so the correct capped sequence is
+8, 8, 8, 8, 5, 3, 2, 1, 1. @Reviewer caught it and the arithmetic reproduces
+exactly. The sidecar now stores both columns under honest names --
+`waves_per_simd_register_limited` and `occupancy_upper_bound_waves_per_simd` --
+rather than one column whose name claimed more than its formula computed.
+
+Two things follow, one reassuring and one not.
+
+The conclusion below survives, because the cliff is at 49152 -> 57344 where the
+cap does not bind: 2 -> 1 either way. Capping only changes rows at and below
+N=8192, which are not where the argument is made.
+
+What does not survive is the shape of the curve as I drew it. Occupancy is now
+**flat at 8 from N=1024 through N=8192**, not falling 21 -> 12 -> 8. So there is
+no occupancy gradient at all across the small and mid range, and any reading of
+those rows as "occupancy is already declining by 4096" was an artifact of the
+missing cap. It also means the register file is not the binding constraint until
+N=16384; below that something else sets occupancy, and this table does not say
+what.
+
+And the deeper problem is that **none of this column is measured.** It is
+arithmetic on a register count -- an upper bound that ignores workgroup slots,
+LDS and barriers. Calling a derived bound "waves/SIMD" is how the uncapped
+version survived review in the first place: a measured number would have been
+checked against the hardware maximum, and a derived one was not. The occupancy
+half of the mechanism claim is therefore still owed a rocprofv3 measurement, and
+until it exists the paragraph below is a register-count argument wearing an
+occupancy label.
 
 **The occupancy step falls exactly on the measured cliff.** Bandwidth halves
 between 49152 and 57344; VGPR allocation crosses 256 of the 512 per-SIMD budget
@@ -1094,7 +1153,11 @@ been the wrong name for it; the cost is lost latency hiding, not scratch
 traffic. And the growth is smooth and roughly linear in N, about 4.6 VGPRs per
 1024 columns, with no discontinuity at 8192 -- which is the second, independent
 confirmation that **`MAX_N = 8192` is not where the hardware objects**. At 8192
-the kernel is at 60 VGPRs and 8 waves/SIMD, nowhere near any limit.
+the kernel is at 60 VGPRs, which is the last row still able to fill all 8 wave
+slots -- the register file allows exactly 8 there, so it is at full occupancy
+rather than "nowhere near any limit", which is what this line said while the
+cap was missing. The point stands either way: at 8192 nothing has degraded yet,
+and it is the *first* N below which the register file has slack it cannot use.
 
 The comment on `MAX_N` claims the constant *is* "the register budget expressed
 as a row length." It is now fair to say that is wrong twice over: the register
