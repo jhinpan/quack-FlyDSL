@@ -151,15 +151,30 @@ def _identical_buffer_spread(mib):
 
     The general form is the one this file keeps running into from new angles:
     *a summary is a claim about which distinctions will matter later, and it is
-    made before you know.* Raw rounds are retained everywhere else in this
-    generator for that reason; these were the exception and should not have been.
-    Rounded copies are kept alongside for readers, clearly named.
+    made before you know.* Rounded copies are kept alongside for readers,
+    clearly named.
+
+    That lesson was learned twice here, and the second time the first fix was
+    what hid it. Storing the rates unrounded read as "full precision retained",
+    so the next question -- @Reviewer's, in 23a6f662 -- went unasked for a day:
+    full precision *of what*? Each of these five numbers is `bytes / min(seven
+    rounds)`. The other six rounds were computed by `_summarise` and dropped on
+    the floor. So a slot that is genuinely slower and a slot that caught one bad
+    round are the same datum here, and the slot-vs-process decomposition that
+    rests on these draws could not tell them apart. `rounds_us_per_identical_buffer`
+    now carries all seven; the derived rate stays, unchanged, so every consumer
+    of the old field keeps reading it.
+
+    Note what "unrounded" bought and what it cost. It was a real fix -- the band
+    question needed those digits. But precision and provenance are different
+    axes, and satisfying one loudly is how the other stops being checked.
     """
     cnt = (mib * 1024 * 1024) // 4
     nbytes = 2 * cnt * 4
     dst = torch.empty(cnt, device="cuda", dtype=torch.float32)
     srcs = [torch.empty(cnt, device="cuda", dtype=torch.float32).fill_(1.0) for _ in range(5)]
-    rates = [_summarise(_bench(lambda s=s: dst.copy_(s)), nbytes)["TBps_at_min"] for s in srcs]
+    per_buffer = [_summarise(_bench(lambda s=s: dst.copy_(s)), nbytes) for s in srcs]
+    rates = [p["TBps_at_min"] for p in per_buffer]
     lo, hi = min(rates), max(rates)
     return {
         "TBps_per_identical_buffer": rates,
@@ -169,6 +184,13 @@ def _identical_buffer_spread(mib):
             "made an interval-membership question undecidable against a 0.2%-wide "
             "band; 3 dp is a display choice, not a measurement."
         ),
+        # All seven rounds per buffer. @Reviewer's objection was that "full
+        # precision" meant one derived rate while the rounds behind it were
+        # discarded, so a reader cannot separate a genuinely slower slot from one
+        # that caught a single bad round -- and that distinction is what the whole
+        # slot argument rests on. _summarise already computed these.
+        "rounds_us_per_identical_buffer": [p["samples_us"] for p in per_buffer],
+        "within_buffer_spread_pct": [round(p["spread_pct_of_min"], 3) for p in per_buffer],
         "spread_pct_of_min": round((hi - lo) / lo * 100.0, 2),
         "fits_in_mall": mib * 1024 * 1024 <= MALL_WORKING_SET_BYTES,
         "n_identical_buffers": len(srcs),

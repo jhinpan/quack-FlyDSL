@@ -806,13 +806,41 @@ how many of them there are.
 
 Re-measured at 2 GiB, sampling 5 allocation slots across 4 allocator high-water
 marks and 16 processes (`AI/data/copy_placement_draws/copy_axes_dev5.json`):
-**80 draws, min 4.7682, max 5.3318, an 11.82% range**, with **16 below the band
-and 64 at or above it**. The same collection at 512 MiB gives 18.51%. The band
-is 0.205% wide, so the confound is **58×** what it would have to resolve.
+**80 draws, min 4.7626, max 5.3208, an 11.72% range**, with **16 below the band
+and 64 at or above it**. The same collection at 512 MiB gives 19.11%. The band
+is 0.205% wide, so the confound is **57×** what it would have to resolve.
 
 The verdict survives at the size that matters; what changes is the number and
 its scope. The earlier text's **19.06%** was the 512 MiB figure quoted against a
 2 GiB cell.
+
+#### The instrument cannot resolve the band even with placement held fixed
+
+This is the stronger version of the argument, and it only became visible after
+@Reviewer's `23a6f662`: *"'Full precision' still means one derived rate per
+buffer; all seven timing rounds for each identical buffer are discarded."* Every
+draw above is `bytes / min(seven rounds)`; the other six were computed and
+thrown away. Retaining them (`rounds_us_per_identical_buffer`) gives the
+instrument's own floor for the first time.
+
+**A single draw's round-to-round spread has median 0.995% at 2 GiB — 4.9× the
+band width.** With slot, process, program and buffer all held fixed, timing the
+same copy seven times in a row already scatters further than the interval the
+band question is asking about. So the placement term was never the binding
+constraint on reconstructing `4.89`: even a perfectly placement-controlled
+measurement could not land a value in a 0.205%-wide window with confidence.
+
+Two things follow. The pooled-range argument is unaffected — 11.72% against a
+0.205% band still holds, and the floor is well below the pooled range, which is
+what makes the slot decomposition readable as placement rather than noise. But
+the *symmetric* conclusion below gets a second, independent reason, and the
+weaker of the two reasons is the one I had published.
+
+Worth noting what hid it. The previous fix here stored the rates **unrounded**,
+which was correct and necessary — the band question needed those digits. It also
+read as "full precision retained", and that phrasing is why nobody asked *full
+precision of what* for a day. **Precision and provenance are different axes, and
+satisfying one loudly is how the other stops being checked.**
 
 For the record of what the older 512-MiB-only artifact showed: 30 draws, min
 4.701, max 5.597 — a 19.06% range — with 7 below the band, 21 at or above it, 1
@@ -832,18 +860,19 @@ overclaims. @Autotune caught it against the 512 MiB artifact and it applied to
 the 2 GiB one too, which I had written an hour earlier. Draws sit below and
 above the band, but *zero* land inside, and the draws are not a continuum: they
 cluster on allocation slots whose means are separated by gaps an order of
-magnitude wider than the band. With 20 distinct slot means spanning 11.42% and
+magnitude wider than the band. With 20 distinct slot means spanning 11.46% and
 a band 0.2047% wide, a uniform model expects **0.36** of them in band and gives
 only a **30%** chance that any lands there. Observing zero in-band is the
 expected outcome even if the band is perfectly reachable, so it carries almost
-no evidence either way.
+no evidence either way. And per the subsection above, a single draw could not
+resolve the band regardless of where it landed.
 
 The honest statement is symmetric and weaker than what I first published: **at
 this sample size the data neither authenticate nor exclude the historical
 value.** What they do establish is that distance from a single current draw is
 weak evidence, because the three distances the argument relies on (5–14%) are
 each smaller than the spread between *identical buffers in a single process* —
-7.05% at 2 GiB within one fixed program, 11.82% once the allocator's peak is
+5.60–6.80% at 2 GiB within one fixed program, 11.72% once the allocator's peak is
 allowed to vary as it does across harnesses. This is the same rule
 that retired the equal-occupancy ratio's third digit: **a comparison must
 discriminate a gap larger than the confounds it cannot see.**

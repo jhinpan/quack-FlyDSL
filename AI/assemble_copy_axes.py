@@ -59,6 +59,7 @@ Writes AI/data/copy_placement_draws/copy_axes_dev5.json.
 import hashlib
 import json
 import re
+import statistics
 import subprocess
 import sys
 from collections import defaultdict
@@ -149,11 +150,49 @@ def _decompose(runs, size):
     sst = sum((v - gm) ** 2 for v in allv)
     ssb = sum(len(vs) * ((sum(vs) / len(vs)) - gm) ** 2 for vs in slot_key.values())
 
+    # The instrument floor, from the seven timing rounds behind each draw where
+    # the run recorded them. Without this the decomposition above is unreadable:
+    # "98.7% of variance is slot and peak" is only a statement about placement if
+    # a single draw is stable to much better than the spread being attributed.
+    # If round-to-round noise were the same size as the across-slot range, the
+    # same eta-squared would appear with no placement effect at all.
+    rounds = [
+        r["identical_buffers_by_size"][size][k]
+        for rs in runs.values()
+        for r in rs
+        if (k := "rounds_us_per_identical_buffer") in r["identical_buffers_by_size"][size]
+    ]
+    within = [
+        (max(s) / min(s) - 1) * 100.0 for per_run in rounds for s in per_run if min(s) > 0
+    ]
+    floor = (
+        {
+            "n_draws_with_rounds": len(within),
+            "round_spread_pct_median": round(statistics.median(within), 3),
+            "round_spread_pct_max": round(max(within), 3),
+            "note": (
+                "spread over the seven timing rounds behind one draw, in us. Compare "
+                "against pooled_range_pct_of_min: the placement claim requires the "
+                "pooled range to be large against this, not merely nonzero."
+            ),
+        }
+        if within
+        else {
+            "n_draws_with_rounds": 0,
+            "note": (
+                "these runs predate rounds_us_per_identical_buffer. The decomposition "
+                "below is reported without an instrument floor to compare it against, "
+                "which is the gap @Reviewer raised in 23a6f662; re-collect to close it."
+            ),
+        }
+    )
+
     return {
         "n_draws": len(allv),
         "min_TBps": min(allv),
         "max_TBps": max(allv),
         "pooled_range_pct_of_min": round((max(allv) / min(allv) - 1) * 100.0, 2),
+        "within_draw_instrument_floor": floor,
         "variance_explained_by_slot_and_peak_pct": round(ssb / sst * 100.0, 2),
         "worst_across_process_range_pct": round(
             max(pp["worst_across_process_range_pct"] for pp in per_peak.values()), 2
@@ -215,6 +254,8 @@ def _band_reachability(runs, size):
     band_w = (hi / lo - 1) * 100.0
     span = (max(means) / min(means) - 1) * 100.0
     p_one = band_w / span
+    floor = axis["within_draw_instrument_floor"]
+    fl = floor.get("round_spread_pct_median")
     return {
         "n_slot_means": len(means),
         "slot_mean_span_pct": round(span, 2),
@@ -222,6 +263,21 @@ def _band_reachability(runs, size):
         "p_single_slot_in_band_uniform_model": round(p_one, 4),
         "expected_slot_means_in_band": round(len(means) * p_one, 3),
         "p_at_least_one_in_band_pct": round((1 - (1 - p_one) ** len(means)) * 100.0, 1),
+        # The second reason this protocol has no power, and the stronger one. The
+        # argument above is about placement scattering draws past a narrow window.
+        # This is about a single draw not being repeatable to the window's width in
+        # the first place: with slot, process and program all held fixed, the seven
+        # timing rounds behind one draw already spread further than the band.
+        "band_width_vs_single_draw_noise": (
+            None
+            if fl is None
+            else {
+                "median_round_spread_pct": fl,
+                "band_width_pct": round(band_w, 4),
+                "ratio_noise_to_band": round(fl / band_w, 1),
+                "band_resolvable_by_one_draw": bool(fl < band_w),
+            }
+        ),
         "conclusion": (
             f"with {len(means)} slot means spanning {span:.2f}% and a band {band_w:.4f}% wide, a uniform "
             f"model expects {len(means) * p_one:.2f} of them in band and gives only a {(1 - (1 - p_one) ** len(means)) * 100.0:.0f}% chance that "
@@ -229,8 +285,40 @@ def _band_reachability(runs, size):
             "historical value -- this protocol has almost no power in that direction. "
             "The defensible statement is symmetric: at this size and sample size the "
             "data neither authenticate nor exclude a value in the band."
+            + (
+                ""
+                if fl is None
+                else (
+                    f" A second limit, visible only once the timing rounds were retained: "
+                    f"a single draw's own round-to-round spread has median {fl}%, which is "
+                    f"{round(fl / band_w, 1)}x the band width. Even with slot, process and "
+                    "program all held fixed, one measurement cannot resolve an interval "
+                    "this narrow. The placement argument was never the binding constraint."
+                )
+            )
         ),
     }
+
+
+def _slot_rates(run, size, pat):
+    """Derived rate per slot, from either the old float list or the new records.
+
+    `_pattern_rates` used to return five floats per pattern; it now returns five
+    records carrying all seven timing rounds, because a single derived rate
+    cannot distinguish a genuinely slow slot from one that caught a bad round.
+    Both shapes are read here rather than migrating the committed runs: the raw
+    runs under `raw_dev5/` are hashed into `input_manifest`, and rewriting them
+    to fit a new reader would break the binding between artifact and evidence
+    that the manifest exists to enforce.
+    """
+    block = run["roofline_patterns_by_size"][size][pat]
+    return [v["TBps_at_min"] if isinstance(v, dict) else v for v in block]
+
+
+def _within_slot_spreads(run, size, pat):
+    """Per-slot round-to-round spread, where the run recorded it. Empty if not."""
+    block = run["roofline_patterns_by_size"][size][pat]
+    return [v["spread_pct_of_min"] for v in block if isinstance(v, dict)]
 
 
 def _size_discrimination(runs):
@@ -238,8 +326,17 @@ def _size_discrimination(runs):
     out = {}
     allr = [r for rs in runs.values() for r in rs]
     for pat in ("write", "two_read_one_write", "copy"):
-        a = [v for r in allr for v in r["roofline_patterns_by_size"]["512MiB"][pat]]
-        b = [v for r in allr for v in r["roofline_patterns_by_size"]["2048MiB"][pat]]
+        a = [v for r in allr for v in _slot_rates(r, "512MiB", pat)]
+        b = [v for r in allr for v in _slot_rates(r, "2048MiB", pat)]
+        # Round-to-round noise inside one slot, where recorded. This is the
+        # instrument's floor; the across-slot spreads above are only meaningful
+        # as a confound to the extent they exceed it.
+        within = [
+            s
+            for r in allr
+            for size in ("512MiB", "2048MiB")
+            for s in _within_slot_spreads(r, size, pat)
+        ]
         out[pat] = {
             "range_512MiB": [min(a), max(a)],
             "range_2048MiB": [min(b), max(b)],
@@ -248,6 +345,11 @@ def _size_discrimination(runs):
             "n_per_size": len(a),
             "ranges_overlap": not (max(a) < min(b) or max(b) < min(a)),
             "historical_TBps": HISTORICAL[pat],
+            "within_slot_spread_pct_max": round(max(within), 3) if within else None,
+            "within_slot_spread_pct_median": (
+                round(statistics.median(within), 3) if within else None
+            ),
+            "n_slots_with_rounds": len(within),
         }
     out["verdict"] = (
         "No pattern separates 512 MiB from 2 GiB once allocation slot and allocator "
@@ -256,8 +358,11 @@ def _size_discrimination(runs):
         "concluded from a 4.04% gap that the historical table must be 2 GiB. That "
         "spread was measured with slot and peak both held fixed, the one condition "
         "under which neither confound is visible; sampled properly the same probe "
-        "spreads 2.47%. The table's size is known from notes:869 stating it, which "
-        "is documentary evidence. Nothing in this artifact measures it."
+        f"spreads {out['two_read_one_write']['spread_512MiB_pct']}%. The table's size "
+        "is known from notes:869 stating it, which is documentary evidence. Nothing in "
+        "this artifact measures it. The spread in this sentence was hand-carried from a "
+        "previous collection and the prose guard caught it when fresh runs moved the "
+        "value; it is now interpolated from the field above."
     )
     return out
 
@@ -365,6 +470,30 @@ def _staircase(path=REPO / "AI/data/copy_placement_draws/raw_dev5/_peak_sweep.js
     by = defaultdict(list)
     for r in d["rows"]:
         by[r["peak_live_512mib"]].append(r["draws_2GiB"])
+
+    # The floor the step criterion needs, measured rather than assumed. The
+    # previous criterion was `3 * max(repeat, 0.5)`, and that 0.5 was typed by
+    # hand as "a repeat spread can't meaningfully be below this". It is the exact
+    # object this whole line of work keeps retiring: a number with no error bar,
+    # sitting inside a threshold that decides which steps get published. If the
+    # sweep carries rounds, the floor is the median round-to-round spread of a
+    # single draw; if it does not, the constant stays and the artifact says so.
+    round_spreads = [
+        (max(s) / min(s) - 1) * 100.0
+        for r in d["rows"]
+        for s in r.get("rounds_us_2GiB", [])
+        if min(s) > 0
+    ]
+    floor = statistics.median(round_spreads) if round_spreads else 0.5
+    floor_src = (
+        f"median round-to-round spread of a single draw over {len(round_spreads)} draws"
+        if round_spreads
+        else (
+            "hand-picked 0.5 -- this sweep predates rounds_us_2GiB, so there is no "
+            "measured instrument floor and the threshold rests on a typed constant"
+        )
+    )
+
     levels, steps, prev = [], [], None
     for peak in sorted(by):
         reps = by[peak]
@@ -379,7 +508,7 @@ def _staircase(path=REPO / "AI/data/copy_placement_draws/raw_dev5/_peak_sweep.js
                 "shift_vs_previous_level_pct": None if shift is None else round(shift, 2),
             }
         )
-        if shift is not None and shift > 3 * max(repeat, 0.5):
+        if shift is not None and shift > 3 * max(repeat, floor):
             steps.append(peak)
         prev = means
     return {
@@ -388,6 +517,8 @@ def _staircase(path=REPO / "AI/data/copy_placement_draws/raw_dev5/_peak_sweep.js
         "one_process_per_row": d["one_process_per_row"],
         "step_at_peak_live_512mib": steps,
         "criterion": "level-to-level shift exceeds 3x the across-process repeat spread",
+        "criterion_floor_pct": round(floor, 3),
+        "criterion_floor_source": floor_src,
         "levels": levels,
         "why_not_within_process": d["why_not_within_process"],
     }

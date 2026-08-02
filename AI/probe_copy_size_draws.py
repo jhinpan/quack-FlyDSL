@@ -134,8 +134,25 @@ def _pattern_rates(mib):
     # precisely the shape `_identical_buffer_spread` was already refactored to
     # remove, and it came straight back the moment I wrote a similar helper:
     # correct by evaluation order, with nothing in the code saying so.
+    # Keeps every round, not just the derived rate. @Reviewer's objection to the
+    # previous artifact was that "full precision" meant one number per buffer
+    # while the seven timing rounds behind it were thrown away -- so a reader
+    # cannot tell a slot that is genuinely slower from one that caught a single
+    # bad round, which is exactly the distinction the slot argument rests on.
+    # `_summarise` already computes them; discarding them was free to avoid.
     def slots(make_call, nbytes):
-        return [_summarise(_bench(make_call(i)), nbytes)["TBps_at_min"] for i in range(5)]
+        out = []
+        for i in range(5):
+            s = _summarise(_bench(make_call(i)), nbytes)
+            out.append(
+                {
+                    "TBps_at_min": s["TBps_at_min"],
+                    "samples_us": s["samples_us"],
+                    "spread_pct_of_min": s["spread_pct_of_min"],
+                    "bytes_moved": s["bytes_moved"],
+                }
+            )
+        return out
 
     return {
         "copy": slots(lambda i: lambda d=dst, s=srcs_a[i]: d.copy_(s), 2 * buf),
@@ -182,11 +199,13 @@ def _sweep_steps(out_path):
                 check=True,
                 env={**os.environ},
             )
+            row = json.loads(proc.stdout)
             rows.append(
                 {
                     "peak_live_512mib": peak,
                     "rep": rep,
-                    "draws_2GiB": json.loads(proc.stdout)["draws_2GiB"],
+                    "draws_2GiB": row["draws_2GiB"],
+                    "rounds_us_2GiB": row["rounds_us_2GiB"],
                 }
             )
     out_path.write_text(
@@ -237,8 +256,17 @@ def main():
 
     if args.peak_live_512mib_any is not None:
         _run_prefix(args.peak_live_512mib_any)
+        block = _identical_buffer_spread(2048)
+        # Rounds, not just the derived rates: a "step" in the staircase is only a
+        # step if it clears the round-to-round noise of a single draw, and the
+        # sweep cannot be read for that unless it carries the rounds along.
         print(
-            json.dumps({"draws_2GiB": _identical_buffer_spread(2048)["TBps_per_identical_buffer"]})
+            json.dumps(
+                {
+                    "draws_2GiB": block["TBps_per_identical_buffer"],
+                    "rounds_us_2GiB": block["rounds_us_per_identical_buffer"],
+                }
+            )
         )
         return
 
