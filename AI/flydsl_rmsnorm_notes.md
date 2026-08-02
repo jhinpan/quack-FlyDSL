@@ -1062,6 +1062,67 @@ design produced **by accident**. It is reported in `high_water_check` and not
 leaned on. The 2 GiB block, which every conclusion here rests on, has no such
 separation.
 
+That "partial factorial separation" wording is now **withdrawn**, and the reason
+is worth more than the phrase was. Even at 512 MiB, count and bytes still move
+together — the prefix allocates *n* buffers of one fixed size, so `bytes = n ×
+512 MiB` identically, and varying *n* varies both. Three distinct high-waters
+across levels is not a separation of two factors; it is one factor observed at
+three values, wearing a second factor's name. I reached for "partial factorial"
+because the high-waters differed, and differing is not the same as crossing.
+
+##### The real factorial: bytes explains 94.5%, and the route is equivocal
+
+`AI/probe_alloc_factorial.py` crosses the two factors properly — count {24, 48} ×
+per-buffer size {512 MiB, 1 GiB}, 16 processes, one seeded shuffle, no blocking.
+The cell pair that does the work is **the same 24 GiB of prior peak reached with
+24 allocations or with 48**. Verified before spending the run: both read exactly
+24.0 GiB.
+
+| cell | count | each | prior peak | mean TB/s | sd |
+|---|---|---|---|---|---|
+| lo_lo | 24 | 512 MiB | 12.0 GiB | 4.9077 | 0.0018 |
+| lo_hi | 24 | 1 GiB | 24.0 GiB | 4.9517 | 0.0047 |
+| hi_lo | 48 | 512 MiB | 24.0 GiB | 4.9619 | 0.0083 |
+| hi_hi | 48 | 1 GiB | 48.0 GiB | 4.9715 | 0.0041 |
+
+Total prior bytes alone explains **94.53%** of the variance — a 0.0638 TB/s
+swing, the size of the staircase's own 0.060 step. Pooling the two routes to
+24 GiB costs only 2.11%. **Bytes is the better name for the axis**, and the
+docstring claim this file retracted above is now measured rather than asserted.
+
+It is not fully vindicated. "Not churn" overstates: holding 24 GiB fixed and
+changing only the route is **equivocal** — t(6) = −2.15, p = 0.0755, against
+F(1,12) = 7.51, p = 0.0179 for the same contrast. They disagree because the F
+test borrows variance across cells whose standard deviations span 4.6×. A
+step-sized count effect is excluded; a small one is not, and I am not picking
+the test I prefer.
+
+Three corrections found while reading my own output, all one defect:
+
+- **Both Type-II "main effects" came back significant** (p = 0.0000 and
+  p = 0.0003) and I nearly published them as the separation. Neither holds total
+  bytes constant: `bytes_f` is *per-buffer* size, and count × per-buffer size
+  **is** the total, so doubling count at fixed per-buffer size doubles the total
+  too. Only the diagonal holds it fixed. A factor name says which variable is
+  adjusted for; a reader in a hurry reads it as which quantity is held constant.
+- **The precondition reads false.** 24 × 512 MiB is exactly 12.0 GiB — *equal* to
+  the measurement's own live set, not above it. `lo_lo` sits on the boundary the
+  design set for itself. The diagonal is unaffected; `lo_lo`'s anchor role is
+  what weakens.
+- **The grid does not cover the steps.** The staircase's steps are at 13/17/21
+  prior allocations — 6.5 to 10.5 GiB. Every cell here starts at 12 GiB. This
+  characterises the curve *above* where the steps were found. The response is
+  also concave (+0.0491 for 12→24 GiB, then +0.0147 for 24→48), so the routes
+  are compared where the curve is already flattening and a route effect could be
+  larger lower down.
+
+`count=0` and `count=13` anchor cells were **pre-declared** for this, before the
+numbers were read — the assembler was committed while the sweep was still
+running (`7ba33a6`), with the unit of analysis, the thresholds, the band's units
+and this limitation all fixed in advance, precisely because the staircase needed
+three iterations largely because each round's analysis was chosen after its
+numbers were on screen. Those anchors remain open.
+
 ##### Time reversal was not enough; the level had to stop being a function of when
 
 The first sweep ran levels 0→21 in wall-clock order, which leaves level
