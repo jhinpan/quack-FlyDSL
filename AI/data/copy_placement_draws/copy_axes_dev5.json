@@ -12,7 +12,7 @@
   ],
   "generator": "AI/probe_copy_size_draws.py",
   "assembler": "AI/assemble_copy_axes.py",
-  "commit": "75a47eb",
+  "commit": "9879dda",
   "worktree_dirty": true,
   "historical_table": {
     "source": "AI/flydsl_rmsnorm_notes.md:869",
@@ -507,7 +507,8 @@
       "draws_inside_band_half_open": 0,
       "draws_inside_band_closed": 0,
       "draws_at_or_above_band_half_open": 68,
-      "band_is_straddled": true,
+      "min_below_and_max_above_band": true,
+      "why_not_called_straddled": "an earlier version of this field was named band_is_straddled, which reads as 'this protocol can produce a value in the band'. The data do not show that and cannot: see band_reachability_power. All the boolean states is that the minimum draw is below the band and the maximum is at or above it, which is also true of any distribution with a hole where the band sits. @Autotune raised this against the 512 MiB artifact and it applied here too.",
       "all_draws_unrounded": true,
       "no_undecidable_draws": "every draw here is stored unrounded, so unlike the 512-MiB-only artifact there is no draw whose band membership the record cannot decide"
     },
@@ -523,7 +524,8 @@
       "draws_inside_band_half_open": 0,
       "draws_inside_band_closed": 0,
       "draws_at_or_above_band_half_open": 64,
-      "band_is_straddled": true,
+      "min_below_and_max_above_band": true,
+      "why_not_called_straddled": "an earlier version of this field was named band_is_straddled, which reads as 'this protocol can produce a value in the band'. The data do not show that and cannot: see band_reachability_power. All the boolean states is that the minimum draw is below the band and the maximum is at or above it, which is also true of any distribution with a hole where the band sits. @Autotune raised this against the 512 MiB artifact and it applied here too.",
       "all_draws_unrounded": true,
       "no_undecidable_draws": "every draw here is stored unrounded, so unlike the 512-MiB-only artifact there is no draw whose band membership the record cannot decide"
     }
@@ -575,6 +577,26 @@
       "historical_TBps": 4.89
     },
     "verdict": "No pattern separates 512 MiB from 2 GiB once allocation slot and allocator peak are sampled -- all three overlap. An earlier draft of this argument used two_read_one_write's 0.31% single-slot spread as an error bar and concluded from a 4.04% gap that the historical table must be 2 GiB. That spread was measured with slot and peak both held fixed, the one condition under which neither confound is visible; sampled properly the same probe spreads 2.47%. The table's size is known from notes:869 stating it, which is documentary evidence. Nothing in this artifact measures it."
+  },
+  "band_reachability_power": {
+    "512MiB": {
+      "n_slot_means": 20,
+      "slot_mean_span_pct": 18.13,
+      "band_width_pct": 0.2047,
+      "p_single_slot_in_band_uniform_model": 0.0113,
+      "expected_slot_means_in_band": 0.226,
+      "p_at_least_one_in_band_pct": 20.3,
+      "conclusion": "with 20 slot means spanning 18.13% and a band 0.2047% wide, a uniform model expects 0.23 of them in band and gives only a 20% chance that any lands there. Zero in-band is therefore not evidence against the historical value -- this protocol has almost no power in that direction. The defensible statement is symmetric: at this size and sample size the data neither authenticate nor exclude a value in the band."
+    },
+    "2048MiB": {
+      "n_slot_means": 20,
+      "slot_mean_span_pct": 11.42,
+      "band_width_pct": 0.2047,
+      "p_single_slot_in_band_uniform_model": 0.0179,
+      "expected_slot_means_in_band": 0.358,
+      "p_at_least_one_in_band_pct": 30.4,
+      "conclusion": "with 20 slot means spanning 11.42% and a band 0.2047% wide, a uniform model expects 0.36 of them in band and gives only a 30% chance that any lands there. Zero in-band is therefore not evidence against the historical value -- this protocol has almost no power in that direction. The defensible statement is symmetric: at this size and sample size the data neither authenticate nor exclude a value in the band."
+    }
   },
   "peak_staircase": {
     "collected": true,
@@ -854,7 +876,7 @@
     ],
     "why_not_within_process": "the measurement itself allocates and frees 2 GiB buffers, which re-rolls placement; a within-process sweep measures that instead of the peak and reports a spurious step at every level"
   },
-  "verdict": "The conclusion holds at the size that matters, for a better-supported reason. At 2 GiB the copy rate ranges 11.82% over 80 draws spanning 5 allocation slots and 4 allocator peaks, which is 58x the 0.20% width of the band the historical 4.89 cell implies, and the draws straddle that band (16 below, 64 at or above). A single copy draw therefore cannot authenticate a harness, a device, or a commit. What changes from the superseded artifact is the number and its scope, not the verdict: 11.82% at 2 GiB rather than the 18.51% this same collection gives at 512 MiB, which is the size the superseded artifact measured.",
+  "verdict": "The conclusion holds at the size that matters, for a better-supported reason. At 2 GiB the copy rate ranges 11.82% over 80 draws spanning 5 allocation slots and 4 allocator peaks, which is 58x the 0.20% width of the band the historical 4.89 cell implies, with 16 draws below it and 64 at or above. That is NOT a demonstration that the band is reachable: zero draws land in it, and because the draws cluster on allocation slots whose means are separated by gaps far wider than the band, zero in-band is what a uniform model predicts even if the band is perfectly reachable -- see band_reachability_power. The defensible claim is symmetric and weaker than the one this artifact first made: at this sample size the data neither authenticate nor exclude the historical value, and a single copy draw cannot authenticate a harness, a device, or a commit. What changes from the superseded artifact is the number and its scope, not the verdict: 11.82% at 2 GiB rather than the 18.51% this same collection gives at 512 MiB, which is the size the superseded artifact measured.",
   "what_is_and_is_not_repeatable": {
     "repeatable": "copy IS repeatable to under 1.01% given a fixed allocation slot, a fixed program, and a fixed allocator peak",
     "not_repeatable": "which slot a draw lands on -- 7.05% across slots at 2 GiB within a single fixed program -- and where those slots sit once the program's peak high-water mark changes (9.58%). Pooling both axes gives 11.82%, which is the figure the verdict uses; it is reported as a pooled range and not as either axis alone, because a fresh draw from an unknown harness is exposed to both.",

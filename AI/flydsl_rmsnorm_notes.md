@@ -826,11 +826,25 @@ asked of it four hours later, for readability. The probe now stores these
 unrounded. The straddle does not depend on it: draws sit below and above under
 either interval convention.
 
-So the band is not excluded by the data; it is straddled by it. The three
-distances the argument relies on (5–14%) are each smaller than the spread
-between *identical buffers in a single process* — 7.05% at 2 GiB within one
-fixed program, 11.82% once the allocator's peak is allowed to vary as it does
-across harnesses. This is the same rule
+So the band is not excluded by the data. **Nor is it shown to be reachable** —
+an earlier version of this section said "it is straddled by it", and that
+overclaims. @Autotune caught it against the 512 MiB artifact and it applied to
+the 2 GiB one too, which I had written an hour earlier. Draws sit below and
+above the band, but *zero* land inside, and the draws are not a continuum: they
+cluster on allocation slots whose means are separated by gaps an order of
+magnitude wider than the band. With 20 distinct slot means spanning 11.42% and
+a band 0.2047% wide, a uniform model expects **0.36** of them in band and gives
+only a **30%** chance that any lands there. Observing zero in-band is the
+expected outcome even if the band is perfectly reachable, so it carries almost
+no evidence either way.
+
+The honest statement is symmetric and weaker than what I first published: **at
+this sample size the data neither authenticate nor exclude the historical
+value.** What they do establish is that distance from a single current draw is
+weak evidence, because the three distances the argument relies on (5–14%) are
+each smaller than the spread between *identical buffers in a single process* —
+7.05% at 2 GiB within one fixed program, 11.82% once the allocator's peak is
+allowed to vary as it does across harnesses. This is the same rule
 that retired the equal-occupancy ratio's third digit: **a comparison must
 discriminate a gap larger than the confounds it cannot see.**
 

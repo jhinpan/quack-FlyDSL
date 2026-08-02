@@ -178,11 +178,54 @@ def _band(draws):
         "draws_inside_band_half_open": half_open,
         "draws_inside_band_closed": closed,
         "draws_at_or_above_band_half_open": above,
-        "band_is_straddled": bool(below and above),
+        "min_below_and_max_above_band": bool(below and above),
+        "why_not_called_straddled": (
+            "an earlier version of this field was named band_is_straddled, which reads "
+            "as 'this protocol can produce a value in the band'. The data do not show "
+            "that and cannot: see band_reachability_power. All the boolean states is "
+            "that the minimum draw is below the band and the maximum is at or above it, "
+            "which is also true of any distribution with a hole where the band sits. "
+            "@Autotune raised this against the 512 MiB artifact and it applied here too."
+        ),
         "all_draws_unrounded": True,
         "no_undecidable_draws": (
             "every draw here is stored unrounded, so unlike the 512-MiB-only artifact "
             "there is no draw whose band membership the record cannot decide"
+        ),
+    }
+
+
+def _band_reachability(runs, size):
+    """Could this protocol have produced an in-band value at all? Power, not outcome.
+
+    Zero draws in band is weak evidence of anything. The draws are not a
+    continuum: they cluster on allocation slots whose means are separated by gaps
+    far wider than the band. Under a uniform-slot model the expected number of
+    slot means landing in a 0.2%-wide window is well under one, so observing
+    zero in-band is the *expected* outcome even if the band is perfectly
+    reachable. @Autotune's argument, recomputed here for this dataset rather
+    than transcribed.
+    """
+    lo, hi = BAND
+    axis = _decompose(runs, size)
+    means = sorted({round(m, 6) for pk in axis["by_peak"].values() for m in pk["slot_means"]})
+    band_w = (hi / lo - 1) * 100.0
+    span = (max(means) / min(means) - 1) * 100.0
+    p_one = band_w / span
+    return {
+        "n_slot_means": len(means),
+        "slot_mean_span_pct": round(span, 2),
+        "band_width_pct": round(band_w, 4),
+        "p_single_slot_in_band_uniform_model": round(p_one, 4),
+        "expected_slot_means_in_band": round(len(means) * p_one, 3),
+        "p_at_least_one_in_band_pct": round((1 - (1 - p_one) ** len(means)) * 100.0, 1),
+        "conclusion": (
+            f"with {len(means)} slot means spanning {span:.2f}% and a band {band_w:.4f}% wide, a uniform "
+            f"model expects {len(means) * p_one:.2f} of them in band and gives only a {(1 - (1 - p_one) ** len(means)) * 100.0:.0f}% chance that "
+            "any lands there. Zero in-band is therefore not evidence against the "
+            "historical value -- this protocol has almost no power in that direction. "
+            "The defensible statement is symmetric: at this size and sample size the "
+            "data neither authenticate nor exclude a value in the band."
         ),
     }
 
@@ -253,7 +296,11 @@ def _assert_prose_is_derived(payload):
 
     def add(v):
         if isinstance(v, (int, float)) and not isinstance(v, bool):
-            for p in range(4):
+            # 0-5 dp: the band width is rendered at 4 dp in prose, and a guard that
+            # only knew 0-3 rejected its own correctly-derived text. A tripwire that
+            # fires on precision rather than provenance trains you to widen the
+            # allowlist, which is how a real bad number eventually gets waved through.
+            for p in range(6):
                 measured.add(f"{v:.{p}f}")
 
     def walk(node):
@@ -404,6 +451,9 @@ def main():
             for size in ("512MiB", "2048MiB")
         },
         "size_discrimination": _size_discrimination(runs),
+        "band_reachability_power": {
+            size: _band_reachability(runs, size) for size in ("512MiB", "2048MiB")
+        },
         "peak_staircase": _staircase(),
     }
 
@@ -413,8 +463,14 @@ def main():
         "The conclusion holds at the size that matters, for a better-supported reason. "
         "At 2 GiB the copy rate ranges {r:.2f}% over {n} draws spanning {s} allocation "
         "slots and {p} allocator peaks, which is {x:.0f}x the {w:.2f}% width of the band "
-        "the historical 4.89 cell implies, and the draws straddle that band ({b} below, "
-        "{a} at or above). A single copy draw therefore cannot authenticate a harness, a "
+        "the historical 4.89 cell implies, with {b} draws below it and {a} at or above. "
+        "That is NOT a demonstration that the band is reachable: zero draws land in it, "
+        "and because the draws cluster on allocation slots whose means are separated by "
+        "gaps far wider than the band, zero in-band is what a uniform model predicts "
+        "even if the band is perfectly reachable -- see band_reachability_power. The "
+        "defensible claim is symmetric and weaker than the one this artifact first "
+        "made: at this sample size the data neither authenticate nor exclude the "
+        "historical value, and a single copy draw cannot authenticate a harness, a "
         "device, or a commit. What changes from the superseded artifact is the number "
         "and its scope, not the verdict: {r:.2f}% at 2 GiB rather than the {o:.2f}% "
         "this same collection gives at 512 MiB, which is the size the superseded "
