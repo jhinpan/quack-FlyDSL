@@ -1,7 +1,7 @@
 {
   "what": "measured occupancy (rocprofv3 MeanOccupancyPerActiveCU) against the computed register bound, and the reconciliation of rocprof's VGPR_Count with the compiled artifact's",
   "generator": "AI/probe_rmsnorm_measured_occupancy.py",
-  "note": "gfx950 MI355X, bf16 fwd, has_weight only. This closes the half of @Reviewer's blocker that the computed 2->1 VGPR-capacity step was arithmetic rather than an observation: the step is now measured. Two guards run on every row and abort the probe rather than publish -- the wave64->rocprof VGPR relation, and the dispatch count behind the positional width recovery. MAX_N was raised in-process for the probe only; the shipped cap is unchanged.",
+  "note": "gfx950 MI355X, bf16 fwd, has_weight only. This closes the half of @Reviewer's blocker that the computed 2->1 VGPR-capacity step was arithmetic rather than an observation: the step is now measured. Two guards run on every row and abort the probe rather than publish -- the rocprof/allocation VGPR relation, and the dispatch count behind the positional width recovery. MAX_N was raised in-process for the probe only; the shipped cap is unchanged.",
   "device": "AMD Instinct MI355X",
   "device_uuid": "66353633-3535-3138-3838-643861663866",
   "HIP_VISIBLE_DEVICES": "5",
@@ -9,13 +9,18 @@
   "hip": "7.2.26015-fc0010cf6a",
   "python": "3.10.12",
   "host": "mia1-p02-g23",
-  "commit": "1a1a29d24a85cb65ce77a2677c546ee66c3265ac",
+  "commit": "c5d879bc0f6e933eb2e2129ad16953953aec7c98",
   "worktree_dirty": true,
+  "rocprofv3_version": {
+    "version": "1.1.0",
+    "git_revision": "fc0010cf6a5a972d42b276df946510f30343d493"
+  },
+  "counter_note": "Every row carries counter_samples (all REPEATS values, unrounded) and the dispatch_ids they came from, so the published median is recomputable and the positional width recovery is checkable. Earlier versions published only the rounded median.",
   "shipped_max_n": 8192,
   "source_sha256_16": {
     "quack/rmsnorm_flydsl.py": "0c44997dc710d8e5",
     "quack/flydsl/rmsnorm_config.py": "0f0d3adb593bc518",
-    "AI/probe_rmsnorm_measured_occupancy.py": "5749eb64ecef1aa6"
+    "AI/probe_rmsnorm_measured_occupancy.py": "4f8f468735240b98"
   },
   "counter": "MeanOccupancyPerActiveCU",
   "rocprofv3_invocation": "rocprofv3 --pmc MeanOccupancyPerActiveCU -d <dir> -o <tag> --output-format csv -- python AI/probe_rmsnorm_measured_occupancy.py --inner <m> <n,n,...>. The --output-format csv is load-bearing: the default output is a .db with rocpd_kernel_dispatch and no counter table.",
@@ -156,9 +161,19 @@
       "grid_supply_waves_per_simd": 64.0,
       "register_bound_is_binding": false,
       "limiting_constraint": "hardware_cap",
-      "measured_waves_per_simd": 7.2976,
-      "measured_over_bound": 0.9122,
+      "measured_waves_per_simd": 7.2895,
+      "measured_over_bound": 0.9112,
       "dispatches": 3,
+      "counter_samples": [
+        7.31697,
+        7.289514,
+        7.288281
+      ],
+      "dispatch_ids": [
+        3,
+        4,
+        5
+      ],
       "bandwidth_pct_of_ceiling_at_m4096": null,
       "bandwidth_regime": null
     },
@@ -179,9 +194,19 @@
       "grid_supply_waves_per_simd": 64.0,
       "register_bound_is_binding": false,
       "limiting_constraint": "hardware_cap",
-      "measured_waves_per_simd": 6.0865,
-      "measured_over_bound": 0.7608,
+      "measured_waves_per_simd": 6.273,
+      "measured_over_bound": 0.7841,
       "dispatches": 3,
+      "counter_samples": [
+        5.317926,
+        6.272964,
+        6.28451
+      ],
+      "dispatch_ids": [
+        8,
+        9,
+        10
+      ],
       "bandwidth_pct_of_ceiling_at_m4096": null,
       "bandwidth_regime": null
     },
@@ -202,9 +227,19 @@
       "grid_supply_waves_per_simd": 64.0,
       "register_bound_is_binding": true,
       "limiting_constraint": "registers",
-      "measured_waves_per_simd": 3.9672,
-      "measured_over_bound": 0.7934,
+      "measured_waves_per_simd": 3.9834,
+      "measured_over_bound": 0.7967,
       "dispatches": 3,
+      "counter_samples": [
+        3.725553,
+        4.004555,
+        3.983398
+      ],
+      "dispatch_ids": [
+        13,
+        14,
+        15
+      ],
       "bandwidth_pct_of_ceiling_at_m4096": null,
       "bandwidth_regime": null
     },
@@ -225,9 +260,19 @@
       "grid_supply_waves_per_simd": 64.0,
       "register_bound_is_binding": true,
       "limiting_constraint": "registers",
-      "measured_waves_per_simd": 2.6323,
-      "measured_over_bound": 0.8774,
+      "measured_waves_per_simd": 2.6313,
+      "measured_over_bound": 0.8771,
       "dispatches": 3,
+      "counter_samples": [
+        2.607632,
+        2.63125,
+        2.690415
+      ],
+      "dispatch_ids": [
+        18,
+        19,
+        20
+      ],
       "bandwidth_pct_of_ceiling_at_m4096": null,
       "bandwidth_regime": null
     },
@@ -248,9 +293,19 @@
       "grid_supply_waves_per_simd": 64.0,
       "register_bound_is_binding": true,
       "limiting_constraint": "registers",
-      "measured_waves_per_simd": 1.9723,
-      "measured_over_bound": 0.9861,
+      "measured_waves_per_simd": 1.9715,
+      "measured_over_bound": 0.9857,
       "dispatches": 3,
+      "counter_samples": [
+        1.970935,
+        1.973822,
+        1.971457
+      ],
+      "dispatch_ids": [
+        23,
+        24,
+        25
+      ],
       "bandwidth_pct_of_ceiling_at_m4096": null,
       "bandwidth_regime": null
     }
@@ -273,9 +328,19 @@
       "grid_supply_waves_per_simd": 16.0,
       "register_bound_is_binding": true,
       "limiting_constraint": "registers",
-      "measured_waves_per_simd": 2.7825,
-      "measured_over_bound": 0.9275,
+      "measured_waves_per_simd": 2.7827,
+      "measured_over_bound": 0.9276,
       "dispatches": 3,
+      "counter_samples": [
+        2.78034,
+        2.782698,
+        2.814933
+      ],
+      "dispatch_ids": [
+        3,
+        4,
+        5
+      ],
       "bandwidth_pct_of_ceiling_at_m4096": null,
       "bandwidth_regime": null
     },
@@ -296,9 +361,19 @@
       "grid_supply_waves_per_simd": 16.0,
       "register_bound_is_binding": true,
       "limiting_constraint": "registers",
-      "measured_waves_per_simd": 1.9618,
-      "measured_over_bound": 0.9809,
+      "measured_waves_per_simd": 1.9597,
+      "measured_over_bound": 0.9798,
       "dispatches": 3,
+      "counter_samples": [
+        1.914371,
+        1.959687,
+        1.969369
+      ],
+      "dispatch_ids": [
+        8,
+        9,
+        10
+      ],
       "bandwidth_pct_of_ceiling_at_m4096": null,
       "bandwidth_regime": null
     },
@@ -319,9 +394,19 @@
       "grid_supply_waves_per_simd": 16.0,
       "register_bound_is_binding": true,
       "limiting_constraint": "registers",
-      "measured_waves_per_simd": 1.951,
-      "measured_over_bound": 0.9755,
+      "measured_waves_per_simd": 1.9586,
+      "measured_over_bound": 0.9793,
       "dispatches": 3,
+      "counter_samples": [
+        1.933715,
+        1.958595,
+        1.959811
+      ],
+      "dispatch_ids": [
+        13,
+        14,
+        15
+      ],
       "bandwidth_pct_of_ceiling_at_m4096": 76.56,
       "bandwidth_regime": "eager_share_of_ceiling_pct"
     },
@@ -345,6 +430,16 @@
       "measured_waves_per_simd": 1.0004,
       "measured_over_bound": 1.0004,
       "dispatches": 3,
+      "counter_samples": [
+        1.00037,
+        1.000377,
+        1.000378
+      ],
+      "dispatch_ids": [
+        18,
+        19,
+        20
+      ],
       "bandwidth_pct_of_ceiling_at_m4096": 38.12,
       "bandwidth_regime": "eager_share_of_ceiling_pct"
     },
@@ -368,6 +463,16 @@
       "measured_waves_per_simd": 1.0003,
       "measured_over_bound": 1.0003,
       "dispatches": 3,
+      "counter_samples": [
+        1.000317,
+        1.000335,
+        1.000335
+      ],
+      "dispatch_ids": [
+        23,
+        24,
+        25
+      ],
       "bandwidth_pct_of_ceiling_at_m4096": 39.24,
       "bandwidth_regime": "eager_share_of_ceiling_pct"
     }

@@ -1383,10 +1383,21 @@ rocprofv3's `MeanOccupancyPerActiveCU`; raw at
 | N | vgpr | alloc | computed bound | **measured waves/SIMD** | measured/bound | bandwidth % (eager) |
 |---|------|-------|----------------|-------------------------|----------------|---------------------|
 | 32768 | 156 | 160 | 3 | 2.783 | 0.93 | -- |
-| 40960 | 226 | 232 | 2 | 1.962 | 0.98 | -- |
-| 49152 | 230 | 232 | 2 | 1.951 | 0.98 | 76.6 |
+| 40960 | 226 | 232 | 2 | 1.960 | 0.98 | -- |
+| 49152 | 230 | 232 | 2 | 1.959 | 0.98 | 76.6 |
 | 57344 | 264 | 264 | 1 | **1.000** | 1.00 | 38.1 |
 | 65536 | 300 | 304 | 1 | **1.000** | 1.00 | 39.2 |
+
+Each row now also carries `counter_samples` — all three dispatch readings,
+unrounded — and the `dispatch_ids` they came from, so the published median is
+recomputable and the positional width recovery is checkable from the file.
+@Reviewer's objection was that publishing only a rounded aggregate is fail-open:
+a number that cannot be recomputed from anything in the artifact is a claim
+dressed as data. It also makes the cliff rows' stability visible rather than
+asserted — 57344 reads 1.0004 on all three dispatches, identically, while
+32768 spans 2.7803–2.8149. The sidecar records `rocprofv3_version` too
+(1.1.0, git `fc0010cf`), which matters here more than usual: the entire VGPR
+relation below turns out to be a property of that specific build.
 
 **That bandwidth column used to be three hand-copied literals, and they were
 not one series.** 77.5 and 37.8 were the cliff's *graph* numbers while 39.2 was
@@ -1398,46 +1409,69 @@ the regime in every row (`bandwidth_regime`), so the mix is no longer possible
 to make. The deeper fault was transcription itself: three numbers copied by hand
 into a constant cannot be checked against anything.
 
-There are now four runs of this sweep: one on device 6 and three on device 5,
+There are now five runs of this sweep: one on device 6 and four on device 5,
 taken while @Reviewer was verifying on device 6. I first summarised the spread
 as "reproduces across GPUs to within 0.6% on its worst row", and @Reviewer
 pointed out that 0.6% covers only the boundary sweep — the discriminating sweep
 at m=16384 has a row that moves 2.0%, more than three times as much. He is
 right, and the extra runs make a further correction possible:
 
-**The spread is not a device effect.** On the worst row (discriminating,
-N=8192) the three device-5 runs differ *from each other* by 1.81%, against 2.43%
-across all four. Same device, same commit-range, same idle check — most of the
-dispersion is there before any second GPU is involved. So "reproduces across
-GPUs to within 0.6%" was quoting a number that had nothing to do with GPUs. Both
-the figure and the reproduction were real; the attribution was invented, and it
-is the same defect as everything else in this section — a number that agreed
-with a story for a reason other than the one given.
+**The spread is not a device effect at all.** On the worst row (discriminating,
+N=8192) the four device-5 runs differ *from each other* by 3.06% — which is the
+entire spread across all five. Adding a second GPU adds nothing to the
+dispersion that repeating on one GPU does not already produce. So "reproduces
+across GPUs to within 0.6%" attributed to hardware what is simply counter
+variance. Both the figure and the reproduction were real; the attribution was
+invented, and that is the same defect as everything else in this section — a
+number agreeing with a story for a reason other than the one given.
 
 What the spread does track is slack — how far a row sits below its own
 constraint:
 
-| row | measured/bound | spread over 4 runs |
+| row | measured/bound | spread over 5 runs |
 |---|---|---|
 | boundary N=57344, 65536 | 1.000 | 0.00% |
 | discriminating N=49152 | 0.986 | 0.46% |
-| boundary N=49152 | 0.976 | 0.45% |
+| boundary N=49152 | 0.979 | 0.45% |
 | boundary N=32768 | 0.928 | 0.89% |
 | discriminating N=32768 | 0.877 | 0.94% |
-| discriminating N=8192 | 0.761 | 2.43% |
+| discriminating N=8192 | 0.784 | 3.06% |
 
 Rows pinned against their bound do not move at all; rows with slack move by up
-to 2.4%. It is not monotone (`N=16384` at ratio 0.793 spreads only 0.36%), so
-this is a tendency and not a law. The part that matters: **the two cliff rows
-are at ratio 1.000 and are bit-identical across all four runs and both devices**
-— 1.0004 and 1.0003 every time. The conclusion rests on the two most stable rows
-in the set.
+to 3%. It is not monotone (`N=16384` at ratio 0.797 spreads only 0.47%), so this
+is a tendency and not a law. The part that matters: **the two cliff rows are at
+ratio 1.000 and are bit-identical across all five runs and both devices** —
+1.0004 and 1.0003 every time, and now visibly identical across the three
+dispatches within each run as well. The conclusion rests on the two most stable
+rows in the set.
 
 **Occupancy does halve at the boundary, and it is now observed rather than
 derived.** The 2 → 1 step falls between 49152 and 57344, the same edge as the
-bandwidth drop. Measured tracks the computed bound to within 7% everywhere and
-to within 2% from 40960 up, sitting just under it as an average over active CUs
-and over the kernel's life should.
+bandwidth drop, and the two cliff rows sit at 1.0004 and 1.0003 against a bound
+of 1 in every run.
+
+**How well measured tracks the bound elsewhere I stated too well, twice.** I
+wrote "within 7% everywhere and within 2% from 40960 up". Against the rows: 7%
+holds only for the boundary sweep (worst 7.25% at N=32768) and the
+discriminating sweep reaches **23.9%** at N=8192; and "within 2% from 40960 up"
+is false at N=49152, which reads 2.45%. @Reviewer checked the prose against its
+own table and found both. What the rows support:
+
+| where | agreement with bound |
+|---|---|
+| the two cliff rows (57344, 65536) | 0.04% — the claim's own rows |
+| register-bound rows at m=4096 | within 7.3% |
+| register-bound rows at m=16384 | within 20.3% |
+| cap-bound rows (4096, 8192) | within 21.6% |
+
+(These are the worst rows in each group, and they move by a point or two
+between runs — the underlying figures are in `measured_over_bound` per row.)
+
+The pattern is the one the spread table shows: agreement is tight where the
+constraint binds hard and loose where it does not, since measured occupancy is
+an average over active CUs and over the kernel's life. That is a defensible
+reading. "Within 7% everywhere" was not — it was a summary statistic quoted
+from the half of the data that supported it.
 
 The step is a register-file threshold, not a width effect: `vgpr_alloc` crosses
 256 of the 512-entry budget there, so `floor(512/232)=2` becomes
@@ -1686,6 +1720,12 @@ right change is a per-variant cap derived from the measured VGPR curve, and the
 measurement to justify it is the same probe run across the backward and the
 operand combinations -- which is a bounded piece of work, not a guess. What
 this commit buys is the register curve itself, measured and reproducible, and
-the method for setting the constant honestly. It does **not** buy a confirmed
-mechanism: as above, the capacity step and the bandwidth cliff share a
-boundary, and neither residency nor causality has been measured.
+the method for setting the constant honestly.
+
+(Written when the section was new, this paragraph ended "neither residency nor
+causality has been measured". Both have been since, in the sections above:
+residency by `MeanOccupancyPerActiveCU` at the boundary, and causality
+directionally by the `waves_per_eu` intervention. @Reviewer flagged that the
+sentence had been left contradicting the same file. The conclusion it supports
+is unchanged — the cap is still not raised here, for the per-variant reason
+stated above and not for want of a mechanism.)

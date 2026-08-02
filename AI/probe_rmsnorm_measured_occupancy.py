@@ -446,6 +446,14 @@ def _sweep(m, ns, tag, hw_cap, num_cus):
                 "measured_waves_per_simd": round(measured, 4),
                 "measured_over_bound": round(measured / bound, 4),
                 "dispatches": len(chunk),
+                # Every sample, unrounded, plus the dispatch ids they came from.
+                # The sidecar used to publish only the rounded median, which
+                # meant a reader could not see the spread behind it or check
+                # the positional width recovery. @Reviewer called that
+                # fail-open: an aggregate that cannot be recomputed from
+                # anything in the file is a claim, not data.
+                "counter_samples": [float(c["Counter_Value"]) for c in chunk],
+                "dispatch_ids": [int(c["Dispatch_Id"]) for c in chunk],
                 "bandwidth_pct_of_ceiling_at_m4096": bandwidth.get(n) if m == BOUNDARY_M else None,
                 "bandwidth_regime": BANDWIDTH_REGIME if (m == BOUNDARY_M and n in bandwidth) else None,
             }
@@ -517,6 +525,25 @@ def _sha(path):
     return hashlib.sha256((REPO / path).read_bytes()).hexdigest()[:16]
 
 
+def _rocprof_version():
+    """Which profiler decoded the code object. See vgpr_relation_resolution."""
+    out = subprocess.run(
+        ["rocprofv3", "--version"], capture_output=True, text=True, check=False
+    ).stdout
+    fields = {}
+    for line in out.splitlines():
+        if ":" in line:
+            key, _, value = line.partition(":")
+            fields[key.strip()] = value.strip()
+    version = fields.get("version")
+    if not version:
+        raise SystemExit(
+            "could not read a version out of `rocprofv3 --version`; the register columns "
+            "in this sidecar are only interpretable against a known profiler build"
+        )
+    return {"version": version, "git_revision": fields.get("git_revision")}
+
+
 def main():
     if not torch.cuda.is_available():
         raise SystemExit("needs a GPU")
@@ -525,15 +552,30 @@ def main():
     hw_cap = _hw_max_waves_per_simd()
     num_cus = _num_cus()
 
-    head = subprocess.run(
+    # Provenance must fail closed. Run from an export without .git, these two
+    # commands fail and the old code recorded commit="" with
+    # worktree_dirty=false -- which reads as "clean checkout, commit unknown"
+    # when the truth is "no version control at all". @Reviewer found that: a
+    # field whose failure mode is indistinguishable from its success mode is
+    # worse than an absent field, because it is quotable.
+    head_run = subprocess.run(
         ["git", "-C", str(REPO), "rev-parse", "HEAD"], capture_output=True, text=True, check=False
-    ).stdout.strip()
-    dirty = subprocess.run(
+    )
+    dirty_run = subprocess.run(
         ["git", "-C", str(REPO), "status", "--porcelain"],
         capture_output=True,
         text=True,
         check=False,
-    ).stdout.strip()
+    )
+    if head_run.returncode or dirty_run.returncode or not head_run.stdout.strip():
+        raise SystemExit(
+            f"cannot read git provenance for {REPO} (rev-parse rc="
+            f"{head_run.returncode}, status rc={dirty_run.returncode}). Refusing to write "
+            "a sidecar whose commit field would be empty and whose dirty flag would read "
+            "clean by default."
+        )
+    head = head_run.stdout.strip()
+    dirty = dirty_run.stdout.strip()
 
     print(f"discriminating sweep, m={DISCRIMINATING_M} ...", flush=True)
     discriminating = _sweep(DISCRIMINATING_M, DISCRIMINATING_NS, "discriminating", hw_cap, num_cus)
@@ -551,8 +593,8 @@ def main():
             "gfx950 MI355X, bf16 fwd, has_weight only. This closes the half of @Reviewer's "
             "blocker that the computed 2->1 VGPR-capacity step was arithmetic rather than "
             "an observation: the step is now measured. Two guards run on every row and "
-            "abort the probe rather than publish -- the wave64->rocprof VGPR relation, and "
-            "the dispatch count behind the positional width recovery. MAX_N was raised "
+            "abort the probe rather than publish -- the rocprof/allocation VGPR relation, "
+            "and the dispatch count behind the positional width recovery. MAX_N was raised "
             "in-process for the probe only; the shipped cap is unchanged."
         ),
         "device": torch.cuda.get_device_name(),
@@ -564,6 +606,19 @@ def main():
         "host": platform.node(),
         "commit": head,
         "worktree_dirty": bool(dirty),
+        # The register interpretation depends on which profiler decoded the
+        # code object -- see vgpr_relation_resolution, where the whole
+        # relation turns out to be a property of ROCProfiler-SDK 1.1.0's
+        # missing gfx950 accumulator decoder. A sidecar that reports register
+        # numbers without saying which profiler produced them cannot be
+        # re-read later. @Reviewer asked for this.
+        "rocprofv3_version": _rocprof_version(),
+        "counter_note": (
+            "Every row carries counter_samples (all REPEATS values, unrounded) and the "
+            "dispatch_ids they came from, so the published median is recomputable and the "
+            "positional width recovery is checkable. Earlier versions published only the "
+            "rounded median."
+        ),
         "shipped_max_n": rmsnorm_config.MAX_N,
         "source_sha256_16": {
             "quack/rmsnorm_flydsl.py": _sha("quack/rmsnorm_flydsl.py"),
