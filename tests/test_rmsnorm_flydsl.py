@@ -2134,12 +2134,38 @@ def test_a_persisted_singleton_artifact_cannot_be_loaded_for_another_row_count(
         "row count in a fresh unforced process"
     )
 
-    # Reload them the way an unforced process would, from a cleared cache.
+    # Reload them the way an unforced process would, from a cleared cache --
+    # and prove the load actually happened. Asserting only that the answer is
+    # right proves nothing: with _load_artifact stubbed to return None the code
+    # falls through to the default config and the values are still exact, so
+    # that version passed with the loader disabled. @Reviewer caught it. This
+    # is the same can't-fail shape the rest of this suite has been clearing
+    # out, written by the person clearing it out.
     tuner._artifact_cache.clear()
-    monkeypatch.delenv("FLYDSL_AUTOTUNE")
     tuner.cache.clear()
-    rmsnorm_autotuned(ordinary, weight)
+    monkeypatch.delenv("FLYDSL_AUTOTUNE")
+
+    loaded = []
+    real_load_artifact = tuner._load_artifact
+
+    def spy_load_artifact(*args, **kwargs):
+        result = real_load_artifact(*args, **kwargs)
+        loaded.append(result)
+        return result
+
+    monkeypatch.setattr(tuner, "_load_artifact", spy_load_artifact)
     _assert_close(rmsnorm_autotuned(ordinary, weight), _reference(ordinary, weight, 1e-6))
+
+    assert loaded, "_load_artifact was never consulted on an unforced call"
+    assert any(config is not None for config in loaded), (
+        "the offline artifact emitted above was not loaded back on an unforced "
+        f"call -- _load_artifact returned {loaded}; the call silently fell through "
+        "to the analytical default, so this path is not actually exercised"
+    )
+    assert not tuner.cache, (
+        "an unforced call populated the tuner's regular cache; the offline "
+        "artifact path and the disk-cache path are no longer distinct"
+    )
     # The row count is what separates a singleton artifact from any other, so
     # the persisted keys must still differ in that term wherever they differ at
     # all. Writing this as ``key[0] == key[0]`` -- which is what a "check the
