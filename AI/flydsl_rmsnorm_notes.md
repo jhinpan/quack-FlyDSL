@@ -3175,3 +3175,98 @@ running in that period and kept no record distinguishing them; both processes
 are gone and it is not recoverable. What is established is that the memory was
 mine and that it was released. Which process held it, I don't know, and I should
 not have named one.
+
+###### A provenance column that is hardcoded, and a cache key with no device in it
+
+Not my artifact, but the same defect class and it bears on the No.001 rerun, so
+it is recorded here. @Autotune found (`e4bfeb34`) that in the committed
+`data/quack-rmsnorm-hopper/` archive **most `quack_tuned` winners were never
+searched in the run that reports them**. I recomputed every figure from the
+committed bytes independently:
+
+```
+h100 quack_tuned cold_compile_ms  min 1.538  p50 2.564   max 10.706 ms   0/90 >1s
+h200 quack_tuned cold_compile_ms  min 2.963  p50 28264   max 175220 ms  86/90 >1s
+wall: h100 discarded 3649.1 s | h100 kept 6.9 s | h200 3765.8 s
+```
+
+`cold_compile_ms` is, per the archive's own README (lines 273–274), "the entire
+autotune search". A 400-config search cannot finish in 2.5 ms; `rmsnorm_*_tuned`
+are decorated without `cache_results=`, the default is `True`
+(`quack/autotuner.py:526`), and `check_disk_cache` returns on a hit without ever
+calling `bench_fn` (`:270`). So H100's 90 tuned cells were all supplied by
+`~/.quack/cache`, and the run that did search is the *discarded contended* one
+(canary `closing_over_opening` = 0.872, `quiet: false`).
+
+**The column named for this says `False` on all 540 rows.** `_cold_launch`
+(`benchmarks/benchmark_rmsnorm_flydsl.py:1363`) does return a real
+`reused = key in compile_timings`, but its only two call sites (`:1436`,
+`:1517`) are inside `_FlyDSLProvider`. `_TorchProvider` and `_QuackProvider`
+hardcode the literal at four return sites, and the patch adds two more for the
+tuned provider. `sweep-rmsnorm.sh:43` runs exactly `quack_tuned quack torch` —
+**all three of the providers in the archive are on the hardcoded side, and the
+one provider that could report the field did not run.** So the honest statement
+is narrower than "the field is dead": the column's semantics are defined for one
+provider only, and the CSV populates it for every provider anyway. For the tuned
+provider it is worse than undefined — the reuse it would need to report happens
+in `check_disk_cache`, a layer *below* the harness, which cannot see it.
+
+**A hole neither of them had named: the disk cache key contains no device
+identity.** `cache_key = [VERSION, str(tuning_key)] + config_str_list`
+(`quack/autotuner.py:264`), and `tuning_key` is the declared keys plus each
+tensor's shape/stride/dtype (`:305-320`). No GPU name, no arch, no `num_cus`.
+Arch enters only indirectly, through the enumeration in `get_all_*_configs()` —
+and `_max_cluster_for` returns 16 for every `9 <= arch <= 11`, so on H100 and
+H200 (both sm_90) the enumerated config strings are byte-identical. **One
+`~/.quack/cache` directory hits interchangeably across the two cards**, and no
+field in the archive can say which card a hit came from. "Source unrecorded" is
+broader than "no timestamp": the *device* is unrecorded too. This is the same
+hole as the missing `num_cus` in the artifact fingerprint, from the other end.
+
+Two things I got wrong in the exchange, both of the standard shape. I wrote
+"`cold_compile_reused`: 540/540 = False; torch's 90 rows are blank in that
+column" — self-contradictory in one line. 540/540 *are* `False`, torch included;
+what is blank is `cold_compile_ms`. And I quoted "the 9th-smallest of the
+remaining 86 = 5763.654", which is `warm[8]` *including* the four warm cells;
+excluding them it is 6147.442. Both are numbers that are correct about a set
+other than the one their label names. @CrossVendor caught the first
+(`e764fd2f`), correcting the same slip in his own `f9b3108b` sum in the same
+message.
+
+I then scanned my own 14 artifacts for the `cold_compile_reused` shape — a
+provenance-ish key constant across every row of a list. One hit,
+`static_identical_across_dies`, true on all 8 rows of
+`rmsnorm_fwd_occupancy_intervention_cross_device.json`. Checked the generator
+(`AI/assemble_intervention_cross_device.py:286`): a genuine three-way
+conjunction over per-device VGPR and spill sets, so the constancy is a measured
+fact, not a literal. Clean this time, and the scan is worth repeating whenever a
+new artifact grows a row list.
+
+**What isolates the anchor.** @Autotune's defensible anchor, H200 fwd
+32768x8192 bf16 at −10.66%, is one of the four inherited cells. A permutation
+test over the four cells' spread against all 90 gives p = 0.0100 (exact,
+C(90,4) = 2,555,190) — real but unlocalizing. The sharper test is that each
+inherited cell has same-op/same-shape dtype neighbours that *were* searched this
+run:
+
+| cell | inherited | searched dtype-neighbours | |
+| --- | --- | --- | --- |
+| fwd 32768×2048 | +0.16% | −0.55 … +5.62 | inside |
+| bwd 32768×2048 | −0.70% | −0.83 … +3.77 | inside |
+| bwd 32768×8192 | +17.48% | +0.16 … +18.53 | inside |
+| **fwd 32768×8192** | **−10.66%** | −3.87 … +1.87 | **outside by 6.79 pp** |
+
+Only the anchor falls outside its neighbours' range. This cuts both ways:
+"inherited" is not itself a defect — +17.48% is indistinguishable from configs
+genuinely searched this run at the same shape — while −10.66% cannot be waved
+off as "this shape tunes badly". It is descriptive support only: it identifies
+neither the config's origin nor a cause, which is where @CrossVendor's `f9b3108b`
+put the boundary and is where it should stay.
+
+I also withdrew a recommendation here before sending it. I was going to propose
+asserting `cold_compile_ms < 1s ⇒ did not search` in the rerun; `f9b3108b` ruled
+it a diagnostic rather than a semantic assertion, correctly — the 30× gap
+between the searched minimum (6147 ms) and the inherited maximum (200 ms) is an
+accident of this run, and the 200 ms cell already shows a cache hit need not be
+cheap. A cache manifest with hit/miss counts and a per-device fingerprint is the
+thing that would actually survive a toolchain change.
