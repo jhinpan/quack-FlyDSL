@@ -235,13 +235,13 @@
       },
       {
         "path": "AI/assemble_copy_axes.py",
-        "sha256": "cf5bd45e77ba7350486298bc472df8e91d43fa103c954dacceeac41cca614160",
-        "bytes": 47487
+        "sha256": "6582c5d767c640fdc26b163dc4ec61ab2d65377a54377ce365404f6a4f52bb16",
+        "bytes": 50829
       }
     ],
     "what_this_proves": "the assembler read exactly these bytes. It does not prove they came from a GPU, and a manifest cannot: it is a binding between artifact and raw runs, not an attestation."
   },
-  "commit": "682e103",
+  "commit": "ef05f0c",
   "worktree_dirty": true,
   "historical_table": {
     "source": "AI/flydsl_rmsnorm_notes.md:869",
@@ -265,7 +265,20 @@
         "round_spread_pct_max": 5.986,
         "note": "spread over the seven timing rounds behind one draw, in us. Compare against pooled_range_pct_of_min: the placement claim requires the pooled range to be large against this, not merely nonzero."
       },
+      "variance_explained_by_cell_pct": 99.59,
       "variance_explained_by_slot_and_peak_pct": 99.59,
+      "variance_decomposition": {
+        "prefix_pct": 32.0,
+        "ordinal_pct": 4.59,
+        "interaction_pct": 63.0,
+        "within_cell_pct": 0.41,
+        "n_cells": 20,
+        "replicates_per_cell": [
+          4
+        ],
+        "ordinal_is_confounded": "allocation ordinal, timing order and address are one index here: slot i is always allocated i-th and always measured i-th. The ordinal share cannot be read as a placement effect. No addresses are recorded and measurement order is not randomized against allocation order.",
+        "cell_fit_is_not_evidence": "prefix + ordinal + interaction sums to ~99.5% by construction, because within-cell noise is small. That is a statement about instrument stability, not about the size of any effect."
+      },
       "worst_across_process_range_pct": 3.76,
       "worst_cross_program_range_pct": 18.07,
       "by_peak": {
@@ -505,7 +518,20 @@
         "round_spread_pct_max": 2.168,
         "note": "spread over the seven timing rounds behind one draw, in us. Compare against pooled_range_pct_of_min: the placement claim requires the pooled range to be large against this, not merely nonzero."
       },
+      "variance_explained_by_cell_pct": 99.54,
       "variance_explained_by_slot_and_peak_pct": 99.54,
+      "variance_decomposition": {
+        "prefix_pct": 55.63,
+        "ordinal_pct": 26.59,
+        "interaction_pct": 17.32,
+        "within_cell_pct": 0.46,
+        "n_cells": 20,
+        "replicates_per_cell": [
+          4
+        ],
+        "ordinal_is_confounded": "allocation ordinal, timing order and address are one index here: slot i is always allocated i-th and always measured i-th. The ordinal share cannot be read as a placement effect. No addresses are recorded and measurement order is not randomized against allocation order.",
+        "cell_fit_is_not_evidence": "prefix + ordinal + interaction sums to ~99.5% by construction, because within-cell noise is small. That is a statement about instrument stability, not about the size of any effect."
+      },
       "worst_across_process_range_pct": 0.96,
       "worst_cross_program_range_pct": 8.92,
       "by_peak": {
@@ -1233,13 +1259,13 @@
     "corrects": "denominator_stability_across_processes in the roofline sidecar, which reports copy at 13.35% with n_processes: 3. That is not a process axis: the three runs straddled edits to _copy_variability that changed the allocator's peak. Same program, six processes: 0.63%."
   },
   "prose_guard": {
-    "accept_set_size": 1753,
+    "accept_set_size": 1791,
     "grid": "2-dp values in [0, 20]",
     "grid_size": 2001,
-    "accepted_without_being_meant": 189,
-    "false_negative_rate_pct": 9.445,
+    "accepted_without_being_meant": 192,
+    "false_negative_rate_pct": 9.595,
     "ceiling_pct": 12.0,
-    "headroom_pct": 2.555,
+    "headroom_pct": 2.405,
     "note": "a tripwire, not a proof. This rate rises as the artifact grows -- more measured values cover more of the grid by accident -- so it is computed at write time rather than quoted from a docstring, and the assembler now refuses to write once it passes the ceiling. Every increase so far came from an improvement to the artifact, which is why silent decay was the likely outcome without a hard stop.",
     "measured_on": "the payload as checked, before this field was added"
   }

@@ -894,24 +894,49 @@ allowed to vary as it does across harnesses. This is the same rule
 that retired the equal-occupancy ratio's third digit: **a comparison must
 discriminate a gap larger than the confounds it cannot see.**
 
-**The 30 draws are not 30 independent samples**, and reporting a bare `n` invited
-exactly that misreading. They are **10 allocation slots sampled 2–3 times each**,
-and **99.63%** of the total sum of squares is explained by which slot a draw
-came from. Worst within-slot range is 2.446%; seven of ten slots reproduce to
-under 1%, one to 0.140%.
+**The 80 draws are not 80 independent samples**, and reporting a bare `n` invited
+exactly that misreading. They are **20 (prefix, ordinal) cells sampled 4 times
+each**.
 
-That decomposition is a **better argument for the placement mechanism than the
-pooled range is** — @Autotune's point, and it improves on what I published. A
-placement effect predicts precisely this shape: the *n*-th allocation of a given
-size in a given program lands somewhere reproducible, so the same slot
-re-measures to a fraction of a percent while different slots differ by ~17%.
-Per-call noise predicts no slot structure at all. Two generator families with
-different but internally reproducible patterns is what an allocator does and
-what noise does not.
+The earlier version of this paragraph said **"99.63% of the total sum of squares
+is explained by which slot a draw came from"**, and that is retracted.
+@Reviewer's point in `5c2e0083`: it is a composite **(prefix, ordinal) cell
+fit**, not a slot effect, and a cell fit near 100% is close to uninformative —
+with four replicates per cell and a stable instrument, almost any design
+produces it. It restates that within-cell noise is small, which the instrument
+floor already says better and with an error bar.
 
-It also corrects a sentence of mine that was too strong. **Copy at 512 MiB *is*
-repeatable — to 0.140–2.446% — conditional on the allocation slot.** What is not
-repeatable is which slot a fresh process lands in. The practical rule that
+The real split, at 2 GiB:
+
+| term | share of total SS |
+|---|---|
+| prefix (prior allocation count) | 55.63% |
+| ordinal (position among the five buffers) | 26.59% |
+| interaction | 17.32% |
+| within cell | 0.46% |
+
+At 512 MiB the same split is 32.00 / 4.59 / 63.00 / 0.41 — dominated by the
+interaction, i.e. the ordinal pattern itself changes with the prefix. That is a
+substantively different picture from "one axis explains almost everything", and
+it was invisible while the three terms were pooled.
+
+**The ordinal share cannot be read as placement.** Allocation ordinal, timing
+order and address are the *same index* in this design: slot *i* is always
+allocated *i*-th and always measured *i*-th. Nothing here separates them, no
+addresses are recorded, and measurement order is not randomized against
+allocation order. Randomizing them apart is the discriminating experiment and it
+has not been run.
+
+A placement effect *predicts* this shape — the *n*-th allocation of a given size
+in a given program landing somewhere reproducible — and per-call noise predicts
+no such structure, so the data remain consistent with placement and inconsistent
+with noise. But "consistent with" is the whole claim. I had been treating a
+composite fit as though it measured the mechanism.
+
+It also corrects a sentence of mine that was too strong. **Copy *is* repeatable
+— to 3.76% at 512 MiB and 0.96% at 2 GiB — conditional on the (prefix, ordinal)
+cell**, against pooled ranges of 18.60% and 11.93%. What is not repeatable is
+which cell a fresh process lands in. The practical rule that
 follows is narrower and more useful than "copy is noisy": a copy denominator
 cannot be compared *across* processes or programs, and no historical artifact
 records which slot it drew.
@@ -919,7 +944,7 @@ records which slot it drew.
 None of this restores `4.89` — its provenance is still absent, which is
 @Reviewer's disposition and is untouched. What changes is the reason: a single
 committed copy value at 512 MiB can neither confirm nor exclude any historical
-copy figure, because a ~17% between-slot placement term sits under a 0.2% band.
+copy figure, because a between-cell term of 12–19% sits under a 0.2% band.
 
 The asymmetry is the useful part. `two_read_one_write` gets *stronger* under the
 same sweep — four committed values within 0.55%. Copy is unreconstructable not

@@ -191,6 +191,65 @@ def _high_water_check(runs):
     }
 
 
+def _factorial(runs, size):
+    """Split the sum of squares into prefix, ordinal, interaction and within-cell.
+
+    The artifact previously reported one number -- "99.63% of the total sum of
+    squares is explained by which slot a draw came from" -- and that was a
+    composite (prefix, ordinal) cell fit, not a slot effect. @Reviewer, 5c2e0083.
+    A cell-fit near 100% is close to uninformative: with several replicates per
+    cell and a stable instrument, almost any design produces it. It says the
+    within-cell noise is small, which the instrument floor already says better.
+
+    The honest split is below. The important entry is not the largest one -- it is
+    `ordinal_is_confounded`: allocation ordinal, timing order and address are the
+    same index in this design, because slot i is always allocated i-th and always
+    measured i-th. Nothing here separates them, so the ordinal share cannot be
+    attributed to placement. Randomizing measurement order against allocation
+    order is the discriminating experiment and has not been run.
+    """
+    cells = defaultdict(list)
+    for peak, rs in runs.items():
+        for r in rs:
+            for i, v in enumerate(
+                r["identical_buffers_by_size"][size]["TBps_per_identical_buffer"]
+            ):
+                cells[(peak, i)].append(v)
+    allv = [v for vs in cells.values() for v in vs]
+    gm = sum(allv) / len(allv)
+    sst = sum((v - gm) ** 2 for v in allv)
+
+    pk_m, or_m = defaultdict(list), defaultdict(list)
+    for (peak, i), vs in cells.items():
+        pk_m[peak] += vs
+        or_m[i] += vs
+
+    def ss(groups):
+        return sum(len(vs) * ((sum(vs) / len(vs)) - gm) ** 2 for vs in groups)
+
+    ss_pk, ss_or = ss(pk_m.values()), ss(or_m.values())
+    ss_cell = ss(cells.values())
+    return {
+        "prefix_pct": round(ss_pk / sst * 100.0, 2),
+        "ordinal_pct": round(ss_or / sst * 100.0, 2),
+        "interaction_pct": round((ss_cell - ss_pk - ss_or) / sst * 100.0, 2),
+        "within_cell_pct": round((sst - ss_cell) / sst * 100.0, 2),
+        "n_cells": len(cells),
+        "replicates_per_cell": sorted({len(vs) for vs in cells.values()}),
+        "ordinal_is_confounded": (
+            "allocation ordinal, timing order and address are one index here: slot i "
+            "is always allocated i-th and always measured i-th. The ordinal share "
+            "cannot be read as a placement effect. No addresses are recorded and "
+            "measurement order is not randomized against allocation order."
+        ),
+        "cell_fit_is_not_evidence": (
+            "prefix + ordinal + interaction sums to ~99.5% by construction, because "
+            "within-cell noise is small. That is a statement about instrument "
+            "stability, not about the size of any effect."
+        ),
+    }
+
+
 def _decompose(runs, size):
     """Variance by allocation slot, and reproducibility along each axis.
 
@@ -290,7 +349,14 @@ def _decompose(runs, size):
         "max_TBps": max(allv),
         "pooled_range_pct_of_min": round((max(allv) / min(allv) - 1) * 100.0, 2),
         "within_draw_instrument_floor": floor,
+        # Composite (prefix, ordinal) cell fit. Kept because prior text quoted it,
+        # but it is NOT "variance explained by slot": it pools the prefix main
+        # effect, the ordinal main effect and their interaction into one number,
+        # and a near-100% value is unsurprising for any design with several
+        # replicates per cell. @Reviewer, 5c2e0083. Read `variance_decomposition`.
+        "variance_explained_by_cell_pct": round(ssb / sst * 100.0, 2),
         "variance_explained_by_slot_and_peak_pct": round(ssb / sst * 100.0, 2),
+        "variance_decomposition": _factorial(runs, size),
         "worst_across_process_range_pct": round(
             max(pp["worst_across_process_range_pct"] for pp in per_peak.values()), 2
         ),
