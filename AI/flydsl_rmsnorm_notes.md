@@ -3542,7 +3542,7 @@ cell was ever a contrast. A scan at N=1024 agrees on all eight coarse points:
 
 | `t` | 32 | 48 | **56** | **64** | **96** | **128** | 160 | 192 MiB |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| single/rotate | 0.990 | 1.005 | **0.920** | **0.876** | **0.870** | **0.863** | 0.986 | 1.006 |
+| single/rotate | 0.989 | 0.999 | **0.919** | **0.862** | **0.860** | **0.856** | 1.000 | 1.004 |
 
 Bold = inside the predicted band. 8/8, and the null holds on *both* sides,
 which is what distinguishes the model from "bigger is slower".
@@ -3552,10 +3552,54 @@ So the corrected reading is the opposite of the one I nearly published:
 cannot show.** "Rotation buys nothing on this card" would have been a
 device-wide claim resting on two badly chosen points.
 
+###### The band's two edges are not the same kind of claim, and I stated both as if they were
+
+@Reviewer's `afd7d2b5` audits @Autotune's commit, not mine, but one line in it
+is checkable here: "`_pick_l2_rotate_count(..., target_ratio: int = 3, ...)` is
+at `bench_utils.py:1274`". True in his frozen file and true in my tree at
+`:180`. Following that default through my own band exposes a limit I had
+missed.
+
+**`n=4` is not a property of this device.** `_pick_l2_rotate_count` sizes
+`target_ratio * L2_cache_size` = 12 MiB against tensors of tens of MiB, so
+`n_by_l2` is always 1 and `n` clamps to `min_buffers` for *every* shape in my
+scan. That is defect 1 again — the same wrong-cache read, this time landing on
+the buffer count instead of the eviction target. I derived the band holding
+`n=4` and then wrote it as though (51.2, 128] MiB were a fact about gfx950.
+
+Under an effective-LLC fix `n` scales with the MALL (`n`=24 at `t`=32 MiB,
+`n`=16 at `t`=48 MiB), so the rotated set crosses capacity at far smaller `t`
+and the low edge moves **down**. Forcing the `n` such a fix would pick:
+
+| `t` MiB | 32 | 32 | 32 | 48 | 48 | 192 | 192 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `n` | 4 | 8 | 24 | 4 | 16 | 4 | 12 |
+| single/rotate | 1.004 | **0.879** | **0.868** | 0.992 | **0.867** | 0.975 | 1.001 |
+
+7/7. The two edges are different in kind:
+
+- **Low edge — a claim about this harness.** Two shapes I filed under "rotation
+  cannot help here" gain a clear effect at a larger `n`. Nothing about the
+  device forbade it; the buffer count did.
+- **High edge — a claim about the device.** `2t > MALL` contains no `n`, so no
+  buffer count can rescue it, and `t`=192 MiB stays ~1.00× at both `n`=4 and
+  `n`=12.
+
+The coarse scan cannot distinguish these, because every one of its points was
+taken at the same clamped `n`. 8/8 agreement made a harness artifact look like
+a hardware law. Recorded as `EDGE_IS_N_DEPENDENT` in the artifact so the low
+edge is not quotable as a gfx950 property.
+
+There is a second-order consequence for @Autotune: **his effective-LLC fix does
+not merely re-target the evictor, it changes which shapes rotation can affect
+at all** — `t`=32 MiB moves from no-effect to ~0.87× purely by `n` going 4→24.
+Any before/after comparison across that fix is comparing two different
+experiments at the small end, not the same experiment with a better constant.
+
 Two things keep this short of settled. The MALL size is hardcoded, the same
 caveat that document flags about its own 256 MiB. And a tight scan across the
 edges shows the transition is **soft, not a step** — at `t`=51 MiB the ratio is
-already 0.943 where the model says 1.00, and at 129/132 MiB it is 0.881/0.946
+already 0.949 where the model says 1.00, and at 129/132 MiB it is 0.885/0.959
 rather than snapping back. The capacity rule predicts *where* the band is, not
 a threshold at its edges; that is consistent with partial residency in a
 set-associative cache, and sharpening it is Experiment No.002 territory

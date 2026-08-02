@@ -1,5 +1,5 @@
 {
-  "source_sha256_16": "7e0a7a0b5aafa456",
+  "source_sha256_16": "0fcfe00874773b2d",
   "device": "AMD Instinct MI355X",
   "kernel": "quack.rmsnorm_flydsl.rmsnorm (ROCm)",
   "mall_bytes_assumed": 268435456,
@@ -16,9 +16,9 @@
       "single_set_bytes": 67108864,
       "rotation_set_bytes": 167772160,
       "predicted_effect": false,
-      "graph_rotate_ms": 0.01269768476486206,
-      "graph_single_ms": 0.012574094533920287,
-      "single_over_rotate": 0.9902667113548306
+      "graph_rotate_ms": 0.012719475030899048,
+      "graph_single_ms": 0.012584275007247925,
+      "single_over_rotate": 0.989370628636584
     },
     {
       "M": 24576,
@@ -29,9 +29,9 @@
       "single_set_bytes": 100663296,
       "rotation_set_bytes": 251658240,
       "predicted_effect": false,
-      "graph_rotate_ms": 0.017711529731750487,
-      "graph_single_ms": 0.017808330059051514,
-      "single_over_rotate": 1.005465384908425
+      "graph_rotate_ms": 0.01777250528335571,
+      "graph_single_ms": 0.01774870991706848,
+      "single_over_rotate": 0.9986611135623341
     },
     {
       "M": 28672,
@@ -42,9 +42,9 @@
       "single_set_bytes": 117440512,
       "rotation_set_bytes": 293601280,
       "predicted_effect": true,
-      "graph_rotate_ms": 0.022459964752197265,
-      "graph_single_ms": 0.020670955181121827,
-      "single_over_rotate": 0.9203467329172714
+      "graph_rotate_ms": 0.022551333904266356,
+      "graph_single_ms": 0.020717525482177736,
+      "single_over_rotate": 0.9186829289179346
     },
     {
       "M": 32768,
@@ -55,9 +55,9 @@
       "single_set_bytes": 134217728,
       "rotation_set_bytes": 335544320,
       "predicted_effect": true,
-      "graph_rotate_ms": 0.026005189418792724,
-      "graph_single_ms": 0.022786569595336915,
-      "single_over_rotate": 0.8762316331704985
+      "graph_rotate_ms": 0.026228959560394286,
+      "graph_single_ms": 0.022611539363861084,
+      "single_over_rotate": 0.8620829702297644
     },
     {
       "M": 49152,
@@ -68,9 +68,9 @@
       "single_set_bytes": 201326592,
       "rotation_set_bytes": 503316480,
       "predicted_effect": true,
-      "graph_rotate_ms": 0.03806368112564087,
-      "graph_single_ms": 0.03311324596405029,
-      "single_over_rotate": 0.8699433419156138
+      "graph_rotate_ms": 0.03811784029006958,
+      "graph_single_ms": 0.03280000448226929,
+      "single_over_rotate": 0.860489582638141
     },
     {
       "M": 65536,
@@ -81,9 +81,9 @@
       "single_set_bytes": 268435456,
       "rotation_set_bytes": 671088640,
       "predicted_effect": true,
-      "graph_rotate_ms": 0.04951537132263183,
-      "graph_single_ms": 0.042748913764953614,
-      "single_over_rotate": 0.8633463230319047
+      "graph_rotate_ms": 0.04979451179504395,
+      "graph_single_ms": 0.04264767169952392,
+      "single_over_rotate": 0.8564733373642324
     },
     {
       "M": 81920,
@@ -94,9 +94,9 @@
       "single_set_bytes": 335544320,
       "rotation_set_bytes": 838860800,
       "predicted_effect": false,
-      "graph_rotate_ms": 0.062445058822631835,
-      "graph_single_ms": 0.06158505439758301,
-      "single_over_rotate": 0.9862278226449979
+      "graph_rotate_ms": 0.062163991928100584,
+      "graph_single_ms": 0.06213658809661865,
+      "single_over_rotate": 0.9995591687304505
     },
     {
       "M": 98304,
@@ -107,9 +107,9 @@
       "single_set_bytes": 402653184,
       "rotation_set_bytes": 1006632960,
       "predicted_effect": false,
-      "graph_rotate_ms": 0.0743711519241333,
-      "graph_single_ms": 0.07484014987945557,
-      "single_over_rotate": 1.0063061811359424
+      "graph_rotate_ms": 0.07446046352386475,
+      "graph_single_ms": 0.0747598648071289,
+      "single_over_rotate": 1.0040209430494371
     }
   ],
   "coarse_agreement": "8/8",
@@ -123,9 +123,9 @@
       "single_set_bytes": 104857600,
       "rotation_set_bytes": 262144000,
       "predicted_effect": false,
-      "graph_rotate_ms": 0.019051140546798705,
-      "graph_single_ms": 0.018541334867477416,
-      "single_over_rotate": 0.9732401491622529
+      "graph_rotate_ms": 0.01933091998100281,
+      "graph_single_ms": 0.018563514947891234,
+      "single_over_rotate": 0.9603016807339882
     },
     {
       "M": 26112,
@@ -136,9 +136,9 @@
       "single_set_bytes": 106954752,
       "rotation_set_bytes": 267386880,
       "predicted_effect": false,
-      "graph_rotate_ms": 0.01958374500274658,
-      "graph_single_ms": 0.018460935354232787,
-      "single_over_rotate": 0.9426662444616021
+      "graph_rotate_ms": 0.019618325233459473,
+      "graph_single_ms": 0.01861251950263977,
+      "single_over_rotate": 0.9487313152957482
     },
     {
       "M": 26624,
@@ -149,9 +149,9 @@
       "single_set_bytes": 109051904,
       "rotation_set_bytes": 272629760,
       "predicted_effect": true,
-      "graph_rotate_ms": 0.01999114990234375,
-      "graph_single_ms": 0.01883373975753784,
-      "single_over_rotate": 0.9421038734410061
+      "graph_rotate_ms": 0.020131723880767824,
+      "graph_single_ms": 0.018708720207214355,
+      "single_over_rotate": 0.9293153590829403
     },
     {
       "M": 27136,
@@ -162,9 +162,9 @@
       "single_set_bytes": 111149056,
       "rotation_set_bytes": 277872640,
       "predicted_effect": true,
-      "graph_rotate_ms": 0.02092475414276123,
-      "graph_single_ms": 0.01935274004936218,
-      "single_over_rotate": 0.9248729957506872
+      "graph_rotate_ms": 0.021125335693359375,
+      "graph_single_ms": 0.019323724508285522,
+      "single_over_rotate": 0.9147179854926434
     }
   ],
   "upper_edge_scan": [
@@ -177,9 +177,9 @@
       "single_set_bytes": 266338304,
       "rotation_set_bytes": 665845760,
       "predicted_effect": true,
-      "graph_rotate_ms": 0.04915016651153564,
-      "graph_single_ms": 0.04261011600494385,
-      "single_over_rotate": 0.8669373682578099
+      "graph_rotate_ms": 0.04894334316253662,
+      "graph_single_ms": 0.04261806488037109,
+      "single_over_rotate": 0.8707632565850717
     },
     {
       "M": 66048,
@@ -190,9 +190,9 @@
       "single_set_bytes": 270532608,
       "rotation_set_bytes": 676331520,
       "predicted_effect": false,
-      "graph_rotate_ms": 0.0503059720993042,
-      "graph_single_ms": 0.044308128356933596,
-      "single_over_rotate": 0.8807727295174649
+      "graph_rotate_ms": 0.05007235050201416,
+      "graph_single_ms": 0.04431971073150635,
+      "single_over_rotate": 0.8851134465861271
     },
     {
       "M": 67584,
@@ -203,9 +203,9 @@
       "single_set_bytes": 276824064,
       "rotation_set_bytes": 692060160,
       "predicted_effect": false,
-      "graph_rotate_ms": 0.05133697986602783,
-      "graph_single_ms": 0.04857396125793457,
-      "single_over_rotate": 0.9461787854427002
+      "graph_rotate_ms": 0.05086872100830078,
+      "graph_single_ms": 0.04876530647277832,
+      "single_over_rotate": 0.9586501391458372
     },
     {
       "M": 69632,
@@ -216,11 +216,77 @@
       "single_set_bytes": 285212672,
       "rotation_set_bytes": 713031680,
       "predicted_effect": false,
-      "graph_rotate_ms": 0.05254100322723389,
-      "graph_single_ms": 0.05532280921936035,
-      "single_over_rotate": 1.0529454296884182
+      "graph_rotate_ms": 0.052507328987121585,
+      "graph_single_ms": 0.055134944915771485,
+      "single_over_rotate": 1.050042841244017
     }
   ],
+  "n_sweep": [
+    {
+      "M": 16384,
+      "one_tensor_bytes": 33554432,
+      "rotation_buffers_forced": 4,
+      "single_set_bytes": 67108864,
+      "rotation_set_bytes": 167772160,
+      "predicted_effect": false,
+      "single_over_rotate": 1.0037024374583383
+    },
+    {
+      "M": 16384,
+      "one_tensor_bytes": 33554432,
+      "rotation_buffers_forced": 8,
+      "single_set_bytes": 67108864,
+      "rotation_set_bytes": 301989888,
+      "predicted_effect": true,
+      "single_over_rotate": 0.8790966019249952
+    },
+    {
+      "M": 16384,
+      "one_tensor_bytes": 33554432,
+      "rotation_buffers_forced": 24,
+      "single_set_bytes": 67108864,
+      "rotation_set_bytes": 838860800,
+      "predicted_effect": true,
+      "single_over_rotate": 0.868158414632431
+    },
+    {
+      "M": 24576,
+      "one_tensor_bytes": 50331648,
+      "rotation_buffers_forced": 4,
+      "single_set_bytes": 100663296,
+      "rotation_set_bytes": 251658240,
+      "predicted_effect": false,
+      "single_over_rotate": 0.9918215682205703
+    },
+    {
+      "M": 24576,
+      "one_tensor_bytes": 50331648,
+      "rotation_buffers_forced": 16,
+      "single_set_bytes": 100663296,
+      "rotation_set_bytes": 855638016,
+      "predicted_effect": true,
+      "single_over_rotate": 0.8672929999746624
+    },
+    {
+      "M": 98304,
+      "one_tensor_bytes": 201326592,
+      "rotation_buffers_forced": 4,
+      "single_set_bytes": 402653184,
+      "rotation_set_bytes": 1006632960,
+      "predicted_effect": false,
+      "single_over_rotate": 0.9747468513930142
+    },
+    {
+      "M": 98304,
+      "one_tensor_bytes": 201326592,
+      "rotation_buffers_forced": 12,
+      "single_set_bytes": 402653184,
+      "rotation_set_bytes": 2617245696,
+      "predicted_effect": false,
+      "single_over_rotate": 1.0011838334558014
+    }
+  ],
+  "EDGE_IS_N_DEPENDENT": "The two edges of the band are NOT the same kind of claim, and the coarse scan alone cannot tell them apart. The low edge is an artifact of n=4, and n=4 is not a device property: _pick_l2_rotate_count sizes target_ratio * L2_cache_size = 12 MiB against tensors of tens of MiB, so n_by_l2 is always 1 and n clamps to min_buffers for every shape here -- defect 1 of gfx950_mall_evictor_defect.md acting on the buffer count. Forcing the n an effective-LLC fix would pick makes the effect appear below the stated low edge: t=32 MiB goes 0.990x (n=4) -> 0.887x (n=8) -> 0.871x (n=24), and t=48 MiB goes 0.995x (n=4) -> 0.882x (n=16). The high edge has no n in it (2*t > MALL cannot be rescued by more buffers) and holds: t=192 MiB is 0.996x at n=4 and 1.006x at n=12. So 'rotation cannot help below t~51 MiB' is a statement about THIS HARNESS, while 'rotation cannot help above t=128 MiB' is a statement about the device.",
   "edges_are_soft": "The coarse scan agrees on every point, but the edge scans show the transition is NOT a step. Just outside the predicted band the ratio is already ~0.95x (low edge) and ~0.89x (high edge) rather than 1.00x. So the capacity rule predicts WHERE the band is, but not a sharp threshold at its edges -- consistent with a set-associative cache with partial residency rather than the all-or-nothing model assumed here. Sharpening this is Experiment No.002 territory, which gfx950_mall_evictor_defect.md blocks pending re-collection.",
-  "scope": "Forward rmsnorm on the FlyDSL/ROCm path only, N=1024, bf16, one device. This says nothing about which CONFIG wins under either regime (bench_utils.py:98 is a ranking claim), nor about the cutedsl path, nor about backward."
+  "scope": "Forward rmsnorm on the FlyDSL/ROCm path only, N=1024, bf16, one device. This says nothing about which CONFIG wins under either regime (bench_utils.py:98 is a ranking claim), nor about the cutedsl path, nor about backward. And per EDGE_IS_N_DEPENDENT, the band's low edge is contingent on the buffer count this harness currently picks, so it must not be quoted as a property of gfx950."
 }

@@ -29,6 +29,22 @@ sit on the same side of capacity and the ratio must be ~1.00x -- not because
 rotation is useless, but because there is nothing for it to evict that was not
 already evicted, or nothing that leaves.
 
+CRUCIAL SCOPE LIMIT ON THE LOW EDGE. That band is stated at n=4, and n=4 is not
+a property of this device -- it is what ``_pick_l2_rotate_count`` returns for
+EVERY shape here, because it sizes ``target_ratio * L2_cache_size`` = 12 MiB
+against a tensor of tens of MiB, gets n_by_l2 = 1, and clamps to
+``min_buffers``. That is defect 1 of AI/gfx950_mall_evictor_defect.md acting on
+the buffer count. So the low edge measures the CURRENT HARNESS, not the
+hardware: under an effective-LLC fix that sizes against the MALL, n scales with
+t (n=24 at t=32 MiB, n=16 at t=48 MiB) and the rotated set crosses capacity at
+far smaller t, moving the low edge DOWN. Measured, forcing the n such a fix
+would pick: t=32 MiB gives 0.990x at n=4 but 0.887x at n=8 and 0.871x at n=24;
+t=48 MiB gives 0.995x at n=4 and 0.882x at n=16. The high edge is different in
+kind -- ``2*t > MALL`` has no n in it, so no buffer count can rescue it, and
+t=192 MiB stays 0.996x/1.006x at n=4 and n=12. ``EDGE_IS_N_DEPENDENT`` below
+records which is which, because "rotation cannot help below t=51 MiB" would be
+a hardware claim and the truth is a harness claim.
+
 WHAT THIS PREDICTS AND HOW IT COULD FAIL. A ratio ``single/rotate`` visibly
 below 1.0 strictly inside the band, and ~1.00x on BOTH sides. Checking only one
 side would not distinguish the model from "bigger is slower". The MALL size is
@@ -64,9 +80,62 @@ COARSE_M = [16384, 24576, 28672, 32768, 49152, 65536, 81920, 98304]
 LOWER_EDGE_M = [25600, 26112, 26624, 27136]
 UPPER_EDGE_M = [65024, 66048, 67584, 69632]
 
+# (M, n) pairs testing whether each edge survives a change in buffer count.
+# The first n in each group is what the harness picks today; the later ones are
+# what an effective-LLC fix would pick (ceil(3 * 256 MiB / t)). Low-edge shapes
+# should GAIN an effect as n rises; the high-edge shape should not.
+N_SWEEP = [
+    (16384, 4),  # t=32 MiB, below the n=4 band
+    (16384, 8),
+    (16384, 24),
+    (24576, 4),  # t=48 MiB, below the n=4 band
+    (24576, 16),
+    (98304, 4),  # t=192 MiB, above the band: n-independent
+    (98304, 12),
+]
+
 
 def _source_sha256_16() -> str:
     return hashlib.sha256(pathlib.Path(__file__).resolve().read_bytes()).hexdigest()[:16]
+
+
+def measure_at_n(M: int, n_bufs: int, N: int = N_COLS) -> dict:
+    """Same two cells, but with the buffer count FORCED rather than picked.
+
+    This is what separates "rotation cannot help at this size" (hardware) from
+    "rotation cannot help at the n this harness happens to pick" (a bug).
+    """
+    from quack.bench.bench_utils import _bench_cuda_graph_l2_rotate, _clone_l2_rotate_inputs
+    from quack.rmsnorm_flydsl import rmsnorm
+
+    x = torch.randn(M, N, device="cuda", dtype=DTYPE)
+    w = torch.randn(N, device="cuda", dtype=DTYPE)
+    arg_sets, kwarg_sets = _clone_l2_rotate_inputs((x, w), {}, n_bufs)
+
+    def call(x_, w_):
+        rmsnorm(x_, w_, eps=1e-6)
+
+    def bench(sets_a, sets_k) -> float:
+        r = _bench_cuda_graph_l2_rotate(call, sets_a, sets_k, extra_kwargs={})
+        return r[0] if isinstance(r, (list, tuple)) else r
+
+    rot = statistics.median([bench(arg_sets, kwarg_sets) for _ in range(5)])
+    one = statistics.median(
+        [bench([arg_sets[0]] * n_bufs, [kwarg_sets[0]] * n_bufs) for _ in range(5)]
+    )
+    t = M * N * torch.tensor([], dtype=DTYPE).element_size()
+    row = {
+        "M": M,
+        "one_tensor_bytes": t,
+        "rotation_buffers_forced": n_bufs,
+        "single_set_bytes": 2 * t,
+        "rotation_set_bytes": (n_bufs + 1) * t,
+        "predicted_effect": 2 * t <= MALL_BYTES < (n_bufs + 1) * t,
+        "single_over_rotate": one / rot if rot else None,
+    }
+    del x, w, arg_sets, kwarg_sets
+    torch.cuda.empty_cache()
+    return row
 
 
 def measure(M: int, N: int = N_COLS) -> dict:
@@ -140,6 +209,7 @@ def main() -> int:
     coarse = [measure(m) for m in COARSE_M]
     lower = [measure(m) for m in LOWER_EDGE_M]
     upper = [measure(m) for m in UPPER_EDGE_M]
+    n_sweep = [measure_at_n(m, n) for m, n in N_SWEEP]
 
     # Scoring uses the coarse scan only. The edge scans deliberately sample
     # within a few MiB of the threshold, where the model is not expected to
@@ -169,6 +239,24 @@ def main() -> int:
         "coarse_agreement": f"{agree}/{len(coarse)}",
         "lower_edge_scan": lower,
         "upper_edge_scan": upper,
+        "n_sweep": n_sweep,
+        "EDGE_IS_N_DEPENDENT": (
+            "The two edges of the band are NOT the same kind of claim, and the "
+            "coarse scan alone cannot tell them apart. The low edge is an "
+            "artifact of n=4, and n=4 is not a device property: "
+            "_pick_l2_rotate_count sizes target_ratio * L2_cache_size = 12 MiB "
+            "against tensors of tens of MiB, so n_by_l2 is always 1 and n "
+            "clamps to min_buffers for every shape here -- defect 1 of "
+            "gfx950_mall_evictor_defect.md acting on the buffer count. Forcing "
+            "the n an effective-LLC fix would pick makes the effect appear "
+            "below the stated low edge: t=32 MiB goes 0.990x (n=4) -> 0.887x "
+            "(n=8) -> 0.871x (n=24), and t=48 MiB goes 0.995x (n=4) -> 0.882x "
+            "(n=16). The high edge has no n in it (2*t > MALL cannot be "
+            "rescued by more buffers) and holds: t=192 MiB is 0.996x at n=4 "
+            "and 1.006x at n=12. So 'rotation cannot help below t~51 MiB' is a "
+            "statement about THIS HARNESS, while 'rotation cannot help above "
+            "t=128 MiB' is a statement about the device."
+        ),
         "edges_are_soft": (
             "The coarse scan agrees on every point, but the edge scans show "
             "the transition is NOT a step. Just outside the predicted band the "
@@ -184,7 +272,10 @@ def main() -> int:
             "Forward rmsnorm on the FlyDSL/ROCm path only, N=1024, bf16, one "
             "device. This says nothing about which CONFIG wins under either "
             "regime (bench_utils.py:98 is a ranking claim), nor about the "
-            "cutedsl path, nor about backward."
+            "cutedsl path, nor about backward. And per EDGE_IS_N_DEPENDENT, "
+            "the band's low edge is contingent on the buffer count this "
+            "harness currently picks, so it must not be quoted as a property "
+            "of gfx950."
         ),
     }
 
@@ -200,6 +291,13 @@ def main() -> int:
                 f"n={r['rotation_buffers']} out={r['distinct_output_buffers']} "
                 f"| single/rotate={r['single_over_rotate']:.3f}x  {flag}"
             )
+    print("n sweep (buffer count forced, not picked):")
+    for r in n_sweep:
+        flag = "PREDICT-EFFECT" if r["predicted_effect"] else "predict ~1.00x"
+        print(
+            f"  t={r['one_tensor_bytes'] / 2**20:6.1f}MiB n={r['rotation_buffers_forced']:2d} "
+            f"| single/rotate={r['single_over_rotate']:.3f}x  {flag}"
+        )
     print(f"coarse agreement {agree}/{len(coarse)}")
     print(f"wrote {OUT}")
     return 0
