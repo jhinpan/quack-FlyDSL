@@ -10,40 +10,56 @@ rocprofv3's `MeanOccupancyPerActiveCU`, and reports both side by side.
 Two traps had to be cleared first, and both are checked here rather than
 assumed.
 
-**rocprofv3 and the artifact disagree about VGPR_Count, and neither is wrong.**
-At N=49152 the artifact says 230 and rocprof says 116. The relation is exact:
+**rocprof's VGPR column is a lossy function of the artifact's, not a second
+unit system.** At N=49152 the artifact says 230 and rocprof says 116. The exact
+relation is
 
-    rocprof_vgpr = roundup(ceil(artifact_vgpr / 2), 4)
+    rocprof_vgpr == vgpr_alloc_wave64 / 2
 
-on 10 of 10 widths, five of which (2048/16384/24576/32768/40960) were held out
--- the relation was fitted on the other five and predicted these before they
-were measured. This probe asserts the relation on every row: if a future
-toolchain breaks it, the probe fails instead of quietly publishing two
-incompatible numbers.
+on 10 of 10 widths -- half the *granule-8 rounded allocation*, not half the
+count. It is asserted on every row as a toolchain regression guard. Nothing in
+this file reads rocprof's register columns for any purpose.
 
-**The relation is measured; its explanation is not settled.** I first read the
-factor of 2 as wave64 architectural VGPRs versus 32-lane physical register-file
-entries -- a unit difference, with neither source wrong. @Reviewer proposed
-instead that it is an incomplete ROCProfiler-SDK decode of gfx950 code-object
-VGPR/AGPR fields. AGPRs discriminate: a unit conversion scales them, a decoding
-gap drops them. At N=57344 and 65536 the artifact reports 8 and 44 AGPRs, where
-a conversion predicts 4 and 22 -- rocprof reports `Accum_VGPR_Count = 0` for
-both. That favours decoding, and it is evidence I had when I wrote the units
-story and failed to weigh. The column is recorded per row now.
+This took three wrong answers to get right, and the sequence is the point.
 
-Nothing in this file's conclusions rests on the answer. The occupancy counter is
-not a register decode, the computed bound comes from the artifact, and rocprof's
-VGPR_Count entered only as a cross-check -- which is what the decoding
-hypothesis would void.
+1. I wrote the relation as `roundup(ceil(v / 2), 4)` and explained it as wave64
+   architectural VGPRs versus 32-lane physical register-file entries -- a unit
+   difference, neither source wrong. I supported it with "10 of 10 widths, five
+   held out".
+2. @Reviewer rejected the units story and proposed an incomplete
+   ROCProfiler-SDK decode of gfx950 code-object fields. I checked AGPRs (a
+   conversion scales them, a decoding gap drops them), found rocprof reports
+   `Accum_VGPR_Count = 0` against artifact 8 and 44, and conceded his
+   hypothesis was "better supported".
+3. Both of those still treated this as an open empirical question with evidence
+   on each side. @Autotune pointed out it never was: `roundup(ceil(v/2), 4)`
+   **is identically `ceil(v/8)*4`** for every integer v. My formula could not
+   have failed on any width. "10 of 10, five held out" was reporting an
+   identity as a confirmed prediction -- a check that could not have come out
+   otherwise, which is the same defect as every other one in this file's
+   history, arriving this time inside the correction to the previous one.
 
-All ten widths are emitted under `vgpr_relation_audit` with their fit/held-out
-labels. The first version of this file named the held-out widths only in prose,
-and two of them appeared in no sweep at all, so a reader could not check the
-claim against the artifact -- the same failure as quoting a test count without
-the invocation. What the JSON can establish is that the relation holds on all
-ten and which set each width was in; that the held-out predictions were made
-*before* those widths were measured rests on the commit history, and the
-payload says so rather than implying the data proves it.
+@Reviewer's mechanism is the true one: ROCProfiler-SDK 1.1.0 has no gfx950
+accumulator decoder, so gfx950 falls through to `(PGM_RSRC1+1)*4` with
+`Accum_VGPR_Count = 0`, while LLVM encodes the total with granule 8. That
+composition produces exactly the observed numbers.
+
+The tell that settles it without reading any ROCProfiler source is in this
+file's own rows: **the map is not injective.** Artifact 226 and 230 are two
+different allocations and rocprof reports 116 for both. A unit conversion is
+order-preserving and invertible; quantization is neither. That collision is now
+asserted rather than left to be noticed. And `512 // (2 * rocprof)` recovers the
+correct bound on all ten rows for the same reason -- `2 * rocprof` *is* the
+allocation, so the "cross-check" was re-deriving a number the artifact already
+stated.
+
+One consequence for a nearby claim: I wrote that vgpr+agpr = 272/344 at
+57344/65536 "still gives bound 1". @Reviewer flagged that amdhsa `.vgpr_count`
+already includes AGPRs, so that was double-counting, and these rows confirm it
+independently -- at N=65536 rocprof reports 152 = `ceil(300/8)*4`, where a
+separate 44 AGPRs would have made the encoded total 344 and the reading 172.
+The bound was computed from `vgpr_count` alone throughout, which is the correct
+total, so nothing downstream moves.
 
 **Occupancy is not register-bound unless enough waves exist to be bound.** At
 m=1024 and N=49152 the grid supplies only 4 waves/SIMD, so any register limit
@@ -137,10 +153,35 @@ SIMDS_PER_CU = 4
 
 COUNTER = "MeanOccupancyPerActiveCU"
 
-# Published bandwidth percentages at m=4096 from AI/data/rmsnorm_fwd_width_cliff.json,
-# carried here only so the two columns can be read against each other. Not measured
-# by this probe.
-BANDWIDTH_PCT_AT_M4096 = {49152: 77.5, 57344: 37.8, 65536: 39.2}
+# Bandwidth percentages at m=4096, read out of AI/data/rmsnorm_fwd_width_cliff.json
+# rather than transcribed. They are carried here only so the occupancy and bandwidth
+# columns can be read against each other; this probe does not measure them.
+#
+# They used to be three hand-copied literals, {49152: 77.5, 57344: 37.8, 65536: 39.2},
+# and @Reviewer found that they were not co-measured: 77.5 and 37.8 are the cliff's
+# GRAPH numbers while 39.2 is its EAGER one. Nothing downstream used them
+# quantitatively, but a three-entry table silently mixing two timing regimes is
+# exactly the kind of number that gets picked up later as if it were one series.
+# Reading them from the source file with the regime named makes the mix impossible.
+BANDWIDTH_REGIME = "eager_share_of_ceiling_pct"
+CLIFF_SIDECAR = "AI/data/rmsnorm_fwd_width_cliff.json"
+BANDWIDTH_NS = (49152, 57344, 65536)
+
+
+def _bandwidth_pct_at_m4096():
+    """Read the cliff sidecar's eager bandwidth column, and say which column it is."""
+    raw = json.loads((REPO / CLIFF_SIDECAR).read_text())
+    sweep = raw["width_sweep_m_fixed"]
+    if sweep["m"] != BOUNDARY_M:
+        raise SystemExit(
+            f"the cliff sidecar's width sweep is at m={sweep['m']}, not {BOUNDARY_M}; "
+            "the bandwidth column would not be comparable to these occupancy rows"
+        )
+    rows = {r["n"]: r for r in sweep["rows"]}
+    missing = [n for n in BANDWIDTH_NS if n not in rows]
+    if missing:
+        raise SystemExit(f"cliff sidecar has no m={BOUNDARY_M} row for N={missing}")
+    return {n: round(rows[n][BANDWIDTH_REGIME], 2) for n in BANDWIDTH_NS}
 
 
 def _hw_max_waves_per_simd():
@@ -259,10 +300,34 @@ def _regs_inner(m, ns):
     print(json.dumps(out))
 
 
+def _vgpr_alloc(artifact_vgpr):
+    """Granule-8 wave64 allocation. This is the number the hardware budgets."""
+    return max(
+        ALLOC_GRANULARITY_WAVE64,
+        -(-artifact_vgpr // ALLOC_GRANULARITY_WAVE64) * ALLOC_GRANULARITY_WAVE64,
+    )
+
+
 def _predict_rocprof_vgpr(artifact_vgpr):
-    """rocprof_vgpr = roundup(ceil(artifact_vgpr / 2), 4). See the module docstring."""
-    halved = -(-artifact_vgpr // 2)
-    return -(-halved // ROCPROF_VGPR_GRANULARITY) * ROCPROF_VGPR_GRANULARITY
+    """rocprof_vgpr == vgpr_alloc / 2 -- half the granule-8 rounded allocation.
+
+    This used to be written `roundup(ceil(v / 2), 4)` and described as a
+    relation confirmed on ten widths with five held out. Both parts were
+    wrong in the same way. `roundup(ceil(v/2), 4)` is identically equal to
+    `ceil(v/8)*4` for every integer v, so it could not have failed on any
+    width, and 'held-out widths confirmed it' was reporting an identity as an
+    empirical result -- the check could not have come out otherwise.
+    @Autotune verified the identity by exhaustion and @Reviewer independently
+    traced the mechanism: ROCProfiler-SDK 1.1.0 has no gfx950 accumulator
+    decoder, so it falls through to (PGM_RSRC1+1)*4 against LLVM's granule-8
+    encoding of the total.
+
+    Written this way the content is visible: rocprof reports half the
+    ALLOCATION, not half the count -- which is why 226 and 230 both come back
+    as 116, and why the column carries strictly less information than the
+    artifact it is being checked against.
+    """
+    return _vgpr_alloc(artifact_vgpr) // 2
 
 
 def _run_rocprof(m, ns, tag):
@@ -313,6 +378,7 @@ def _run_rocprof(m, ns, tag):
 
 
 def _sweep(m, ns, tag, hw_cap, num_cus):
+    bandwidth = _bandwidth_pct_at_m4096()
     artifacts = _artifact_registers(m, ns)
     rows = _run_rocprof(m, ns, tag)
     out = []
@@ -333,16 +399,14 @@ def _sweep(m, ns, tag, hw_cap, num_cus):
         predicted = _predict_rocprof_vgpr(art["vgpr_count"])
         if predicted != rocprof_vgpr:
             raise SystemExit(
-                f"N={n}: the wave64->rocprof VGPR relation broke. artifact "
-                f"{art['vgpr_count']} predicts {predicted}, rocprof says {rocprof_vgpr}. "
-                "The two sources are no longer the same kernel in different units; "
-                "do not publish either until this is understood."
+                f"N={n}: rocprof's VGPR column is no longer half the granule-8 "
+                f"allocation. artifact {art['vgpr_count']} allocates "
+                f"{_vgpr_alloc(art['vgpr_count'])}, predicting {predicted}; rocprof says "
+                f"{rocprof_vgpr}. This guard exists to catch a toolchain change, not to "
+                "support a claim -- nothing here reads rocprof's register columns."
             )
 
-        alloc = max(
-            ALLOC_GRANULARITY_WAVE64,
-            -(-art["vgpr_count"] // ALLOC_GRANULARITY_WAVE64) * ALLOC_GRANULARITY_WAVE64,
-        )
+        alloc = _vgpr_alloc(art["vgpr_count"])
         register_limited = VGPRS_PER_SIMD // alloc
         # Grid_Size is reported in work-items, not workgroups.
         total_waves = grid / WAVE_SIZE
@@ -382,21 +446,27 @@ def _sweep(m, ns, tag, hw_cap, num_cus):
                 "measured_waves_per_simd": round(measured, 4),
                 "measured_over_bound": round(measured / bound, 4),
                 "dispatches": len(chunk),
-                "bandwidth_pct_of_ceiling_at_m4096": BANDWIDTH_PCT_AT_M4096.get(n),
+                "bandwidth_pct_of_ceiling_at_m4096": bandwidth.get(n) if m == BOUNDARY_M else None,
+                "bandwidth_regime": BANDWIDTH_REGIME if (m == BOUNDARY_M and n in bandwidth) else None,
             }
         )
     return out
 
 
 def _vgpr_relation_audit():
-    """Emit the fit/held-out split behind the wave64 -> rocprof VGPR relation.
+    """Emit the widths behind the rocprof/artifact VGPR relation.
 
-    The relation is `rocprof = roundup(ceil(artifact / 2), 4)`. It was derived
-    on the fit widths and then checked against the held-out ones. Prose alone
-    cannot establish that ordering after the fact, so what this records is the
-    weaker but *auditable* claim: the relation holds on every width in both
-    sets, and which set each width belongs to is declared in the source rather
-    than asserted in a paragraph.
+    This used to be a fit/held-out split, on the theory that predicting
+    unmeasured widths was evidence for the relation. It is not, because the
+    relation is an identity -- it holds on every width, fitted or not, and a
+    held-out set cannot discriminate. The set labels are kept only because
+    the earlier notes and commits refer to them.
+
+    What the rows DO show, and what the split obscured, is that the map is
+    not injective: two different artifact counts (226 and 230) return the
+    same rocprof value, because rocprof reports half the granule-8 ALLOCATION
+    and the rounding is where they merge. That is a property no unit
+    conversion has, and it is visible here without leaving the file.
     """
     all_ns = sorted(set(VGPR_RELATION_FIT_NS) | set(VGPR_RELATION_HELDOUT_NS))
     artifacts = _artifact_registers(VGPR_RELATION_M, all_ns)
@@ -421,10 +491,24 @@ def _vgpr_relation_audit():
                 "m": VGPR_RELATION_M,
                 "set": "fit" if n in VGPR_RELATION_FIT_NS else "held_out",
                 "artifact_vgpr_count": art_vgpr,
+                "vgpr_alloc_wave64": _vgpr_alloc(art_vgpr),
                 "rocprof_vgpr_count": rocprof_vgpr,
-                "predicted_from_artifact": predicted,
+                "predicted_from_alloc": predicted,
                 "agrees": predicted == rocprof_vgpr,
             }
+        )
+    # The non-injectivity is the finding, so it is asserted rather than left
+    # for a reader to notice. If a future toolchain makes this column
+    # injective, the "lossy function of the artifact" reading needs revisiting
+    # and the probe should say so rather than carry stale prose.
+    collisions = {}
+    for row in out:
+        collisions.setdefault(row["rocprof_vgpr_count"], set()).add(row["artifact_vgpr_count"])
+    if not any(len(v) > 1 for v in collisions.values()):
+        raise SystemExit(
+            "no two artifact VGPR counts collided in rocprof's column on these widths. "
+            "The claim that rocprof reports a lossy (post-rounding) view rests on that "
+            "collision; re-derive it before publishing."
         )
     return out
 
@@ -503,40 +587,63 @@ def main():
         "compute_units": num_cus,
         "simds_per_cu": SIMDS_PER_CU,
         "vgpr_relation": (
-            "rocprof_vgpr = roundup(ceil(artifact_vgpr / 2), 4), exact on 10 of 10 widths. "
-            "Five (2048/16384/24576/32768/40960) were held out; see vgpr_relation_audit. "
-            "The RELATION is measured. Its EXPLANATION is not settled -- see "
-            "vgpr_relation_hypotheses. All register arithmetic here uses the artifact "
-            "numbers, which are the ones the measured occupancy behaves like, so nothing "
-            "in this file's conclusions depends on which explanation is right."
+            "SETTLED, and not in favour of what this field used to say. rocprof's VGPR "
+            "column is not a second unit system for the artifact's; it is a LOSSY FUNCTION "
+            "of it: rocprof_vgpr == vgpr_alloc_wave64 / 2 exactly, on 10 of 10 widths. It "
+            "reports half of the GRANULE-8 ROUNDED allocation, so it carries strictly less "
+            "information than the artifact -- see vgpr_relation_resolution. All register "
+            "arithmetic here uses the artifact numbers, and nothing in this file's "
+            "conclusions ever depended on rocprof's column."
         ),
-        "vgpr_relation_hypotheses": {
-            "units": (
-                "REJECTED as the sole explanation. I first read the factor of 2 as wave64 "
-                "architectural VGPRs vs 32-lane physical register-file entries."
+        "vgpr_relation_resolution": {
+            "verdict": (
+                "roundup(ceil(v/2),4) is an IDENTITY, not a fitted law: it equals "
+                "ceil(v/8)*4 for every integer v, which @Autotune verified by exhaustion. "
+                "So '10 of 10 widths, five held out' was never evidence for anything -- an "
+                "identity holds at every point, and the fit/held-out split has no "
+                "discriminating power over it. @Reviewer had already located the mechanism "
+                "in ROCProfiler-SDK 1.1.0: no gfx950 accumulator decoder, so gfx950 falls "
+                "through to (PGM_RSRC1+1)*4 with Accum_VGPR_Count = 0, while LLVM encodes "
+                "the total VGPR count with granule 8. That composition IS the formula."
             ),
-            "decoding": (
-                "BETTER SUPPORTED. @Reviewer proposed that this is instead an incomplete "
-                "ROCProfiler-SDK decode of gfx950 code-object VGPR/AGPR fields, and he is "
-                "doing the source-level verification."
+            "not_a_unit_system": (
+                "@Autotune's tell, checkable from this file: the map is not injective. "
+                "artifact 226 and 230 are different allocations and rocprof reports 116 for "
+                "both; artifact 20 and 20 -> 12. A unit conversion is order-preserving and "
+                "invertible. Quantization is neither. The exact statement is "
+                "rocprof == vgpr_alloc_wave64 / 2, i.e. rocprof sees the allocation AFTER "
+                "granule-8 rounding, which is precisely where 226 and 230 become the same "
+                "number. 512 // (2 * rocprof) recovers the correct bound on all ten rows "
+                "for the same reason: 2 * rocprof IS the allocation."
             ),
-            "discriminating_evidence": (
-                "AGPRs. A unit conversion would scale them like VGPRs; a decoding gap drops "
-                "them. At N=57344 and 65536 the artifact reports agpr_count 8 and 44, where "
-                "a conversion predicts 4 and 22 -- rocprof reports Accum_VGPR_Count = 0 for "
-                "both. Zero is a dropped field, not a converted one. This datum was "
-                "available when the units story was written and I did not weigh it; the "
-                "column is now recorded per row so the question is auditable here."
+            "my_error": (
+                "I published a units explanation, then when @Reviewer challenged it I "
+                "reported AGPRs as discriminating evidence and said his hypothesis was "
+                "'better supported'. Both of those were still treating this as an open "
+                "empirical question between two stories. It was not: one side was an "
+                "algebraic identity, which I could have checked in one line at any point "
+                "and did not, because the relation held on every width I tried and I read "
+                "'always true' as strong evidence instead of asking what would make it "
+                "unfalsifiable."
+            ),
+            "agpr_double_counting": (
+                "CORRECTED. I wrote that vgpr+agpr = 272/344 at 57344/65536 'still gives "
+                "bound 1', treating the artifact's vgpr_count and agpr_count as additive. "
+                "@Reviewer says amdhsa .vgpr_count already includes AGPRs, so that was "
+                "double-counting. The rows here confirm it independently: at N=65536, "
+                "ceil(300/8)*4 = 152 is what rocprof reports, while ceil((300+44)/8)*4 = "
+                "172 is not. If AGPRs were separate the encoded total would be 344 and "
+                "rocprof would read 172. The occupancy bound is unaffected -- it was "
+                "computed from vgpr_count alone throughout, which is the correct total."
             ),
             "blast_radius": (
                 "None of the occupancy conclusions move. MeanOccupancyPerActiveCU is a "
                 "counter, not a register decode; the computed bound comes from the artifact "
                 "(MLIR gpu.kernel_metadata, agreeing with the msgpack amdhsa ELF note); and "
-                "rocprof's VGPR_Count entered only as a cross-check. What is void if the "
-                "decoding hypothesis holds is that cross-check and my explanation of it. "
-                "Note also that if AGPRs are real and share the register file on gfx950, "
-                "vgpr+agpr at 57344/65536 is 272/344, which still gives floor(512/alloc) = 1 "
-                "-- the same bound, so the 2 -> 1 step is unaffected either way."
+                "rocprof's VGPR_Count entered only as a cross-check. That cross-check is "
+                "now known to be vacuous -- it re-derives the allocation the artifact "
+                "already stated -- so it is retained as a toolchain regression guard and "
+                "nothing else."
             ),
         },
         "binding_note": (
@@ -550,14 +657,17 @@ def main():
         ),
         "vgpr_relation_audit": vgpr_relation,
         "vgpr_relation_audit_note": (
-            "Every width in the fit and held-out sets, with its artifact count, rocprof "
-            "count and the prediction between them, so the relation is checkable from this "
-            "file alone. An earlier version named held-out widths in prose that appeared in "
-            "no sweep, which made the claim unauditable; @Reviewer caught it. Note what "
-            "this does and does not establish: it shows the relation holds on all ten "
-            "widths and which set each was in, but the committed artifact cannot by itself "
-            "prove the held-out predictions were made before those widths were measured. "
-            "That ordering rests on the commit history, not on this JSON."
+            "Ten widths with artifact count, granule-8 allocation, rocprof count and the "
+            "prediction between them. The fit/held-out labels are vestigial: they were "
+            "added when the relation was believed to be an empirical law, and a held-out "
+            "set cannot test an identity -- see vgpr_relation_resolution. They are kept "
+            "only because earlier commits and notes refer to them. What these rows DO "
+            "show is the collision -- artifact 226 and 230 both return rocprof 116 -- "
+            "which is asserted by the probe, and which is what rules out a unit "
+            "conversion. Trajectory of this field, since it is the point: it first "
+            "claimed a units explanation, then a held-out-prediction confirmation of it, "
+            "then that a rival hypothesis was better supported. All three were "
+            "unnecessary. One line of algebra was available throughout."
         ),
         "discriminating_sweep": discriminating,
         "boundary_sweep": boundary,

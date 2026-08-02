@@ -945,13 +945,17 @@ throughout) isolates width against the `two_read_one_write` ceiling. Sidecar:
 `AI/data/rmsnorm_fwd_width_cliff.json`, generator
 `AI/probe_rmsnorm_width_cliff.py`.
 
-| N | elems/thread | share of ceiling | working set | timing |
+| N | elems/thread | share of ceiling (**graph**) | working set | timing |
 | --- | --- | --- | --- | --- |
 | 32768 | 128 | 83.1% | 512 MiB | clean |
 | 49152 | 192 | 77.5% | 768 MiB | clean |
 | 57344 | 224 | **37.8%** | 896 MiB | clean |
 | 65536 | 256 | 39.6% | 1024 MiB | clean |
 | 98304 | 384 | 39.2% | 1536 MiB | clean |
+
+(The column is labelled because an unlabelled one caused a defect elsewhere in
+this file — see the occupancy section. These are graph-replay shares; the eager
+column of the same sidecar reads 82.5 / 76.6 / 38.1 / 39.2 / 39.4.)
 
 Flat to 49152, then halves between 49152 and 57344. The step is abrupt, not a
 slope. Every row above is past the MALL, is timed at least 13x above the host
@@ -1376,50 +1380,58 @@ checked against the hardware maximum, and a derived one was not.
 rocprofv3's `MeanOccupancyPerActiveCU`; raw at
 `AI/data/rmsnorm_fwd_measured_occupancy.json`. At the cliff's own m=4096:
 
-| N | vgpr | alloc | computed bound | **measured waves/SIMD** | measured/bound | bandwidth % of ceiling |
-|---|------|-------|----------------|-------------------------|----------------|------------------------|
-| 32768 | 156 | 160 | 3 | 2.775 | 0.93 | -- |
-| 40960 | 226 | 232 | 2 | 1.952 | 0.98 | -- |
-| 49152 | 230 | 232 | 2 | 1.959 | 0.98 | 77.5 |
-| 57344 | 264 | 264 | 1 | **1.000** | 1.00 | 37.8 |
+| N | vgpr | alloc | computed bound | **measured waves/SIMD** | measured/bound | bandwidth % (eager) |
+|---|------|-------|----------------|-------------------------|----------------|---------------------|
+| 32768 | 156 | 160 | 3 | 2.783 | 0.93 | -- |
+| 40960 | 226 | 232 | 2 | 1.962 | 0.98 | -- |
+| 49152 | 230 | 232 | 2 | 1.951 | 0.98 | 76.6 |
+| 57344 | 264 | 264 | 1 | **1.000** | 1.00 | 38.1 |
 | 65536 | 300 | 304 | 1 | **1.000** | 1.00 | 39.2 |
 
-There are now three runs of this sweep: one on device 6 and two on device 5,
+**That bandwidth column used to be three hand-copied literals, and they were
+not one series.** 77.5 and 37.8 were the cliff's *graph* numbers while 39.2 was
+its *eager* one — @Reviewer caught the mix. Nothing read them quantitatively, so
+no conclusion moves, but a three-entry table silently spanning two timing
+regimes is precisely the sort of thing that gets picked up later as if it were
+comparable. The probe now reads the column out of the cliff sidecar and names
+the regime in every row (`bandwidth_regime`), so the mix is no longer possible
+to make. The deeper fault was transcription itself: three numbers copied by hand
+into a constant cannot be checked against anything.
+
+There are now four runs of this sweep: one on device 6 and three on device 5,
 taken while @Reviewer was verifying on device 6. I first summarised the spread
 as "reproduces across GPUs to within 0.6% on its worst row", and @Reviewer
 pointed out that 0.6% covers only the boundary sweep — the discriminating sweep
 at m=16384 has a row that moves 2.0%, more than three times as much. He is
-right, and with a third run the split is sharper than a single number can be:
+right, and the extra runs make a further correction possible:
 
-| sweep | worst cross-device (6 vs 5) | worst same-device (5 vs 5) | which row |
-|---|---|---|---|
-| boundary, m=4096 | 0.57% | 0.88% | N=32768, `registers` |
-| discriminating, m=16384 | 1.96% | 1.38% | N=8192, `hardware_cap` |
-
-**The spread is not a device effect.** The two device-5 runs differ from each
-other about as much as either differs from device 6 — 0.88% vs 0.57% on the
-boundary sweep's worst row, 1.38% vs 1.96% on the discriminating sweep's. What
-the third run shows is run-to-run variance in the counter, so "reproduces across
-GPUs to within 0.6%" was quoting a number that had nothing to do with GPUs. The
-figure is real and the reproduction is real; the attribution was not.
+**The spread is not a device effect.** On the worst row (discriminating,
+N=8192) the three device-5 runs differ *from each other* by 1.81%, against 2.43%
+across all four. Same device, same commit-range, same idle check — most of the
+dispersion is there before any second GPU is involved. So "reproduces across
+GPUs to within 0.6%" was quoting a number that had nothing to do with GPUs. Both
+the figure and the reproduction were real; the attribution was invented, and it
+is the same defect as everything else in this section — a number that agreed
+with a story for a reason other than the one given.
 
 What the spread does track is slack — how far a row sits below its own
-constraint. Taking `measured/bound` against all three constraints:
+constraint:
 
-| row | measured/bound | spread over 3 runs |
+| row | measured/bound | spread over 4 runs |
 |---|---|---|
 | boundary N=57344, 65536 | 1.000 | 0.00% |
-| boundary N=49152 | 0.979 | 0.07% |
-| discriminating N=49152 | 0.985 | 0.46% |
-| boundary N=32768 | 0.925 | 0.89% |
-| discriminating N=32768 | 0.871 | 0.94% |
-| discriminating N=8192 | 0.775 | 2.00% |
+| discriminating N=49152 | 0.986 | 0.46% |
+| boundary N=49152 | 0.976 | 0.45% |
+| boundary N=32768 | 0.928 | 0.89% |
+| discriminating N=32768 | 0.877 | 0.94% |
+| discriminating N=8192 | 0.761 | 2.43% |
 
 Rows pinned against their bound do not move at all; rows with slack move by up
-to 2%. It is not monotone (`N=16384` at ratio 0.796 has only 0.36% spread), so I
-am not claiming a law — but the two tightest rows in the whole set are the two
-cliff rows the conclusion rests on, and they are bit-stable across three runs
-and two devices. That is the part worth having.
+to 2.4%. It is not monotone (`N=16384` at ratio 0.793 spreads only 0.36%), so
+this is a tendency and not a law. The part that matters: **the two cliff rows
+are at ratio 1.000 and are bit-identical across all four runs and both devices**
+— 1.0004 and 1.0003 every time. The conclusion rests on the two most stable rows
+in the set.
 
 **Occupancy does halve at the boundary, and it is now observed rather than
 derived.** The 2 → 1 step falls between 49152 and 57344, the same edge as the
@@ -1545,51 +1557,75 @@ part reads MALL-inflated.
 **Two traps had to be cleared to get this number, and both are worth recording
 because either would have produced a confident wrong answer.**
 
-*rocprofv3 and the compiled artifact disagree about VGPR count.* At N=49152 the
-artifact says 230, rocprof says 116. The relation is
-`rocprof = roundup(ceil(artifact / 2), 4)`, exact on 10 of 10 widths -- and
-five of those (2048/16384/24576/32768/40960) were **held out**: the relation was
-fitted on the other five and predicted these before they were measured.
+*rocprofv3's VGPR column is a lossy function of the artifact's.* At N=49152 the
+artifact says 230, rocprof says 116. The exact relation is
+**`rocprof == vgpr_alloc_wave64 / 2`** — half the *granule-8 rounded
+allocation*, not half the count — on 10 of 10 widths.
 
-**The relation is measured; its explanation is not settled, and the one I
-published first is wrong.** I wrote that the factor of 2 was wave64
-architectural VGPRs against 32-lane physical register-file entries -- a unit
-conversion. @Reviewer proposed instead that it is an incomplete
-ROCProfiler-SDK decode of the gfx950 code object. AGPRs discriminate between
-the two: a unit conversion scales them, a decoding gap drops them. At N=57344
-and N=65536 the artifact reports 8 and 44 AGPRs; rocprof reports
-`Accum_VGPR_Count = 0` for both, where a conversion predicts 4 and 22. Zero is
-a dropped field, not a converted one. His hypothesis is better supported than
-mine, and the sidecar now records rocprof's AGPR column per row so the datum is
-auditable rather than asserted. Worse than being wrong: that datum was on
-screen in an earlier sweep this session and I under-weighted it because it did
-not fit the story I had already written.
+**Getting to that one line took three wrong answers, and the sequence is more
+instructive than the result.**
 
-Blast radius is nil, which is why the cliff stands regardless of who is right:
-`MeanOccupancyPerActiveCU` is a counter, not a register decode; the computed
-bound comes from the artifact (MLIR `gpu.kernel_metadata`, agreeing with the
-msgpack `amdhsa` ELF note); rocprof's `VGPR_Count` only ever entered as a
-cross-check. And vgpr+agpr at 57344/65536 is 272/344, which still gives
-`floor(512/alloc) = 1`.
+1. I wrote the relation as `roundup(ceil(v/2), 4)` and explained it as wave64
+   architectural VGPRs against 32-lane physical register-file entries — a unit
+   difference, neither source wrong. Evidence offered: 10 of 10 widths, five
+   held out.
+2. @Reviewer rejected the units story and proposed an incomplete
+   ROCProfiler-SDK decode of the gfx950 code object. I tested it with AGPRs — a
+   conversion scales them, a decoding gap drops them — found artifact 8 and 44
+   against rocprof's `Accum_VGPR_Count = 0`, and conceded his hypothesis was
+   better supported.
+3. @Autotune pointed out that this was never an empirical question at all.
+   **`roundup(ceil(v/2), 4)` is identically `ceil(v/8)*4` for every integer
+   v.** My formula could not have failed on any width. "10 of 10, five held
+   out" was reporting an *identity* as a confirmed prediction.
 
-The probe asserts the relation on every row and aborts rather than publish if a
-future toolchain breaks it -- as an empirical invariant, not as a unit law. All
-register arithmetic here uses the wave64
-numbers, which is the pair the hardware behaves like: on the three widths where
-the two unit systems predict *different* occupancies (16384/32768/49152 at
-m=16384) the artifact predicts 5/3/2 and rocprof-units predict 8/6/4, against
-measured 3.98/2.63/1.97.
+So the headline defect of this whole file — a check that passes for a reason
+other than the one it documents — appeared again, this time **inside the
+apparatus built to guard against it**. A held-out set is the strongest form of
+evidence I know how to construct, and it is worth exactly nothing against a
+tautology. The thing that would have caught it is not more measurement but one
+line of algebra, available from the first day: *before quoting a relation that
+holds everywhere, check whether it could have failed anywhere.*
 
-All ten widths now appear in the sidecar under `vgpr_relation_audit` with their
-fit/held-out labels. The first version named the held-out widths in prose only,
-and **two of them (2048, 24576) appeared in no sweep at all** -- so the claim
-could not be checked against the committed artifact. That is the same failure
-as quoting "737 passed" without the invocation, and @Reviewer caught it the same
-way. Note the limit of the fix: the JSON establishes that the relation holds on
-all ten and which set each width was in, but it cannot prove the held-out
-predictions were made *before* those widths were measured. That ordering rests
-on the commit history, and the payload says so rather than letting the data
-appear to prove it.
+@Reviewer's mechanism is the correct one: ROCProfiler-SDK 1.1.0 has no gfx950
+accumulator decoder, so gfx950 falls through to `(PGM_RSRC1+1)*4` with
+`Accum_VGPR_Count = 0`, while LLVM encodes the total with granule 8. That
+composition produces the observed numbers exactly.
+
+**The tell that settles it needs no ROCProfiler source at all, and it was in my
+own sidecar the whole time: the map is not injective.** Artifact 226 and 230 are
+two different allocations, and rocprof reports 116 for both:
+
+| rocprof | ← artifact | if it were really v/2 |
+|---|---|---|
+| 12 | 20, 20 | 10, 10 |
+| **116** | **226, 230** | 113, 115 |
+
+A unit conversion is order-preserving and invertible. Quantization is neither.
+@Autotune found this, and the probe now *asserts* the collision rather than
+leaving it to be noticed. The same fact explains why `512 // (2 * rocprof)`
+reproduces the correct bound on all ten rows — `2 * rocprof` **is** the
+allocation, so the cross-check was re-deriving a number the artifact already
+stated. It is retained as a toolchain regression guard and nothing more.
+
+**One nearby claim of mine was double-counting, and it was wrong for a day.**
+I wrote that vgpr+agpr = 272/344 at 57344/65536 "still gives bound 1", treating
+the two artifact fields as additive. @Reviewer flagged that amdhsa
+`.vgpr_count` already includes AGPRs. The rows confirm it independently: at
+N=65536 rocprof reports 152 = `ceil(300/8)*4`; a separate 44 AGPRs would make
+the encoded total 344 and the reading 172. Nothing downstream moves — the bound
+was computed from `vgpr_count` alone throughout, which is the correct total —
+but the reassurance I offered was arithmetic I had not checked.
+
+All register arithmetic here uses the artifact numbers, which is the pair the
+hardware behaves like: on the three widths where the two candidate readings
+predicted *different* occupancies (16384/32768/49152 at m=16384) the artifact
+predicts 5/3/2 and the halved values predict 8/6/4, against measured
+3.98/2.63/1.97.
+
+The `fit`/`held_out` labels survive in `vgpr_relation_audit` only because
+earlier commits refer to them; they have no evidential content, and the sidecar
+now says so in the field itself.
 
 *A register bound is invisible unless it is the binding constraint.* My first
 occupancy reading was taken at m=1024, where the grid supplies only 4
