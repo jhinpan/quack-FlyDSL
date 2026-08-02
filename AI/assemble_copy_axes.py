@@ -56,6 +56,7 @@ Run:  AI/collect_copy_axes.sh   (collects), then
 Writes AI/data/copy_placement_draws/copy_axes_dev5.json.
 """
 
+import hashlib
 import json
 import re
 import subprocess
@@ -83,6 +84,8 @@ HISTORICAL_SIZE_MIB = 2048
 def _load(src_dir):
     runs = defaultdict(list)
     for path in sorted(Path(src_dir).glob("*.json")):
+        if path.name.startswith("_"):
+            continue  # _peak_sweep.json is the staircase sweep, a different schema
         d = json.loads(path.read_text())
         runs[d["peak_live_512mib"]].append(d)
     if not runs:
@@ -348,7 +351,7 @@ def _assert_prose_is_derived(payload):
         )
 
 
-def _staircase(path=Path("/tmp/copyaxes_steps.json")):
+def _staircase(path=REPO / "AI/data/copy_placement_draws/raw_dev5/_peak_sweep.json"):
     """Where the allocator-peak steps are, from the fine sweep, if it was run.
 
     Optional because it costs ~44 processes. When absent the artifact says so
@@ -390,6 +393,48 @@ def _staircase(path=Path("/tmp/copyaxes_steps.json")):
     }
 
 
+def _input_manifest(src_dir, extra):
+    """Hash every input this artifact was built from, plus the code that built it.
+
+    @Reviewer's standing objection to the previous assembler: it validated only
+    that *some* git repository answered, so a forged commit or clean flag would
+    be accepted, and nothing bound the evidence to the raw runs. That applies to
+    this file unchanged, so it is fixed here rather than inherited.
+
+    This does not make the artifact trustworthy on its own -- a manifest proves
+    the assembler saw these bytes, not that the bytes came off a GPU. What it
+    buys is that a reader who still has the raw runs can verify the artifact was
+    built from them, and that a regeneration which silently picks up a different
+    input set stops matching.
+    """
+    entries = []
+    for path in sorted(Path(src_dir).glob("*.json")) + [Path(p) for p in extra if Path(p).exists()]:
+        entries.append(
+            {
+                "path": str(path),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "bytes": path.stat().st_size,
+            }
+        )
+    for rel in ("AI/probe_copy_size_draws.py", "AI/assemble_copy_axes.py"):
+        entries.append(
+            {
+                "path": rel,
+                "sha256": hashlib.sha256((REPO / rel).read_bytes()).hexdigest(),
+                "bytes": (REPO / rel).stat().st_size,
+            }
+        )
+    return {
+        "n_inputs": len(entries),
+        "entries": entries,
+        "what_this_proves": (
+            "the assembler read exactly these bytes. It does not prove they came from "
+            "a GPU, and a manifest cannot: it is a binding between artifact and raw "
+            "runs, not an attestation."
+        ),
+    }
+
+
 def _git():
     def run(*a):
         r = subprocess.run(
@@ -406,7 +451,10 @@ def _git():
 
 
 def main():
-    src = sys.argv[1] if len(sys.argv) > 1 else "/tmp/copyaxes"
+    # Defaults to the committed raw runs, not /tmp: the manifest is only useful if
+    # a reader can fetch the bytes it hashes. Pass a directory to re-assemble from
+    # a fresh collection.
+    src = sys.argv[1] if len(sys.argv) > 1 else str(REPO / "AI/data/copy_placement_draws/raw_dev5")
     runs = _load(src)
     allr = [r for rs in runs.values() for r in rs]
 
@@ -428,6 +476,7 @@ def main():
         "peak_levels_512mib": sorted(runs),
         "generator": "AI/probe_copy_size_draws.py",
         "assembler": "AI/assemble_copy_axes.py",
+        "input_manifest": _input_manifest(src, []),
         **_git(),
         "historical_table": {
             "source": "AI/flydsl_rmsnorm_notes.md:869",

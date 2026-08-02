@@ -12,7 +12,108 @@
   ],
   "generator": "AI/probe_copy_size_draws.py",
   "assembler": "AI/assemble_copy_axes.py",
-  "commit": "9879dda",
+  "input_manifest": {
+    "n_inputs": 19,
+    "entries": [
+      {
+        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/_peak_sweep.json",
+        "sha256": "c511b1e9d18a709f3345d7a84863139737b91e6006d4d315dffd2d4b6e1894c1",
+        "bytes": 6887
+      },
+      {
+        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak0_1.json",
+        "sha256": "9649dae28d4ad39e85eadc73594b5bdef991fb4ec9eff74a12b4cbacf6eba3fc",
+        "bytes": 1902
+      },
+      {
+        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak0_2.json",
+        "sha256": "246c0fb89f2b67c2b2d6f5abbd0d5bc838c33d1282038ad88318676a63c8e33a",
+        "bytes": 1902
+      },
+      {
+        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak0_3.json",
+        "sha256": "6b098cde7d3a12f67c59a879182f5c6316a8c319da0832b0eded6bafd86ce973",
+        "bytes": 1903
+      },
+      {
+        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak0_4.json",
+        "sha256": "496af6c79b73b8d2d87517de1313503b0629c5ee4ecef76481a9e4e7acf5b8b2",
+        "bytes": 1902
+      },
+      {
+        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak14_1.json",
+        "sha256": "0c50a180e3d72575ec005cc1947281bbc070598783b69e5fc648db8a1302a22e",
+        "bytes": 1902
+      },
+      {
+        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak14_2.json",
+        "sha256": "3a44941622c2dcbc5dac2168c55a1eee253995c16e40402aed42e2ee38c6b590",
+        "bytes": 1901
+      },
+      {
+        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak14_3.json",
+        "sha256": "00c7853ae0d7b2ff38980554c319b8fe27e27b3d1b4e532e547e166b4c1a730b",
+        "bytes": 1898
+      },
+      {
+        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak14_4.json",
+        "sha256": "cd6ca2f3ae616d18725795128c17434609850e22ca6f6165083937d489cd7722",
+        "bytes": 1904
+      },
+      {
+        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak20_1.json",
+        "sha256": "465c956a3e8ef8e61726d4abb6505b0b2150a8586bfa6e9cf88d4aa6d344c370",
+        "bytes": 1899
+      },
+      {
+        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak20_2.json",
+        "sha256": "b9f757ca7735b7b4f2eed132757cc69878f9349edb8b26f54d839feac4a6ce22",
+        "bytes": 1897
+      },
+      {
+        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak20_3.json",
+        "sha256": "0d78e4e35cf974c16a14e37367632e8b0c86536e33170e2c2cd0ce449839e2c5",
+        "bytes": 1898
+      },
+      {
+        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak20_4.json",
+        "sha256": "131007f96997da6b8e3d525d4ecef1a7ac66304353a5bf9290e9cea1783d969d",
+        "bytes": 1899
+      },
+      {
+        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak6_1.json",
+        "sha256": "038d183e6e2fecd45bff0a86cbb72094a91e65c47e017be9d199dedc0ac448ea",
+        "bytes": 1895
+      },
+      {
+        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak6_2.json",
+        "sha256": "3ffbc7902a322fe8fe8a8a541789e9a936903fd71389b64611f62af66376d948",
+        "bytes": 1900
+      },
+      {
+        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak6_3.json",
+        "sha256": "99de983667949bea5489b547d865570f1840bfe79f2af47a866e786a22853a42",
+        "bytes": 1902
+      },
+      {
+        "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak6_4.json",
+        "sha256": "0ab2769185d0e56c2ca8116d487a8611026f704da3e511de73b61ccfff4551e0",
+        "bytes": 1903
+      },
+      {
+        "path": "AI/probe_copy_size_draws.py",
+        "sha256": "599da21a0cb5f7218c7ee3dc647987d76fa5087194eecb618b58d4347a984555",
+        "bytes": 11584
+      },
+      {
+        "path": "AI/assemble_copy_axes.py",
+        "sha256": "edbd252d8da64d1bf2cd8fcfe28c52baaec10632cc3c1c301870ac20735fe213",
+        "bytes": 26001
+      }
+    ],
+    "what_this_proves": "the assembler read exactly these bytes. It does not prove they came from a GPU, and a manifest cannot: it is a binding between artifact and raw runs, not an attestation."
+  },
+  "commit": "9899e9d",
   "worktree_dirty": true,
   "historical_table": {
     "source": "AI/flydsl_rmsnorm_notes.md:869",
