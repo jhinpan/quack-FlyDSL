@@ -595,9 +595,19 @@ consistent.
 The measurement explains the gap: that last step was never one stage. It lumped
 `_validate_inputs` together with the reshapes and the absent-tensor
 `torch.empty(0)`s, which is why L3b is separated here. Split apart,
-**`_validate_inputs` alone is 3.55 µs** — consistent with both the old 2.9 and
-the ~3.3 quoted further down — and the wrapper's reshape/alloc work is **5.50
-µs**, the part the old chain dropped from its own arithmetic.
+**`_validate_inputs` alone is 3.55 µs**, and the wrapper's reshape/alloc work is
+**5.50 µs** — the part the old chain dropped from its own arithmetic.
+
+I first wrote that 3.55 was *"consistent with both the old 2.9 and the ~3.3
+quoted further down"*, and that is the same eyeball-the-decimals move this
+section exists to correct. Scaled by the combined round-to-round stdev of the two
+rungs it differs (0.097 µs), 3.55 sits **6.7 stdevs** from 2.9 (+22%) and **2.6
+stdevs** from 3.3 (+7.5%). Neither is agreement. Both older figures came from an
+attribution that lumped validation with the wrapper work, so there is no reason
+to expect them to match a clean split, and dressing the mismatch as consistency
+would have hidden the one thing the split was built to show. **`b41ad16`'s
+successor `362e10a` carries the wrong version in its pushed commit message**,
+which cannot be amended.
 
 **The "roughly 2x kernel advantage" was a ratio taken across a floor, and it is
 K-dependent.** The published figures were 2.11 us for FlyDSL against torch's
