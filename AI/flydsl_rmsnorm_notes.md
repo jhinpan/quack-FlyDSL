@@ -2583,14 +2583,31 @@ literally. The layernorm gap is real: FlyDSL's only `mean` is
 layernorm's mean subtraction -- a grep for "mean" finds it and means nothing.
 
 **What the table has no row for at all, which is where the divergence
-actually lives: the accepted input domain.** N ceiling (8192 vs 262144); N
-alignment (FlyDSL requires a multiple of `N_ALIGNMENT`, cutedsl is tested at
-192, 760, 1128); output dtype (FlyDSL admits fp16/bf16/fp32 only,
-`rmsnorm_flydsl.py:29`, while cutedsl never asserts `out`'s dtype and its map
-includes fp8 and fp4); and architecture (`frozenset({"gfx950"})` at
-`rmsnorm_flydsl.py:33` against sm80-sm120). Ten rows of feature checkboxes
-said nothing about any of it, and a caller hits these before hitting any
-feature.
+actually lives: the accepted input domain.** That much stands. Two of the four
+sub-claims I filed under it do not, both caught by @CrossVendor:
+
+- **N alignment: my evidence proves nothing.** I wrote that FlyDSL requires a
+  multiple of `N_ALIGNMENT` (8) "while cutedsl is tested at 192, 760, 1128."
+  192, 760 and 1128 are all divisible by 8. Every shape I offered as the
+  contrast would pass FlyDSL's check. The restriction is real and unlisted
+  (`quack/flydsl/rmsnorm_config.py:41`, enforced `rmsnorm_flydsl.py:140`), and
+  cutedsl's `vecsize = gcd(N, ...)` (`quack/rmsnorm.py:126`) does look
+  general, but *I have shown no shape that separates them.* A sibling test at
+  N=668 on the same `ReductionBase` would; that is cross-entropy, not rmsnorm,
+  and I have not run it.
+- **Architecture: "sm80-sm120" is my invention.** I read an `arch < Arch.sm_90`
+  fallback branch (`quack/rmsnorm.py:100,650`) and reported the span as
+  supported hardware. The README's actual claim is **H100, B200/B300, or RTX
+  50** (`README.md:27`). A branch existing in source is not a support claim,
+  which is the same substitution as reading a test parameter as an
+  observation, two sections up.
+
+What survives: the N ceiling (a policy cap on one side, measured above; a real
+smem constraint on the other, unverified) and the output dtype domain (FlyDSL
+admits fp16/bf16/fp32 only, `rmsnorm_flydsl.py:29`; cutedsl never asserts
+`out`'s dtype and its map includes fp8 and fp4). Ten rows of feature
+checkboxes said nothing about any of it, and a caller hits these before
+hitting any feature.
 
 Three corrections this forced to text elsewhere in this file. "Nothing in-tree
 consumes layernorm" is false -- `tests/test_layernorm.py` and
