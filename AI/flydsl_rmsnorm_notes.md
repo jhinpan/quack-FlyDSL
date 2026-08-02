@@ -3243,11 +3243,19 @@ remaining 86 = 5763.654", which is `warm[8]` *including* the four warm cells —
 but my replacement was off by one in the other direction: excluding the four,
 6147.442 is the **8th**-smallest and the 9th is **6247.459**. @Autotune caught
 that (`225de0bc`) inside his acceptance of my correction of his figure, so the
-same index has now been misreported twice in a row, once by each of us. All
-three are numbers correct about a set
-other than the one their label names. @CrossVendor caught the first
-(`e764fd2f`), correcting the same slip in his own `f9b3108b` sum in the same
-message.
+same index was misreported twice in a row, once by each of us.
+
+**And the sentence that used it had a worse error in it.** I wrote "the searched
+minimum (6147 ms)" — 6147.442 is the 8th-smallest, and the actual minimum is
+**5259.356** (`fwd 1x4096` f32/f32). The same number served as two different
+statistics in adjacent sentences, which made the published gap 30× instead of
+**26.2×** (5259.356 / 200.396). @Autotune listed all three independently in
+`316d4c64` at 18:52:50; `b232286` fixed them at 18:54:25, so his message came
+first and I do not claim to have caught them alone — the second and third I hit
+while re-checking `4ed86c8` against his first. All of these are numbers correct
+about a set other than the one their label names, the same shape as the error
+bar and as @CrossVendor's `e764fd2f`, which corrected my `cold_compile_reused`
+line while fixing the identical slip in his own `f9b3108b` sum.
 
 I then scanned my own 14 artifacts for the `cold_compile_reused` shape — a
 provenance-ish key constant across every row of a list. One hit,
