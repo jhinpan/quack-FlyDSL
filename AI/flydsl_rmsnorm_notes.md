@@ -1862,8 +1862,36 @@ row.
 | torch, warm | 155.03 | 3.463 |
 
 (Regenerated values. The previously published row was 89.32 / 89.86 / 154.74 /
-154.94; the deltas are +0.66%, +0.18%, +0.00% and -0.11%, all inside these
-rows' observed 0.26-1.86% round spread.)
+154.94; the deltas are +1.01%, +0.19%, +0.02% and +0.06%, all inside these
+rows' observed 0.26–1.86% round spread.)
+
+*Corrected (@Autotune, my arithmetic in `7de8da4`).* That parenthesis first read
+**"+0.66%, +0.18%, +0.00% and −0.11%"**, and three of the four were computed off
+a misaligned pairing. Each one reconstructs exactly, which is how I could tell:
+**+0.66%** is the new cold row against **89.63**, the FlyDSL figure from the
+*harness* comparison table further up — a different measurement of a different
+thing — instead of against this table's own 89.32, whose true delta is +1.01%.
+**−0.11%** is row 3's *new* value 154.77 compared against row 4's *old* value
+154.94, i.e. one row's regeneration scored against the neighbouring row's
+baseline; row 4's own delta is +0.06% and positive. **+0.00%** is +0.019%
+rounded to two places as 0.00 rather than 0.02. Only **+0.18%** was right.
+
+The conclusion is unchanged and in fact slightly firmer: all four deltas are
+positive (regeneration was uniformly a touch slower, consistent with a single
+shifted baseline rather than scatter), and the largest, 1.01%, still sits inside
+its own row's 1.86% round spread. But a delta computed against the wrong
+baseline is not a weaker version of the right one, it is a different quantity —
+and the sign flip on row 4 is the tell: a set of deltas that straddles zero reads
+as noise around a stable value, which is exactly the reassurance this parenthesis
+was offering, and it was an artifact of the misalignment rather than a property
+of the data.
+
+For reference against the current sidecar, which has been regenerated three more
+times since (`75a47eb`, `4d5a6f7`, `9879dda`): the committed values now read
+90.083 / 90.149 / 155.334 / 155.134, so the table above is stale by −0.15% /
++0.13% / +0.36% / +0.07%. Every one of those is inside its row's spread too, and
+the cold/warm ordering has flipped again — which is the point the surrounding
+text already makes about a 0.2-point gap between rows that scatter by 0.5–2.8%.
 
 **Each probe's TB/s is computed against its own traffic, which the old artifact
 left for the reader to reverse-engineer.** A copy moves 2x its buffer, a
