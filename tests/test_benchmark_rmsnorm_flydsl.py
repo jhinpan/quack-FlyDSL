@@ -1802,3 +1802,87 @@ def test_the_enumeration_check_accepts_the_agreement_this_host_actually_has(tmp_
         _hip_torch(), _properties(), _gfx950_node(elsewhere, [])
     )[1]
     assert empty["reason"] == "no_level2_plus_cache"
+
+
+def test_a_packed_field_is_bounded_by_what_is_packed_into_it_not_its_storage(tmp_path):
+    # @Reviewer's packed-location addendum. `location_id` is declared u32 in
+    # kfd_topology.h, so a u32 ceiling looks like the right invariant -- but
+    # the driver writes `pci_dev_id()` into it, which returns u16
+    # (`PCI_DEVID(bus, devfn)` = `(bus << 8) | devfn`, plus `node_id` ORed into
+    # the same low byte on a multi-node GPU). Nothing above bit 15 is ever set.
+    # Read from the driver source on this host, amdgpu-6.16.13
+    # kfd_topology.c:2162 with pci.h:70/686, and confirmed against all 10 live
+    # nodes: zero high bits on every one.
+    #
+    # The extra room is not merely unused, it is exploitable, because this
+    # field is masked before it is compared: 0x17500 is an in-range u32 that
+    # aliases this host's real 0x7500 under `>> 8 & 0xFF`, so it clean-matched
+    # bus 117 device 0 and answered with that node's 256 MiB. A mask cannot
+    # reject what it discards.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    _node(
+        root,
+        2,
+        f"gfx_target_version 90500\ndomain 0\nlocation_id {0x17500}\n",
+        ((3, 262144),),
+    )
+    value, provenance = benchmark._last_level_cache_bytes(
+        _hip_torch(), _properties(uuid_text=None), str(root)
+    )
+    assert value == 4 * 1024**2
+    assert provenance["source"] == "torch_l2_fallback"
+    assert provenance["skipped_nodes"] == ["2:unparseable_properties"]
+
+    # Boundary controls in both directions, so the check is pinned to 16 rather
+    # than to "somewhere between the real values and 2**32". The largest
+    # location_id the packed form can hold must still resolve; the smallest it
+    # cannot must not.
+    for packed, resolves in ((0xFFFF, True), (0x10000, False)):
+        bus, device = (packed >> 8) & 0xFF, (packed >> 3) & 0x1F
+        other = tmp_path / f"nodes_{packed:x}"
+        other.mkdir()
+        _node(
+            other, 2, f"gfx_target_version 90500\ndomain 0\nlocation_id {packed}\n", ((3, 262144),)
+        )
+        got = benchmark._last_level_cache_bytes(
+            _hip_torch(), _properties(uuid_text=None, bus=bus, device=device), str(other)
+        )[1]
+        assert (got["source"] == "kfd_topology") is resolves, packed
+
+
+@pytest.mark.parametrize(
+    "level,size_kb,resolves",
+    [
+        # @Reviewer's blocker 6 against 10d9480: the ceiling tests all used
+        # values at or above the ABI width, so they were passing on the width
+        # check and would have passed with MAX_CACHE_LEVEL and MAX_CACHE_SIZE_KB
+        # deleted entirely. The physical ceilings were argued for in a comment
+        # and guarded by nothing of their own.
+        #
+        # Confirmed by mutation rather than by reading: widening both constants
+        # to `1 << 32` -- which is deleting them as independent bounds, since
+        # the width check then subsumes them -- leaves every pre-existing
+        # ceiling test green (11/11) and fails exactly the two cases below.
+        # That is the difference between a bound being present and a bound
+        # being tested, which is this defect class applied to the test suite:
+        # a check nothing exercises is indistinguishable from a check that is
+        # not there.
+        #
+        # These sit well inside u32, so only the physical bound can reject
+        # them, and they bracket it from both sides.
+        (7, 262144, True),  # deepest level the ceiling admits
+        (8, 262144, False),  # first it does not -- and far below 2**32
+        (3, 16 * 1024 * 1024 - 1, True),  # largest size the ceiling admits
+        (3, 16 * 1024 * 1024, False),  # first it does not
+    ],
+)
+def test_the_physical_ceilings_are_load_bearing_on_their_own(tmp_path, level, size_kb, resolves):
+    root = _gfx950_node(tmp_path, [f"level {level}\nsize {size_kb}\n"])
+    value, provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), root)
+    if resolves:
+        assert provenance["source"] == "kfd_topology"
+        assert value == size_kb * 1024
+    else:
+        assert provenance["source"] == "torch_l2_fallback"
+        assert provenance["skipped_cache_entries"]

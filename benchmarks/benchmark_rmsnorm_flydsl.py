@@ -545,11 +545,18 @@ def _last_level_cache_bytes(
 
         Widths measured on the live topology before tightening, not asserted
         from the header: ``unique_id`` reaches 18206932166487137716 and needs
-        64, while ``gfx_target_version`` (90500), ``domain`` (0),
-        ``location_id`` (62720), ``level`` (3) and ``size`` (262144 KB) all sit
-        far inside 32. Defaulting to 32 and widening only ``unique_id`` is
-        deliberate: a new field added without thought gets the tighter bound
-        and fails loudly, rather than the looser one and passing quietly.
+        64, while ``gfx_target_version`` (90500), ``domain`` (0), ``level`` (3)
+        and ``size`` (262144 KB) all sit far inside 32. Defaulting to 32 and
+        widening only ``unique_id`` is deliberate: a new field added without
+        thought gets the tighter bound and fails loudly, rather than the looser
+        one and passing quietly.
+
+        ``location_id`` is passed 16 at its one call site and is the case that
+        shows why a *storage* width is not automatically an invariant. It is
+        declared u32, but the driver writes ``pci_dev_id()`` into it, which is
+        u16, so the top half is structurally always zero -- and the field is
+        masked before it is compared, which means the extra room is not merely
+        unused, it is exploitable. See the call site.
 
         Every integer KFD publishes here is unsigned, so a negative value is a
         malformed read and not a small one. Parsing alone let three wrong
@@ -658,7 +665,28 @@ def _last_level_cache_bytes(
                 continue
 
             if domain is not None and bus is not None and device is not None:
-                location = _field(props, "location_id")
+                # Bounded by the packed representation, not by the field's
+                # storage width. `location_id` is declared u32 in
+                # kfd_topology.h, but the value written into it is
+                # `pci_dev_id()`, which returns u16 -- `PCI_DEVID(bus, devfn)`
+                # = `(bus << 8) | devfn`. On a multi-node GPU the driver then
+                # ORs in `node_id`, which lands in the same low byte as devfn.
+                # So nothing above bit 15 is ever set, and 16 is the real
+                # ceiling. Read from the driver source on this host
+                # (amdgpu-6.16.13, kfd_topology.c:2162 and pci.h:70/686) rather
+                # than inferred from the values, and confirmed against them:
+                # all 10 live nodes have zero above bit 15.
+                #
+                # A u32 ceiling is too wide to be an invariant here, because
+                # this field is *masked* before it is compared. @Reviewer's
+                # case: `location_id 0x17500` is a perfectly in-range u32 and
+                # aliases the real `0x7500` under `>> 8 & 0xFF`, so it
+                # clean-matched this host's bus 117 device 0 and returned
+                # 256 MiB from whichever node carried it. A mask cannot reject
+                # what it discards, so the bits it discards have to be checked
+                # before it runs -- the same shape as the negative-location_id
+                # aliasing, one bit-range higher.
+                location = _field(props, "location_id", bits=16)
                 node_domain = _field(props, "domain")
                 if location is None or node_domain is None:
                     unparsed_nodes.append(f"{node}:unparseable_properties")
