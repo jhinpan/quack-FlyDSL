@@ -920,23 +920,35 @@ def _unambiguous_layout(tensor: torch.Tensor) -> torch.Tensor:
     search and silently redefines the ABI. Copying does not help: such a tensor
     is already ``is_contiguous()``, so ``.contiguous()`` is the identity.
 
-    Restriding the offending axes is enough and costs nothing. For a size-1
+    Relabelling the offending axes is enough and costs nothing. For a size-1
     axis the stride is unobservable -- there is no second element to step to --
-    so any value describes the same memory, and setting it above the row extent
-    moves it out of the way of the search. ``as_strided`` keeps the same
-    storage, so this is a relabelling rather than a copy.
+    so any value describes the same memory, and any value above the row extent
+    moves it out of the way of the search.
+
+    Dropping the axis and putting it back is what does the relabelling.
+    ``unsqueeze`` derives the reinserted stride as ``size * stride`` of the axis
+    within, which is by construction at least the extent of everything inside
+    it, so the search can no longer land there. An earlier version called
+    ``as_strided(..., tensor.storage_offset())`` instead. That is correct
+    eagerly and breaks under ``fullgraph=True``: ``storage_offset()`` returns a
+    Python scalar, Dynamo cannot keep a non-Tensor from a ``torch.*`` op, and
+    both static and dynamic compiles raised ``Unsupported`` on exactly the
+    singleton this function exists to handle. @Reviewer caught it -- the test I
+    had written omitted ``fullgraph=True`` and graph-broke around the helper,
+    which hid it. ``squeeze``/``unsqueeze`` carry the offset implicitly, so a
+    view into the middle of a storage survives with its offset intact.
     """
-    strides = list(tensor.stride())
     row = tensor.dim() - 1
-    if not any(
-        size == 1 and stride == 1 for size, stride in zip(tensor.shape[:row], strides[:row])
-    ):
+    offenders = [
+        axis for axis in range(row) if tensor.shape[axis] == 1 and tensor.stride(axis) == 1
+    ]
+    if not offenders:
         return tensor
-    extent = max(tensor.shape[row], 1)
-    for axis in range(row):
-        if tensor.shape[axis] == 1 and strides[axis] == 1:
-            strides[axis] = extent
-    return tensor.as_strided(tensor.shape, tuple(strides), tensor.storage_offset())
+    for axis in reversed(offenders):
+        tensor = tensor.squeeze(axis)
+    for axis in offenders:
+        tensor = tensor.unsqueeze(axis)
+    return tensor
 
 
 def _rows_are_disjoint_and_packed(tensor: torch.Tensor) -> bool:

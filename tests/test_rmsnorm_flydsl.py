@@ -1877,19 +1877,63 @@ def test_restriding_a_size_one_axis_preserves_storage_and_values():
     per-head and unsqueezed input.
     """
     torch.manual_seed(0)
+    interior = torch.randn(8192, device="cuda", dtype=torch.bfloat16)
     for tensor in (
         torch.randn((64, 1), device="cuda", dtype=torch.bfloat16).t(),
         torch.randn((4, 64), device="cuda", dtype=torch.bfloat16).unsqueeze(1),
         torch.randn((1, 1, 64), device="cuda", dtype=torch.bfloat16),
+        # A view into the middle of a storage. The relabel must carry the
+        # offset: an earlier version passed storage_offset() to as_strided,
+        # which preserved it but cost fullgraph support.
+        interior.as_strided((1, 64), (1, 1), 128),
     ):
         relabelled = rmsnorm_flydsl_impl._unambiguous_layout(tensor)
         assert relabelled.data_ptr() == tensor.data_ptr(), "must not copy"
+        assert relabelled.storage_offset() == tensor.storage_offset(), "lost the storage offset"
         assert relabelled.shape == tensor.shape
         assert torch.equal(relabelled, tensor), "restriding changed the values"
         unit_axes = [i for i, s in enumerate(relabelled.stride()) if s == 1]
         assert unit_axes and unit_axes[0] == relabelled.dim() - 1, (
             f"first unit-stride axis is {unit_axes} not the row axis; stride={relabelled.stride()}"
         )
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_the_singleton_layout_compiles_with_fullgraph(dynamic):
+    """The relabel must survive ``fullgraph=True``, on the layout it exists for.
+
+    @Reviewer found that my first fix traded one bug for another. It called
+    ``tensor.as_strided(shape, strides, tensor.storage_offset())``, and
+    ``storage_offset()`` returns a Python scalar: Dynamo cannot keep a
+    non-Tensor returned from a ``torch.*`` op, so both static and dynamic
+    ``fullgraph=True`` compiles raised ``Unsupported`` on exactly the
+    ``(1, 64)`` stride ``(1, 1)`` input the helper was added to handle.
+
+    My own singleton test hid it by omitting ``fullgraph=True`` -- without it
+    Dynamo graph-breaks around the helper and falls back to eager, so the test
+    passed while the compiled path was broken. A graph break is not a failure
+    signal, which is what made it invisible. This test pins the requirement
+    rather than the implementation: relabel however, but compile whole.
+    """
+    torch.manual_seed(0)
+    n = 64
+    weight = torch.randn(n, device="cuda", dtype=torch.bfloat16)
+    interior = torch.randn(8192, device="cuda", dtype=torch.bfloat16)
+    cases = {
+        "singleton": torch.randn((n, 1), device="cuda", dtype=torch.bfloat16).t(),
+        "singleton at a nonzero offset": interior.as_strided((1, n), (1, 1), 128),
+        "ordinary": torch.randn((4, n), device="cuda", dtype=torch.bfloat16),
+    }
+    for label, tensor in cases.items():
+        torch._dynamo.reset()
+        rmsnorm_flydsl_impl._FWD_CACHE.clear()
+        rmsnorm_flydsl_impl._BWD_CACHE.clear()
+        function = torch.compile(rmsnorm, fullgraph=True, dynamic=dynamic)
+        try:
+            got = function(tensor, weight)
+        except Exception as error:  # pragma: no cover - the assertion is the report
+            raise AssertionError(f"{label} failed to compile with fullgraph: {error}") from error
+        _assert_close(got, _reference(tensor, weight, 1e-6))
 
 
 def test_broadcast_and_reversed_views_are_copied():
