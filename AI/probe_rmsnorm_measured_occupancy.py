@@ -17,12 +17,24 @@ At N=49152 the artifact says 230 and rocprof says 116. The relation is exact:
 
 on 10 of 10 widths, five of which (2048/16384/24576/32768/40960) were held out
 -- the relation was fitted on the other five and predicted these before they
-were measured. The halving is wave64 architectural VGPRs versus 32-lane
-physical register-file entries; the granule-4 rounding is the allocation unit
-in those units. So the two sources describe the same kernel in different units,
-and the sidecar needs the units named, not the values changed. This probe
-asserts the relation on every row: if a future toolchain breaks it, the probe
-fails instead of quietly publishing two incompatible numbers.
+were measured. This probe asserts the relation on every row: if a future
+toolchain breaks it, the probe fails instead of quietly publishing two
+incompatible numbers.
+
+**The relation is measured; its explanation is not settled.** I first read the
+factor of 2 as wave64 architectural VGPRs versus 32-lane physical register-file
+entries -- a unit difference, with neither source wrong. @Reviewer proposed
+instead that it is an incomplete ROCProfiler-SDK decode of gfx950 code-object
+VGPR/AGPR fields. AGPRs discriminate: a unit conversion scales them, a decoding
+gap drops them. At N=57344 and 65536 the artifact reports 8 and 44 AGPRs, where
+a conversion predicts 4 and 22 -- rocprof reports `Accum_VGPR_Count = 0` for
+both. That favours decoding, and it is evidence I had when I wrote the units
+story and failed to weigh. The column is recorded per row now.
+
+Nothing in this file's conclusions rests on the answer. The occupancy counter is
+not a register decode, the computed bound comes from the artifact, and rocprof's
+VGPR_Count entered only as a cross-check -- which is what the decoding
+hypothesis would void.
 
 All ten widths are emitted under `vgpr_relation_audit` with their fit/held-out
 labels. The first version of this file named the held-out widths only in prose,
@@ -310,6 +322,10 @@ def _sweep(m, ns, tag, hw_cap, num_cus):
         if len(rocprof_vgprs) != 1:
             raise SystemExit(f"N={n}: rocprof reported differing VGPR_Count across repeats")
         rocprof_vgpr = rocprof_vgprs.pop()
+        # Recorded because it discriminates between the two explanations of the
+        # VGPR relation: a unit conversion would scale AGPRs too, a decoding gap
+        # drops them. See vgpr_relation_hypotheses in the payload.
+        rocprof_agpr = int(chunk[0].get("Accum_VGPR_Count", -1))
         workgroup = int(chunk[0]["Workgroup_Size"])
         grid = int(chunk[0]["Grid_Size"])
 
@@ -344,6 +360,7 @@ def _sweep(m, ns, tag, hw_cap, num_cus):
                 "artifact_sgpr_count": art["sgpr_count"],
                 "artifact_agpr_count": art["agpr_count"],
                 "rocprof_vgpr_count": rocprof_vgpr,
+                "rocprof_accum_vgpr_count": rocprof_agpr,
                 "rocprof_vgpr_predicted_from_artifact": predicted,
                 "vgpr_alloc_wave64": alloc,
                 "waves_per_simd_register_limited": register_limited,
@@ -485,15 +502,43 @@ def main():
         "max_waves_per_simd_hw": hw_cap,
         "compute_units": num_cus,
         "simds_per_cu": SIMDS_PER_CU,
-        "vgpr_units_note": (
-            "rocprof's VGPR_Count and the artifact's vgpr_count are the same kernel in "
-            "different units: rocprof_vgpr = roundup(ceil(artifact_vgpr / 2), 4), exact on "
-            "10 of 10 widths. Five of those (2048/16384/24576/32768/40960) were held out -- "
-            "the relation was fitted on the other five and predicted these before they were "
-            "measured. The factor of 2 is wave64 architectural VGPRs vs 32-lane physical "
-            "register-file entries. Neither source was wrong; the sidecar was missing the "
-            "units. All register arithmetic here uses the artifact (wave64) numbers."
+        "vgpr_relation": (
+            "rocprof_vgpr = roundup(ceil(artifact_vgpr / 2), 4), exact on 10 of 10 widths. "
+            "Five (2048/16384/24576/32768/40960) were held out; see vgpr_relation_audit. "
+            "The RELATION is measured. Its EXPLANATION is not settled -- see "
+            "vgpr_relation_hypotheses. All register arithmetic here uses the artifact "
+            "numbers, which are the ones the measured occupancy behaves like, so nothing "
+            "in this file's conclusions depends on which explanation is right."
         ),
+        "vgpr_relation_hypotheses": {
+            "units": (
+                "REJECTED as the sole explanation. I first read the factor of 2 as wave64 "
+                "architectural VGPRs vs 32-lane physical register-file entries."
+            ),
+            "decoding": (
+                "BETTER SUPPORTED. @Reviewer proposed that this is instead an incomplete "
+                "ROCProfiler-SDK decode of gfx950 code-object VGPR/AGPR fields, and he is "
+                "doing the source-level verification."
+            ),
+            "discriminating_evidence": (
+                "AGPRs. A unit conversion would scale them like VGPRs; a decoding gap drops "
+                "them. At N=57344 and 65536 the artifact reports agpr_count 8 and 44, where "
+                "a conversion predicts 4 and 22 -- rocprof reports Accum_VGPR_Count = 0 for "
+                "both. Zero is a dropped field, not a converted one. This datum was "
+                "available when the units story was written and I did not weigh it; the "
+                "column is now recorded per row so the question is auditable here."
+            ),
+            "blast_radius": (
+                "None of the occupancy conclusions move. MeanOccupancyPerActiveCU is a "
+                "counter, not a register decode; the computed bound comes from the artifact "
+                "(MLIR gpu.kernel_metadata, agreeing with the msgpack amdhsa ELF note); and "
+                "rocprof's VGPR_Count entered only as a cross-check. What is void if the "
+                "decoding hypothesis holds is that cross-check and my explanation of it. "
+                "Note also that if AGPRs are real and share the register file on gfx950, "
+                "vgpr+agpr at 57344/65536 is 272/344, which still gives floor(512/alloc) = 1 "
+                "-- the same bound, so the 2 -> 1 step is unaffected either way."
+            ),
+        },
         "binding_note": (
             "A register bound can only be observed where it is the smaller constraint. "
             "grid_supply_waves_per_simd = (grid_size / 64) / (CUs * 4) is how many waves the "

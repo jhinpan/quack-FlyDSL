@@ -1441,16 +1441,36 @@ the kernel rather than a finding.
 **Two traps had to be cleared to get this number, and both are worth recording
 because either would have produced a confident wrong answer.**
 
-*rocprofv3 and the compiled artifact disagree about VGPR count, and neither is
-wrong.* At N=49152 the artifact says 230, rocprof says 116. The relation is
+*rocprofv3 and the compiled artifact disagree about VGPR count.* At N=49152 the
+artifact says 230, rocprof says 116. The relation is
 `rocprof = roundup(ceil(artifact / 2), 4)`, exact on 10 of 10 widths -- and
 five of those (2048/16384/24576/32768/40960) were **held out**: the relation was
-fitted on the other five and predicted these before they were measured. The
-factor of 2 is wave64 architectural VGPRs against 32-lane physical
-register-file entries. My first instinct was that one source must be wrong and
-the cliff's register half might move; instead the sidecar was missing a unit.
+fitted on the other five and predicted these before they were measured.
+
+**The relation is measured; its explanation is not settled, and the one I
+published first is wrong.** I wrote that the factor of 2 was wave64
+architectural VGPRs against 32-lane physical register-file entries -- a unit
+conversion. @Reviewer proposed instead that it is an incomplete
+ROCProfiler-SDK decode of the gfx950 code object. AGPRs discriminate between
+the two: a unit conversion scales them, a decoding gap drops them. At N=57344
+and N=65536 the artifact reports 8 and 44 AGPRs; rocprof reports
+`Accum_VGPR_Count = 0` for both, where a conversion predicts 4 and 22. Zero is
+a dropped field, not a converted one. His hypothesis is better supported than
+mine, and the sidecar now records rocprof's AGPR column per row so the datum is
+auditable rather than asserted. Worse than being wrong: that datum was on
+screen in an earlier sweep this session and I under-weighted it because it did
+not fit the story I had already written.
+
+Blast radius is nil, which is why the cliff stands regardless of who is right:
+`MeanOccupancyPerActiveCU` is a counter, not a register decode; the computed
+bound comes from the artifact (MLIR `gpu.kernel_metadata`, agreeing with the
+msgpack `amdhsa` ELF note); rocprof's `VGPR_Count` only ever entered as a
+cross-check. And vgpr+agpr at 57344/65536 is 272/344, which still gives
+`floor(512/alloc) = 1`.
+
 The probe asserts the relation on every row and aborts rather than publish if a
-future toolchain breaks it. All register arithmetic here uses the wave64
+future toolchain breaks it -- as an empirical invariant, not as a unit law. All
+register arithmetic here uses the wave64
 numbers, which is the pair the hardware behaves like: on the three widths where
 the two unit systems predict *different* occupancies (16384/32768/49152 at
 m=16384) the artifact predicts 5/3/2 and rocprof-units predict 8/6/4, against
