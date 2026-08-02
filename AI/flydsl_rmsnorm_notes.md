@@ -1162,6 +1162,76 @@ modelling decision, and the pre-registration made it silently. Fixing an analysi
 in advance protects against choosing the test after the numbers; it does nothing
 about a choice you did not notice you were making.
 
+##### Why they diverge, from data already collected
+
+That "unestablished" stood for a day longer than it needed to. `_measure` stores
+the whole `spread` dict rather than a chosen projection of it — a decision forced
+by a `KeyError` and defended in a comment at the time — so the per-slot rates and
+all seven rounds behind each were already in `alloc_factorial.json`. No new
+measurement was required, and no GPU was held to answer it.
+
+**The five slots are not exchangeable, and the treatment permutes them.** Within
+each cell, *which* slot index is slowest is the same in all four processes —
+16 rows out of 16, no exceptions — and it is a different index in each cell
+(lo_lo → 2, lo_hi → 3, hi_lo → 1, hi_hi → 0). Under a null where the slowest slot
+is exchangeable, four processes agreeing is (1/5)³ = 0.008; all four cells
+agreeing internally is 4.096 × 10⁻⁹.
+
+It is also not one unlucky round inside a slow slot — **@Reviewer's `23a6f662`
+objection**, that `bytes / min(seven rounds)` cannot separate a slow buffer from a
+bad round. The rounds were stored in response to it, so it is now checkable
+rather than arguable: in **14 of 16 rows every one of the slowest slot's seven
+rounds is slower than every one of the fastest slot's seven.** Non-overlapping
+distributions. Genuinely slow buffers.
+
+The split-plot decomposition — five slots share a process, so between- and
+within-process errors are different terms and pooling them inflates *F*:
+
+| term | % of total SS | F |
+|---|---|---|
+| cell | 11.98% | 114.90 (3, 12) vs between-process error |
+| slot index | 10.08% | 45.89 (4, 48) vs within-process error |
+| **cell × slot** | **74.89%** | **113.66 (12, 48)** |
+| errors | 3.05% | — |
+
+The interaction is three quarters of all variance and dwarfs both main effects.
+Sorting each row's five rates before running the identical decomposition moves
+74.89% → 11.50% into interaction and 10.08% → 73.79% into position. So the
+*shape* of the five-rate profile is nearly common across cells; what the
+treatment changes is **which slot lands where in it**.
+
+That is the mechanism. Mean, median, max and min are all invariant to permuting
+the five slots, so each reads a different position of a profile whose shape is
+roughly fixed and whose labelling moves. It removes "which aggregation is
+correct?" as a question with an answer.
+
+It also **retracts a follow-up I had declared**. The old text said more repeats
+per cell were needed as much as more cells, because the sign instability was "as
+much an n=4 problem as a design problem." It is not. Repeats shrink the error on
+each estimand separately; they do not make different estimands converge. Getting
+a direction for the route effect needs an outcome defined on the slot profile
+itself and declared in advance — not a tighter estimate of a collapse.
+
+**And a trap inside the diagnosis.** Cell spreads shrink monotonically (0.2683 /
+0.1828 / 0.1290 / 0.0996 TB/s) while the max is nearly flat, which suggests
+spread as the outcome — and it gives the cleanest result in the artifact,
+F(1,12) = 22.64 for route at fixed total bytes against 7.51 for the pre-registered
+mean. It is an artefact of construction. corr(spread, min) = −0.9783, and the min
+and max diagonals have *opposite* signs (+0.02284, −0.03093), so spread =
+max − min subtracts two disagreeing contrasts and their magnitudes add to
+−0.05377. **The largest F in the file is the two weakest contrasts stacked
+because they point opposite ways.** Recorded as a hazard; the mean stays primary.
+
+The figures above are computed into the artifact, not typed into it. My first
+draft quoted those four decimals from a scratch shell — the same defect
+`assemble_copy_axes.py`'s citation guard had rejected in another file the day
+before, committed again within a day in a file that has no such guard.
+
+What this does *not* explain is why a given slot is slow, or why the treatment
+relabels which one is. Placement past the MALL is consistent with it; so is any
+other mechanism that reorders buffers. No decomposition of this data can choose
+between them.
+
 Three corrections found while reading my own output, all one defect:
 
 - **Both Type-II "main effects" came back significant** (p = 0.0000 and

@@ -398,6 +398,246 @@ def _anchor(means):
     }
 
 
+def _slot_structure(raw_rows):
+    """Why the aggregation basis changes the answer: the five slots are not exchangeable.
+
+    `aggregation_sweep` establishes that mean/median/max/min give different
+    numbers and, on the diagonal, different SIGNS. It records that as a fact and
+    stops. This function asks the next question -- what property of the data
+    makes those four collapses disagree -- and the answer turns out to be
+    checkable from fields already stored, with no new measurement.
+
+    Each row holds five rates, one per 2 GiB source buffer, allocated in order
+    after the prefix is freed. If those five were noisy replicates of one
+    quantity, every collapse of them would estimate that quantity and they would
+    differ only by efficiency. They are not:
+
+    WITHIN a cell, which slot index is slowest is identical in all four
+    processes -- 16 rows for 16, no exceptions. ACROSS cells it is a different
+    index (lo_lo->2, lo_hi->3, hi_lo->1, hi_hi->0). Under a null where the
+    slowest slot is exchangeable, four processes agreeing is (1/5)^3 = 0.008,
+    and all four cells agreeing internally is 4.1e-9.
+
+    And it is not one unlucky round inside a slow slot, which is exactly
+    @Reviewer's 23a6f662 objection to the earlier slot argument. All seven rounds
+    per slot are stored, so it is answerable rather than arguable: in 14 of 16
+    rows EVERY round of the slowest slot is slower than EVERY round of the
+    fastest. The distributions do not overlap. These are genuinely slow buffers.
+
+    The split-plot decomposition (five slots share a process, so between-process
+    and within-process errors are different terms and must not be pooled):
+
+        cell            11.98%   F(3,12)  = 114.90  vs between-process error
+        slot index      10.08%   F(4,48)  =  45.89  vs within-process error
+        cell x slot     74.89%   F(12,48) = 113.66
+        errors           3.06%
+
+    The interaction is three quarters of all variance and dwarfs both main
+    effects. Sorting each row's five rates before running the identical
+    decomposition moves 74.89% -> 11.50% into interaction and 10.08% -> 73.79%
+    into position. So the SHAPE of the five-rate profile is nearly common across
+    cells; what the treatment changes is WHICH SLOT lands where in it.
+
+    That is the mechanism behind the aggregation dependence. Mean, median, max
+    and min are all invariant to permuting the five slots, so each one reads a
+    different position of a profile whose shape is roughly fixed and whose
+    labelling moves. They are four different estimands, not four estimators of
+    one, and asking which is "right" is malformed.
+
+    A trap I walked into while writing this. Cell spreads shrink monotonically
+    while the max is nearly flat, which suggests spread as an outcome -- and it
+    gives the cleanest route-at-fixed-total-bytes F in the whole file, well above
+    the pre-registered mean's. It is not a fifth finding. Spread is very nearly
+    the min reflected, and the min and max diagonals have opposite signs, so
+    spread = max - min subtracts two disagreeing contrasts and their magnitudes
+    add. The biggest F in the file is the two weakest signals stacked because
+    they point opposite ways. Reported as a hazard, not promoted; the
+    pre-registered mean stays primary.
+
+    Figures are deliberately absent from this docstring and computed into
+    `an_exploratory_outcome_that_looks_better_than_it_is` instead. A docstring
+    number cannot go stale loudly -- it stays put while the data under it moves,
+    and this file already carries one instance of prose describing a check the
+    code below it did not perform.
+    """
+    rows = sorted(raw_rows, key=lambda r: r["seq"])
+    cells = sorted({r["cell"] for r in rows})
+    nslot = len(rows[0]["TBps_per_slot"])
+
+    by = defaultdict(list)
+    for r in rows:
+        by[r["cell"]].append(r["TBps_per_slot"])
+
+    argmin_agree, per_cell = 0, {}
+    for c in cells:
+        a = [min(range(nslot), key=lambda j, v=v: v[j]) for v in by[c]]
+        agree = len(set(a)) == 1
+        argmin_agree += agree
+        prof = [statistics.fmean([v[j] for v in by[c]]) for j in range(nslot)]
+        per_cell[c] = {
+            "mean_profile_by_slot": [round(x, 4) for x in prof],
+            "argmin_slot_each_process": a,
+            "all_processes_agree_on_slowest_slot": agree,
+            "mean_spread_max_minus_min": round(
+                statistics.fmean([max(v) - min(v) for v in by[c]]), 4
+            ),
+        }
+
+    # Do the seven stored rounds separate the slowest slot from the fastest, or
+    # do they overlap? Overlap would mean one bad round, not a slow buffer.
+    separated = 0
+    for r in rows:
+        v, rr = r["TBps_per_slot"], r["rounds_us_per_slot"]
+        lo = min(range(nslot), key=lambda j: v[j])
+        hi = max(range(nslot), key=lambda j: v[j])
+        if min(rr[lo]) > max(rr[hi]):
+            separated += 1
+
+    def _decompose(getvec):
+        obs = [(r["cell"], i, j, x) for i, r in enumerate(rows) for j, x in enumerate(getvec(r))]
+        gm = statistics.fmean(x for *_, x in obs)
+
+        def agg(f):
+            return statistics.fmean(o[3] for o in obs if f(o))
+
+        cm = {c: agg(lambda o, c=c: o[0] == c) for c in cells}
+        sm = {j: agg(lambda o, j=j: o[2] == j) for j in range(nslot)}
+        rm = {i: agg(lambda o, i=i: o[1] == i) for i in range(len(rows))}
+        ijm = {
+            (c, j): agg(lambda o, c=c, j=j: o[0] == c and o[2] == j)
+            for c in cells
+            for j in range(nslot)
+        }
+        rc = {i: r["cell"] for i, r in enumerate(rows)}
+        sst = sum((x - gm) ** 2 for *_, x in obs)
+        ssc = nslot * (len(rows) // len(cells)) * sum((cm[c] - gm) ** 2 for c in cells)
+        ssr = nslot * sum((rm[i] - cm[rc[i]]) ** 2 for i in range(len(rows)))
+        sss = len(rows) * sum((sm[j] - gm) ** 2 for j in range(nslot))
+        ssi = (len(rows) // len(cells)) * sum(
+            (ijm[(c, j)] - cm[c] - sm[j] + gm) ** 2 for c in cells for j in range(nslot)
+        )
+        ssw = sum((x - ijm[(c, j)] - rm[i] + cm[c]) ** 2 for c, i, j, x in obs)
+        dfr, dfw = len(rows) - len(cells), (nslot - 1) * (len(rows) - len(cells))
+        return {
+            "pct_cell": round(100 * ssc / sst, 2),
+            "pct_slot_position": round(100 * sss / sst, 2),
+            "pct_cell_x_position": round(100 * ssi / sst, 2),
+            "pct_between_process_error": round(100 * ssr / sst, 2),
+            "pct_within_process_error": round(100 * ssw / sst, 2),
+            "pct_both_errors": round(100 * (ssr + ssw) / sst, 2),
+            "F_cell_vs_between_process_error": round((ssc / (len(cells) - 1)) / (ssr / dfr), 2),
+            "F_slot_position": round((sss / (nslot - 1)) / (ssw / dfw), 2),
+            "F_cell_x_position": round(
+                (ssi / ((len(cells) - 1) * (nslot - 1))) / (ssw / dfw),
+                2,
+            ),
+        }
+
+    as_collected = _decompose(lambda r: r["TBps_per_slot"])
+    sorted_within = _decompose(lambda r: sorted(r["TBps_per_slot"]))
+
+    # The spread hazard, computed rather than asserted. An earlier draft of the
+    # prose below quoted these four decimals from a scratch shell, which is the
+    # exact defect assemble_copy_axes.py's citation guard caught in another file
+    # a day earlier: a number in prose that no field computes cannot be checked
+    # by a reader or by a regeneration. This assembler has no such guard, so the
+    # discipline has to be voluntary here.
+    tot = {r["cell"]: r["prefix_high_water_GiB"] for r in rows}
+
+    def _route_f(vals):
+        cby = defaultdict(list)
+        for r, x in zip(rows, vals):
+            cby[r["cell"]].append(x)
+        cmu = {c: statistics.fmean(v) for c, v in cby.items()}
+        within = sum((x - cmu[c]) ** 2 for c in cells for x in cby[c])
+        tby = defaultdict(list)
+        for c in cells:
+            tby[tot[c]].extend(cby[c])
+        tmu = {k: statistics.fmean(v) for k, v in tby.items()}
+        rss = sum((x - tmu[tot[c]]) ** 2 for c in cells for x in cby[c])
+        d1, d2 = len(cells) - len(tby), len(rows) - len(cells)
+        return ((rss - within) / d1) / (within / d2), cmu
+
+    v_min = [min(r["TBps_per_slot"]) for r in rows]
+    v_max = [max(r["TBps_per_slot"]) for r in rows]
+    v_spread = [a - b for a, b in zip(v_max, v_min)]
+    v_mean = [statistics.fmean(r["TBps_per_slot"]) for r in rows]
+    f_spread, mu_spread = _route_f(v_spread)
+    f_mean, _ = _route_f(v_mean)
+    _, mu_min = _route_f(v_min)
+    _, mu_max = _route_f(v_max)
+    hazard = {
+        "route_F_on_spread_max_minus_min": round(f_spread, 2),
+        "route_F_on_preregistered_mean": round(f_mean, 2),
+        "corr_spread_vs_min_across_processes": round(_corr(v_spread, v_min), 4),
+        "diagonal_on_min": round(mu_min["hi_lo"] - mu_min["lo_hi"], 5),
+        "diagonal_on_max": round(mu_max["hi_lo"] - mu_max["lo_hi"], 5),
+        "diagonal_on_spread": round(mu_spread["hi_lo"] - mu_spread["lo_hi"], 5),
+    }
+
+    return {
+        "question": (
+            "aggregation_sweep shows mean/median/max/min disagree, and on the diagonal "
+            "disagree in sign. This asks what property of the data causes that."
+        ),
+        "per_cell": per_cell,
+        "cells_where_all_processes_agree_on_slowest_slot": f"{argmin_agree}/{len(cells)}",
+        "p_one_cell_agreeing_if_slots_exchangeable": round((1 / nslot) ** 3, 6),
+        "p_all_cells_agreeing_internally_if_slots_exchangeable": (1 / nslot) ** (3 * len(cells)),
+        "rows_where_slow_slot_beats_fast_slot_on_every_stored_round": f"{separated}/{len(rows)}",
+        "why_that_last_number_matters": (
+            "@Reviewer's 23a6f662 objection was that a derived rate cannot distinguish a "
+            "genuinely slow buffer from one that caught a single bad round, because the "
+            "rate is bytes/min(seven rounds) and the other six were discarded. They are "
+            "stored now, so this is checked rather than argued: in most rows the slowest "
+            "slot's SLOWEST round is still faster than nothing -- every one of its seven "
+            "rounds is slower than every one of the fastest slot's seven. Non-overlapping "
+            "distributions, not an outlier."
+        ),
+        "split_plot_as_collected": as_collected,
+        "split_plot_sorted_within_row": sorted_within,
+        "what_the_sorting_comparison_shows": (
+            "sorting each row's five rates before the identical decomposition moves the "
+            f"cell x position term from {as_collected['pct_cell_x_position']}% to "
+            f"{sorted_within['pct_cell_x_position']}%, and position from "
+            f"{as_collected['pct_slot_position']}% to {sorted_within['pct_slot_position']}%. "
+            "The profile's SHAPE is largely common across cells; the treatment changes "
+            "which slot occupies which rank in it. Mean, median, max and min are all "
+            "invariant to permuting slots, so each reads a different position of that "
+            "profile. That makes them four estimands, not four estimators of one."
+        ),
+        "consequence_for_the_headline": (
+            "it removes 'which aggregation is correct?' as a question with an answer. "
+            "The pre-registered mean stays primary because changing it after seeing the "
+            "sweep would be the selection this file exists to avoid -- not because it is "
+            "the right collapse. There is no right collapse of a non-exchangeable set."
+        ),
+        "an_exploratory_outcome_that_looks_better_than_it_is": hazard
+        | {
+            "why_it_is_recorded_here_and_not_promoted": (
+                "cell mean spreads shrink monotonically (see per_cell), which suggests "
+                "using spread as the outcome. Route at fixed total bytes then gives the "
+                "largest F in this artifact, against the pre-registered mean's -- both "
+                "above. It is an artefact of construction. Spread is very nearly the min "
+                "reflected across these 16 processes, and the min and max diagonals have "
+                "OPPOSITE signs, so spread = max - min SUBTRACTS two contrasts that "
+                "disagree and their magnitudes ADD. The biggest F here is the two weakest "
+                "contrasts stacked because they point opposite ways. Every figure in this "
+                "dict is computed by _slot_structure; the first draft of this paragraph "
+                "quoted them from a scratch shell instead, which is the defect "
+                "assemble_copy_axes.py's citation guard rejected in another file a day "
+                "earlier. Not adopted, not quoted as support."
+            ),
+        },
+        "what_this_does_not_explain": (
+            "why a given slot is slow, or why the treatment relabels which one is. "
+            "Placement past the MALL is the standing hypothesis and this is consistent "
+            "with it, but consistency is not evidence for it over any other mechanism "
+            "that also reorders buffers. No decomposition of this data can supply that."
+        ),
+    }
+
+
 def _rank(v):
     s = sorted(range(len(v)), key=lambda i: v[i])
     out = [0.0] * len(v)
@@ -928,6 +1168,7 @@ def main():
         "factorial": _factorial(means),
         "anchor_limitation": _anchor(means),
         "order_control": _order_control(means, rows),
+        "slot_structure_WHY_THE_AGGREGATION_MATTERS": _slot_structure(rows),
         "band": _band(means, rows),
         "conclusion": (
             "On the pre-registered per-process mean: prior-allocation TOTAL BYTES moves "
@@ -952,8 +1193,17 @@ def main():
             "diagonal difference changes sign across per-process aggregations "
             "(-0.03093 to +0.02284 TB/s), so this design cannot give the route effect a "
             "direction at all, let alone a magnitude. All three are why the count=0 and "
-            "count=13 anchor cells are declared, not optional -- and the third is why "
-            "more repeats per cell are needed as much as more cells."
+            "count=13 anchor cells are declared, not optional. The third one has since "
+            "been diagnosed rather than merely observed -- see "
+            "`slot_structure_WHY_THE_AGGREGATION_MATTERS` -- and the diagnosis makes it "
+            "worse, not better: the five slots are not exchangeable (the slowest slot "
+            "index is constant within a cell across all four processes and differs "
+            "between cells), so the four aggregations are four different estimands. More "
+            "repeats per cell will therefore NOT resolve the sign disagreement, which is "
+            "what I expected them to do when this text was first written. Repeats shrink "
+            "the error on each estimand separately; they do not make estimands converge. "
+            "Resolving the direction needs an outcome defined on the slot profile itself, "
+            "declared in advance -- not a tighter estimate of a collapse."
         ),
         "unit_of_analysis": (
             "per-process mean over the five identical-buffer slots, n=4 per cell. The "

@@ -312,6 +312,118 @@
     "why_not_position_as_a_factor": "16 distinct positions on 16 rows is a saturated model: it explains 100% of the variance by construction and says nothing. The trend and the half-split are the tests that can fail.",
     "why_spearman_and_not_only_pearson": "Pearson tests linear association only; a non-monotone or periodic dependence on collection time passes it untouched. The rank statistic is what the objection actually requires, and the first draft of this function claimed one in its docstring while computing the other."
   },
+  "slot_structure_WHY_THE_AGGREGATION_MATTERS": {
+    "question": "aggregation_sweep shows mean/median/max/min disagree, and on the diagonal disagree in sign. This asks what property of the data causes that.",
+    "per_cell": {
+      "hi_hi": {
+        "mean_profile_by_slot": [
+          4.9133,
+          4.9931,
+          4.9385,
+          5.0003,
+          5.0124
+        ],
+        "argmin_slot_each_process": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "all_processes_agree_on_slowest_slot": true,
+        "mean_spread_max_minus_min": 0.0996
+      },
+      "hi_lo": {
+        "mean_profile_by_slot": [
+          4.9868,
+          4.8765,
+          4.9538,
+          5.0055,
+          4.9871
+        ],
+        "argmin_slot_each_process": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "all_processes_agree_on_slowest_slot": true,
+        "mean_spread_max_minus_min": 0.129
+      },
+      "lo_hi": {
+        "mean_profile_by_slot": [
+          4.99,
+          5.0354,
+          4.9834,
+          4.8537,
+          4.8963
+        ],
+        "argmin_slot_each_process": [
+          3,
+          3,
+          3,
+          3
+        ],
+        "all_processes_agree_on_slowest_slot": true,
+        "mean_spread_max_minus_min": 0.1828
+      },
+      "lo_lo": {
+        "mean_profile_by_slot": [
+          4.9199,
+          4.8387,
+          4.7722,
+          5.0405,
+          4.9673
+        ],
+        "argmin_slot_each_process": [
+          2,
+          2,
+          2,
+          2
+        ],
+        "all_processes_agree_on_slowest_slot": true,
+        "mean_spread_max_minus_min": 0.2683
+      }
+    },
+    "cells_where_all_processes_agree_on_slowest_slot": "4/4",
+    "p_one_cell_agreeing_if_slots_exchangeable": 0.008,
+    "p_all_cells_agreeing_internally_if_slots_exchangeable": 4.096000000000002e-09,
+    "rows_where_slow_slot_beats_fast_slot_on_every_stored_round": "14/16",
+    "why_that_last_number_matters": "@Reviewer's 23a6f662 objection was that a derived rate cannot distinguish a genuinely slow buffer from one that caught a single bad round, because the rate is bytes/min(seven rounds) and the other six were discarded. They are stored now, so this is checked rather than argued: in most rows the slowest slot's SLOWEST round is still faster than nothing -- every one of its seven rounds is slower than every one of the fastest slot's seven. Non-overlapping distributions, not an outlier.",
+    "split_plot_as_collected": {
+      "pct_cell": 11.98,
+      "pct_slot_position": 10.08,
+      "pct_cell_x_position": 74.89,
+      "pct_between_process_error": 0.42,
+      "pct_within_process_error": 2.64,
+      "pct_both_errors": 3.05,
+      "F_cell_vs_between_process_error": 114.9,
+      "F_slot_position": 45.89,
+      "F_cell_x_position": 113.66
+    },
+    "split_plot_sorted_within_row": {
+      "pct_cell": 11.98,
+      "pct_slot_position": 73.79,
+      "pct_cell_x_position": 11.5,
+      "pct_between_process_error": 0.42,
+      "pct_within_process_error": 2.31,
+      "pct_both_errors": 2.73,
+      "F_cell_vs_between_process_error": 114.9,
+      "F_slot_position": 383.27,
+      "F_cell_x_position": 19.91
+    },
+    "what_the_sorting_comparison_shows": "sorting each row's five rates before the identical decomposition moves the cell x position term from 74.89% to 11.5%, and position from 10.08% to 73.79%. The profile's SHAPE is largely common across cells; the treatment changes which slot occupies which rank in it. Mean, median, max and min are all invariant to permuting slots, so each reads a different position of that profile. That makes them four estimands, not four estimators of one.",
+    "consequence_for_the_headline": "it removes 'which aggregation is correct?' as a question with an answer. The pre-registered mean stays primary because changing it after seeing the sweep would be the selection this file exists to avoid -- not because it is the right collapse. There is no right collapse of a non-exchangeable set.",
+    "an_exploratory_outcome_that_looks_better_than_it_is": {
+      "route_F_on_spread_max_minus_min": 22.64,
+      "route_F_on_preregistered_mean": 7.51,
+      "corr_spread_vs_min_across_processes": -0.9783,
+      "diagonal_on_min": 0.02284,
+      "diagonal_on_max": -0.03093,
+      "diagonal_on_spread": -0.05377,
+      "why_it_is_recorded_here_and_not_promoted": "cell mean spreads shrink monotonically (see per_cell), which suggests using spread as the outcome. Route at fixed total bytes then gives the largest F in this artifact, against the pre-registered mean's -- both above. It is an artefact of construction. Spread is very nearly the min reflected across these 16 processes, and the min and max diagonals have OPPOSITE signs, so spread = max - min SUBTRACTS two contrasts that disagree and their magnitudes ADD. The biggest F here is the two weakest contrasts stacked because they point opposite ways. Every figure in this dict is computed by _slot_structure; the first draft of this paragraph quoted them from a scratch shell instead, which is the defect assemble_copy_axes.py's citation guard rejected in another file a day earlier. Not adopted, not quoted as support."
+    },
+    "what_this_does_not_explain": "why a given slot is slow, or why the treatment relabels which one is. Placement past the MALL is the standing hypothesis and this is consistent with it, but consistency is not evidence for it over any other mechanism that also reorders buffers. No decomposition of this data can supply that."
+  },
   "band": {
     "band_TBps": [
       4.885,
@@ -355,7 +467,7 @@
     "n_processes": 16
   },
   "conclusion": "On the pre-registered per-process mean: prior-allocation TOTAL BYTES moves the copy rate (12/24/48 GiB -> 4.9077/4.9568/4.9715 TB/s, 94.53% of the variance, a 0.0638 TB/s swing the size of the staircase's own 0.060 step), and the ROUTE to a given total adds 2.11%. So the staircase axis is better described as prior bytes than as prior allocation count. BUT SEE `headline_sweep_READ_BEFORE_QUOTING` FIRST: that 94.53% is one aggregation's figure, ranging 34.31% to 94.53% across four, and the diagonal contrast changes sign between them. The qualitative claim survives on three of four bases; the number does not survive on any but its own.",
-  "three_limits_on_that_conclusion": "FIRST: 'count does not matter' is not established. The diagonal is the only contrast holding total bytes fixed, and it is equivocal -- t(6)=-2.15 p=0.0755 against F(1,12)=7.51 p=0.0179 for the same comparison. A step-sized route effect is excluded; a small one is not. SECOND: the response is strongly concave (+0.0491 TB/s from 12->24 GiB, then only +0.0147 from 24->48), so the two routes are being compared at 24 GiB, on the part of the curve that is already flattening. A route effect could be larger lower down and this design would not see it. THIRD, and worst: the diagonal difference changes sign across per-process aggregations (-0.03093 to +0.02284 TB/s), so this design cannot give the route effect a direction at all, let alone a magnitude. All three are why the count=0 and count=13 anchor cells are declared, not optional -- and the third is why more repeats per cell are needed as much as more cells.",
+  "three_limits_on_that_conclusion": "FIRST: 'count does not matter' is not established. The diagonal is the only contrast holding total bytes fixed, and it is equivocal -- t(6)=-2.15 p=0.0755 against F(1,12)=7.51 p=0.0179 for the same comparison. A step-sized route effect is excluded; a small one is not. SECOND: the response is strongly concave (+0.0491 TB/s from 12->24 GiB, then only +0.0147 from 24->48), so the two routes are being compared at 24 GiB, on the part of the curve that is already flattening. A route effect could be larger lower down and this design would not see it. THIRD, and worst: the diagonal difference changes sign across per-process aggregations (-0.03093 to +0.02284 TB/s), so this design cannot give the route effect a direction at all, let alone a magnitude. All three are why the count=0 and count=13 anchor cells are declared, not optional. The third one has since been diagnosed rather than merely observed -- see `slot_structure_WHY_THE_AGGREGATION_MATTERS` -- and the diagnosis makes it worse, not better: the five slots are not exchangeable (the slowest slot index is constant within a cell across all four processes and differs between cells), so the four aggregations are four different estimands. More repeats per cell will therefore NOT resolve the sign disagreement, which is what I expected them to do when this text was first written. Repeats shrink the error on each estimand separately; they do not make estimands converge. Resolving the direction needs an outcome defined on the slot profile itself, declared in advance -- not a tighter estimate of a collapse.",
   "unit_of_analysis": "per-process mean over the five identical-buffer slots, n=4 per cell. The five slots share one process and one allocator state; they are repeated measures, not replicates.",
   "what_this_cannot_do": "it separates two candidate axes and identifies no mechanism. Nothing here explains why a level differs, and no factorial or ordering control can.",
   "manifest": {
@@ -373,17 +485,19 @@
       },
       {
         "path": "AI/assemble_alloc_factorial.py",
-        "sha256": "ac119bb3165ba0125ac8e8271ac61a7e1bbc1cdc7afb2af495a71b140e199940",
-        "bytes": 47996
+        "sha256": "838c5bd985a41cdf4d790ea4121b59e3776b371cec2879096eeaccc380bd8b93",
+        "bytes": 62017
       }
     ],
     "what_this_proves": "the assembler read exactly these bytes. It does not prove they came from a GPU, and a manifest cannot."
   },
   "git": {
-    "commit": "9223935",
+    "commit": "c8d7a68",
     "worktree_dirty": true,
     "worktree_dirty_paths": [
-      "AI/assemble_alloc_factorial.py"
+      "AI/artifacts/alloc_factorial_assembled.json",
+      "AI/assemble_alloc_factorial.py",
+      "AI/flydsl_rmsnorm_notes.md"
     ],
     "worktree_dirty_note": "cannot read clean in the commit that contains this artifact: writing the file dirties the tree the flag describes. The path list is what makes the flag checkable."
   }
