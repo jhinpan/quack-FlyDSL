@@ -40,9 +40,10 @@ import platform
 import subprocess
 import sys
 
-# tests/test_rmsnorm_flydsl.py:94 -- this suite's own bf16 gradient tolerance,
-# applied as assert_close applies it: |a - b| <= atol + rtol * |b|.
-_BWD_RTOL = 3e-2
+# tests/test_rmsnorm_flydsl.py:94 -- this suite's own bf16 tolerance, applied
+# as assert_close applies it: |a - b| <= atol + rtol * |b|. Used for the
+# forward output and both gradients, so one criterion covers the whole row.
+_RTOL = _ATOL = 3e-2
 
 _HASHED_SOURCES = (
     "quack/rmsnorm_flydsl.py",
@@ -110,8 +111,50 @@ def ref(x, w, eps):
     return (x32 * torch.rsqrt(x32.square().mean(-1, keepdim=True) + eps) * w.float()).to(x.dtype)
 
 
+def _worst_samples(torch, actual, expected, k=8):
+    """Paired records at the k worst elements, enough to recompute the verdict.
+
+    @CrossVendor: the previous ``samples`` field was the first eight forward
+    outputs with no paired reference, index, difference or threshold, so the
+    aggregate metrics could not be recomputed from the JSON. They were
+    representative values wearing the name "raw samples" -- and, being the
+    *first* eight, they were the elements least likely to carry the answer.
+    These are the worst offenders under the same criterion the verdict uses,
+    each carrying everything needed to check the arithmetic by hand.
+
+    Two orderings, because they are different elements and each backs a
+    different reported number. ``margin`` sorts by ``diff - threshold`` and so
+    holds the elements nearest to failing, which is what the outside-counts and
+    the boolean rest on. ``abs`` sorts by raw difference and includes the
+    element that produced ``max_abs_err``, which margin-ordering can miss
+    entirely -- a large difference beside a large reference has a comfortable
+    margin. Reporting only the first would leave a headline number
+    uncheckable from the JSON, which is the whole complaint being answered.
+    """
+    a, b = actual.float().flatten(), expected.float().flatten()
+    diff = (a - b).abs()
+    thr = _ATOL + _RTOL * b.abs()
+    by_margin = torch.argsort(diff - thr, descending=True)[:k].tolist()
+    by_abs = torch.argsort(diff, descending=True)[:k].tolist()
+    idx = list(dict.fromkeys(by_margin + by_abs))
+    return [
+        {
+            "index": int(i),
+            "actual": float(a[i]),
+            "expected": float(b[i]),
+            "abs_diff": float(diff[i]),
+            "threshold": float(thr[i]),
+            "outside": bool(diff[i] > thr[i]),
+            "why": "+".join(
+                ([" margin"] if i in by_margin else []) + ([" abs"] if i in by_abs else [])
+            ).strip(),
+        }
+        for i in idx
+    ]
+
+
 def _row(fd, torch, n, m, dtype, eps, shipped):
-    """One shape, forward and backward, with the raw samples retained."""
+    """One shape, forward and backward, with paired worst-case samples retained."""
     torch.manual_seed(0)
     x = torch.randn(m, n, device="cuda", dtype=dtype, requires_grad=True)
     w = torch.randn(n, device="cuda", dtype=dtype, requires_grad=True)
@@ -120,12 +163,22 @@ def _row(fd, torch, n, m, dtype, eps, shipped):
         got = fd.rmsnorm(x, w, eps=eps)
         exp = ref(x, w, eps)
         d = (got.float() - exp.float()).abs()
+        # Forward gets the same criterion as backward. It did not before: the
+        # forward branch recorded max/mean error and never applied the suite's
+        # test, while the row-level boolean was named for the whole comparison
+        # and computed from dx and dw alone. So "zero elements outside
+        # tolerance, forward and backward" was a claim about a set the field
+        # never examined -- this file's recurring defect, in the field I had
+        # just added to fix the previous instance of it. @CrossVendor caught it
+        # in the committed bytes.
+        fwd_thr = _ATOL + _RTOL * exp.float().abs()
         rec.update(
             status="ok",
             mean_rel_err=(d / exp.float().abs().clamp_min(1e-6)).mean().item(),
             max_abs_err=d.max().item(),
+            n_out_outside_combined=int((d > fwd_thr).sum().item()),
             finite=bool(torch.isfinite(got).all().item()),
-            samples=[round(v, 6) for v in got.float().flatten()[:8].tolist()],
+            samples_out_worst=_worst_samples(torch, got, exp),
         )
 
         # Backward too: @CrossVendor's H100 wide row covered fwd+bwd, and a
@@ -150,13 +203,12 @@ def _row(fd, torch, n, m, dtype, eps, shipped):
         # bare-relative verdict was as wrong as the bare-absolute one, in the
         # other direction, and neither is what the suite asserts. Both raw
         # numbers are still recorded; only ``within_suite_tolerance`` is the
-        # claim.
+        # claim, and it is the conjunction over out, dx and dw.
         dxr, dwr = xr.grad.float(), wr.grad.float()
         dxd = (x.grad.float() - dxr).abs()
         dwd = (w.grad.float() - dwr).abs()
-        rtol = atol = _BWD_RTOL
-        dx_ok = bool((dxd <= atol + rtol * dxr.abs()).all().item())
-        dw_ok = bool((dwd <= atol + rtol * dwr.abs()).all().item())
+        n_dx_out = int((dxd > _ATOL + _RTOL * dxr.abs()).sum().item())
+        n_dw_out = int((dwd > _ATOL + _RTOL * dwr.abs()).sum().item())
         rec.update(
             bwd_status="ok",
             max_abs_err_dx=dxd.max().item(),
@@ -165,11 +217,18 @@ def _row(fd, torch, n, m, dtype, eps, shipped):
             max_rel_err_dw=(dwd / dwr.abs().clamp_min(1e-6)).max().item(),
             mean_rel_err_dw=(dwd / dwr.abs().clamp_min(1e-6)).mean().item(),
             dw_ref_absmax=dwr.abs().max().item(),
-            n_dw_outside_combined=int((dwd > atol + rtol * dwr.abs()).sum().item()),
-            within_suite_tolerance=dx_ok and dw_ok,
+            n_dx_outside_combined=n_dx_out,
+            n_dw_outside_combined=n_dw_out,
+            samples_dx_worst=_worst_samples(torch, x.grad, dxr),
+            samples_dw_worst=_worst_samples(torch, w.grad, dwr),
             bwd_finite=bool(torch.isfinite(x.grad).all().item())
             and bool(torch.isfinite(w.grad).all().item()),
         )
+        # The conjunction over all three tensors, named for exactly that set.
+        rec["within_suite_tolerance"] = (
+            rec["n_out_outside_combined"] == 0 and n_dx_out == 0 and n_dw_out == 0
+        )
+        rec["within_suite_tolerance_covers"] = ["out", "dx", "dw"]
     except Exception as e:  # noqa: BLE001
         rec["error"] = f"{type(e).__name__}: {e}"[:300]
     finally:
@@ -204,11 +263,12 @@ def main():
     out = {
         "what": "FlyDSL fwd+bwd accuracy with MAX_N lifted, vs the same kernel under the cap",
         "kind": "functional/correctness probe, not a benchmark",
-        "bwd_tolerance": {
-            "rtol": _BWD_RTOL,
-            "atol": _BWD_RTOL,
+        "tolerance": {
+            "rtol": _RTOL,
+            "atol": _ATOL,
             "criterion": "abs(a - b) <= atol + rtol * abs(b), as assert_close applies it",
-            "source": "tests/test_rmsnorm_flydsl.py:94, this suite's own bf16 grad tolerance",
+            "applied_to": ["out", "dx", "dw"],
+            "source": "tests/test_rmsnorm_flydsl.py:94, this suite's own bf16 tolerance",
         },
         "dtype": "bfloat16",
         "shipped_max_n": shipped,
