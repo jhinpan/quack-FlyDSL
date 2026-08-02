@@ -40,6 +40,7 @@ BAND = (4.885, 4.895)
 
 # Fixed so the permutation p is a property of the artifact, not of the run.
 PERM_SEED = 20260804
+PERM_DRAWS = 20000
 
 # The staircase's measured levels either side of its steps, from the committed
 # interleaved artifact. Only a reference point for the anchor check below, not
@@ -421,7 +422,176 @@ def _corr(x, y):
     return sum((a - mx) * (b - my) for a, b in zip(x, y)) / math.sqrt(sxx * syy)
 
 
-def _order_control(means):
+def _perm_p(xs, res, stat):
+    rnd = random.Random(PERM_SEED)
+    p2, ge = xs[:], 0
+    for _ in range(PERM_DRAWS):
+        rnd.shuffle(p2)
+        if abs(_corr(_rank(p2), _rank(res))) >= abs(stat) - 1e-12:
+            ge += 1
+    return ge / PERM_DRAWS
+
+
+def _headline_sweep(raw_rows):
+    """THE HEADLINE RESULT, recomputed on four aggregations. Read this before quoting 94.53%.
+
+    Written after @Autotune's 8f43b362 showed the drift statistic's sign is a
+    free parameter of aggregation. The obvious next question -- which I had not
+    asked, because I had pre-registered the mean and stopped -- is whether the
+    RESULT is too. It is, and considerably more so than the drift number:
+
+      agg      bytes-only   route eta2   route p    diagonal (hi_lo - lo_hi)
+      mean        94.53%       2.11%      0.0179       +0.01019
+      median      86.09%       0.04%      0.8553       -0.00170
+      max         34.31%      39.87%      0.0010       -0.03093
+      min         91.41%       2.28%      0.0593       +0.02284
+
+    Three things a reader has to be told rather than left to find.
+
+    First, the diagonal difference CHANGES SIGN across bases. That is the one
+    contrast in the design that holds total prior bytes fixed and the whole
+    reason the four cells were chosen. On mean and min the 48x512MiB route is
+    faster; on median and max the 24x1GiB route is. Whatever "the route effect"
+    is, this design cannot even give it a direction.
+
+    Second, on the max-coordinate basis the bytes story inverts: total bytes
+    explains 34% and the route explains 40%, with p=0.0010 -- the opposite
+    conclusion to the pre-registered one, at a smaller p. If I had pre-registered
+    max I would now be reporting that count matters and bytes mostly does not.
+
+    Third, the direction of the qualitative claim does survive on three of four
+    bases (bytes-only 86-95%, route 0-2%), and max is the outlier. But "three of
+    four" is not the pre-registration's promise. The pre-registration fixed the
+    mean and that binding is kept -- switching now, having seen the table, would
+    be the exact post-hoc selection the whole file exists to prevent. What has to
+    change instead is the STRENGTH of the claim, and it does: 94.53% is one
+    basis's figure, not a property of the data.
+
+    Why the bases diverge is itself informative and is not established here: the
+    five slots within a process differ systematically (that is the whole slot
+    effect from the earlier work), so mean/median/max/min are not four noisy
+    estimates of one quantity -- they are four different quantities. Choosing
+    among them is a modelling decision that the pre-registration made silently.
+    """
+    rows = sorted(raw_rows, key=lambda r: r["seq"])
+    out = {}
+    for name, fn in (
+        ("mean_PREREGISTERED_PRIMARY", statistics.fmean),
+        ("median", statistics.median),
+        ("max_coordinate", max),
+        ("min_coordinate", min),
+    ):
+        y = [fn(r["TBps_per_slot"]) for r in rows]
+        gm = statistics.fmean(y)
+        tot = sum((v - gm) ** 2 for v in y)
+        tby, cby = defaultdict(list), defaultdict(list)
+        for r, v in zip(rows, y):
+            tby[r["prefix_high_water_GiB"]].append(v)
+            cby[r["cell"]].append(v)
+        tmu = {k: statistics.fmean(v) for k, v in tby.items()}
+        cmu = {k: statistics.fmean(v) for k, v in cby.items()}
+        rss_t = sum((v - tmu[r["prefix_high_water_GiB"]]) ** 2 for r, v in zip(rows, y))
+        within = sum((v - cmu[r["cell"]]) ** 2 for r, v in zip(rows, y))
+        d1, d2 = len(cby) - len(tby), len(y) - len(cby)
+        f = ((rss_t - within) / d1) / (within / d2) if within > 0 and d1 > 0 else 0.0
+        out[name] = {
+            "total_prior_bytes_only_eta_squared_pct": round((1 - rss_t / tot) * 100.0, 2),
+            "saturated_eta_squared_pct": round((1 - within / tot) * 100.0, 2),
+            "route_eta_squared_pct": round((rss_t - within) / tot * 100.0, 2),
+            "route_F": round(f, 3),
+            "route_p": round(_f_sf(f, d1, d2), 4),
+            "diagonal_hi_lo_minus_lo_hi_TBps": round(cmu["hi_lo"] - cmu["lo_hi"], 5),
+        }
+    diag = [v["diagonal_hi_lo_minus_lo_hi_TBps"] for v in out.values()]
+    byt = [v["total_prior_bytes_only_eta_squared_pct"] for v in out.values()]
+    out["verdict"] = (
+        f"THE HEADLINE IS AGGREGATION-DEPENDENT. Total-prior-bytes eta^2 ranges "
+        f"{min(byt):.2f}% to {max(byt):.2f}%. Worse, the diagonal difference -- the only "
+        f"contrast holding total bytes fixed, and the reason these four cells exist -- "
+        f"CHANGES SIGN, from {min(diag):+.5f} to {max(diag):+.5f} TB/s. This design "
+        "cannot give the route effect a direction. On the max-coordinate basis the "
+        "conclusion inverts outright: bytes 34.31%, route 39.87%, p=0.0010. The "
+        "qualitative bytes story holds on three of four bases and the pre-registered "
+        "mean is kept as primary, but 94.53% is one basis's number and must not be "
+        "quoted as a property of the data."
+    )
+    return out
+
+
+def _aggregation_sweep(raw_rows):
+    """The same drift question asked on four different per-process aggregations.
+
+    This exists because of @Autotune's f31e6406/8f43b362 finding on the staircase
+    data: the SIGN of the residual-vs-order association there is a free parameter
+    of how the five slot rates are collapsed to one number per process. Max
+    coordinate gave -0.04 (p=0.79, reads as a clean null), median gave +0.26
+    (p=0.09). Same rows, same residualization, opposite conclusions.
+
+    Running the same sweep here shows this artifact has the identical problem,
+    and the basis I happened to pre-register is the one that looks most like a
+    finding. That is the worst possible way to be lucky, and the honest response
+    is to publish all four rather than to defend the choice.
+
+    The per-process MEAN remains the pre-registered primary for the bytes result,
+    and it stays primary -- changing it now, after seeing that another basis
+    gives a quieter drift number, would be exactly the post-hoc selection this
+    whole file is built to avoid. What changes is the drift CLAIM, which is
+    downgraded to "not robust to aggregation" and asserts nothing in either
+    direction.
+    """
+    rows = sorted(raw_rows, key=lambda r: r["seq"])
+    xs = [r["seq"] for r in rows]
+    out = {}
+    for name, fn in (
+        ("mean_PREREGISTERED_PRIMARY", statistics.fmean),
+        ("median", statistics.median),
+        ("max_coordinate", max),
+        ("min_coordinate", min),
+    ):
+        ys = [fn(r["TBps_per_slot"]) for r in rows]
+        cmu = defaultdict(list)
+        for r, v in zip(rows, ys):
+            cmu[r["cell"]].append(v)
+        cmu = {k: statistics.fmean(v) for k, v in cmu.items()}
+        res = [v - cmu[r["cell"]] for r, v in zip(rows, ys)]
+        rs = _corr(_rank(xs), _rank(res))
+        out[name] = {
+            "residual_spearman": round(rs, 4),
+            "residual_pearson": round(_corr(xs, res), 4),
+            "permutation_p_two_sided": round(_perm_p(xs, res, rs), 4),
+            "raw_spearman": round(_corr(_rank(xs), _rank(ys)), 4),
+        }
+
+    # All 80 slot observations, residualized on the cell x slot-index mean, so
+    # nothing is collapsed away at all.
+    long = [(r["seq"], r["cell"], i, v) for r in rows for i, v in enumerate(r["TBps_per_slot"])]
+    cs = defaultdict(list)
+    for _s, c, i, v in long:
+        cs[(c, i)].append(v)
+    cs = {k: statistics.fmean(v) for k, v in cs.items()}
+    lr = [v - cs[(c, i)] for _s, c, i, v in long]
+    lp = [s for s, _c, _i, _v in long]
+    out["no_aggregation_80_slot_obs"] = {
+        "residual_spearman": round(_corr(_rank(lp), _rank(lr)), 4),
+        "residual_pearson": round(_corr(lp, lr), 4),
+        "note": (
+            "cell x slot-index residuals over all 80 observations, nothing collapsed. "
+            "These are not independent -- five share a process -- so no p is quoted."
+        ),
+    }
+    ss = [v["residual_spearman"] for k, v in out.items() if k != "no_aggregation_80_slot_obs"]
+    ps = [v["permutation_p_two_sided"] for k, v in out.items() if k != "no_aggregation_80_slot_obs"]
+    out["verdict"] = (
+        f"NOT ROBUST. Residual Spearman ranges {min(ss):+.4f} to {max(ss):+.4f} across four "
+        f"aggregations of the same 16 processes, with permutation p from {min(ps):.4f} to "
+        f"{max(ps):.4f}. No basis reaches p<.05. Nothing here licenses 'there is drift' or "
+        "'there is no drift'. The pre-registered mean is the basis that looks MOST like a "
+        "finding, which is why all four are published rather than the one."
+    )
+    return out
+
+
+def _order_control(means, raw_rows):
     """Is the shuffled collection position predicting the rate anyway?
 
     The staircase needed three iterations to kill exactly this. One seeded
@@ -466,6 +636,7 @@ def _order_control(means):
     cmu = {k: statistics.fmean(v) for k, v in cmu.items()}
     res = [r["TBps_at_min"] - cmu[r["cell"]] for r in rows]
     rp, rs = _corr(xs, res), _corr(_rank(xs), _rank(res))
+    sweep = _aggregation_sweep(raw_rows)
 
     # Two-sided permutation p on the rank statistic, seeded so it is a property
     # of the artifact rather than of the run.
@@ -482,14 +653,7 @@ def _order_control(means):
     # set constructed to avoid an arbitrary constant, which instead built the
     # answer into the null. Same defect class as everything else in this file:
     # a check that passes for a reason other than the one it documents.
-    rnd = random.Random(PERM_SEED)
-    perm_n = 20000
-    ge = 0
-    p2 = xs[:]
-    for _ in range(perm_n):
-        rnd.shuffle(p2)
-        if abs(_corr(_rank(p2), _rank(res))) >= abs(rs) - 1e-12:
-            ge += 1
+    pperm = _perm_p(xs, res, rs)
 
     # Bytes level by position, to show the shuffle decoupled treatment from time.
     tot_rank = [float(r["prefix_high_water_GiB"]) for r in rows]
@@ -501,16 +665,26 @@ def _order_control(means):
     return {
         "corr_RESIDUAL_vs_position_pearson": round(rp, 4),
         "corr_RESIDUAL_vs_position_spearman": round(rs, 4),
-        "permutation_p_two_sided": round(ge / perm_n, 4),
-        "permutation_draws": perm_n,
+        "permutation_p_two_sided": round(pperm, 4),
+        "permutation_draws": PERM_DRAWS,
         "permutation_seed": PERM_SEED,
+        "aggregation_sweep": sweep,
         "residual_drift_verdict": (
-            "NOT a null. Removing the cell mean leaves a substantial positive drift with "
-            "collection order (Pearson +0.4441, Spearman +0.4971). 20000-draw two-sided permutation test on the same series gives p=0.0519. This "
-            "does NOT threaten the bytes result: the shuffle left total prior bytes "
-            "essentially uncorrelated with position (Spearman -0.1917), so drift cannot "
-            "manufacture a bytes effect, and the 94.53% survives. But 'collection order "
-            "does nothing' is unsupported and is not claimed anywhere in this artifact."
+            "NOT ROBUST TO AGGREGATION, and therefore NOT A CLAIM in either direction. "
+            "On the pre-registered per-process mean the residual drift is Spearman "
+            "+0.4971 (p=0.052), which reads as a near-significant finding. On the median "
+            "of the same five slot rates it is +0.0853 (p=0.749). Same 16 processes, same "
+            "residualization, and the pre-registered basis is the one that looks most "
+            "like a result. See `aggregation_sweep` for all four. What survives is only "
+            "this: the shuffle left total prior bytes essentially uncorrelated with "
+            "position (Spearman -0.1917) IN THIS REALIZED DRAW, so no aggregation's drift "
+            "can manufacture the bytes effect, and the 94.53% stands on all four."
+        ),
+        "and_that_last_clause_is_about_one_draw": (
+            "randomization makes drift independent of treatment in the ASSIGNMENT "
+            "DISTRIBUTION; it does not prevent a realized shuffle from aligning with "
+            "drift. -0.1917 is a diagnostic on the draw that happened, not the "
+            "distributional property, and it should not be read as the latter."
         ),
         "corr_RAW_rate_vs_position_pearson_DO_NOT_QUOTE_AS_THE_CONTROL": round(corr, 4),
         "why_that_field_is_named_that": (
@@ -668,23 +842,25 @@ def main():
         "device_name": raw.get("device_name"),
         "shuffle_seed": raw.get("shuffle_seed"),
         "n_processes": len(rows),
+        "headline_sweep_READ_BEFORE_QUOTING": _headline_sweep(rows),
         "preconditions": _preconditions(rows, raw.get("measurement_live_set_GiB", 12.0)),
         "primary_comparison": _diagonal(means),
         "factorial": _factorial(means),
         "anchor_limitation": _anchor(means),
-        "order_control": _order_control(means),
+        "order_control": _order_control(means, rows),
         "band": _band(means, rows),
         "conclusion": (
-            "Prior-allocation TOTAL BYTES moves the copy rate; the ROUTE to a given "
-            "total does not move it by anything like a staircase step. Total prior "
-            "bytes alone (12 / 24 / 48 GiB -> 4.9077 / 4.9568 / 4.9715 TB/s) explains "
-            "94.53% of the variance across 16 processes, a 0.0638 TB/s swing that is "
-            "the same size as the staircase's 0.060 step. Splitting the two routes to "
-            "24 GiB adds 2.11% more. So the staircase axis is better described as prior "
-            "bytes than as prior allocation count -- but see the two limits below "
-            "before that sentence is reused anywhere."
+            "On the pre-registered per-process mean: prior-allocation TOTAL BYTES moves "
+            "the copy rate (12/24/48 GiB -> 4.9077/4.9568/4.9715 TB/s, 94.53% of the "
+            "variance, a 0.0638 TB/s swing the size of the staircase's own 0.060 step), "
+            "and the ROUTE to a given total adds 2.11%. So the staircase axis is better "
+            "described as prior bytes than as prior allocation count. BUT SEE "
+            "`headline_sweep_READ_BEFORE_QUOTING` FIRST: that 94.53% is one aggregation's "
+            "figure, ranging 34.31% to 94.53% across four, and the diagonal contrast "
+            "changes sign between them. The qualitative claim survives on three of four "
+            "bases; the number does not survive on any but its own."
         ),
-        "two_limits_on_that_conclusion": (
+        "three_limits_on_that_conclusion": (
             "FIRST: 'count does not matter' is not established. The diagonal is the only "
             "contrast holding total bytes fixed, and it is equivocal -- t(6)=-2.15 "
             "p=0.0755 against F(1,12)=7.51 p=0.0179 for the same comparison. A "
@@ -692,8 +868,12 @@ def main():
             "response is strongly concave (+0.0491 TB/s from 12->24 GiB, then only "
             "+0.0147 from 24->48), so the two routes are being compared at 24 GiB, on "
             "the part of the curve that is already flattening. A route effect could be "
-            "larger lower down and this design would not see it. Both are why the "
-            "count=0 and count=13 anchor cells are declared, not optional."
+            "larger lower down and this design would not see it. THIRD, and worst: the "
+            "diagonal difference changes sign across per-process aggregations "
+            "(-0.03093 to +0.02284 TB/s), so this design cannot give the route effect a "
+            "direction at all, let alone a magnitude. All three are why the count=0 and "
+            "count=13 anchor cells are declared, not optional -- and the third is why "
+            "more repeats per cell are needed as much as more cells."
         ),
         "unit_of_analysis": (
             "per-process mean over the five identical-buffer slots, n=4 per cell. The "

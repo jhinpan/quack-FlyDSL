@@ -1085,17 +1085,69 @@ The cell pair that does the work is **the same 24 GiB of prior peak reached with
 | hi_lo | 48 | 512 MiB | 24.0 GiB | 4.9619 | 0.0083 |
 | hi_hi | 48 | 1 GiB | 48.0 GiB | 4.9715 | 0.0041 |
 
-Total prior bytes alone explains **94.53%** of the variance — a 0.0638 TB/s
-swing, the size of the staircase's own 0.060 step. Pooling the two routes to
-24 GiB costs only 2.11%. **Bytes is the better name for the axis**, and the
-docstring claim this file retracted above is now measured rather than asserted.
+On the pre-registered per-process mean, total prior bytes alone explains
+**94.53%** of the variance — a 0.0638 TB/s swing, the size of the staircase's
+own 0.060 step. Pooling the two routes to 24 GiB costs only 2.11%. **Bytes is
+the better name for the axis**, and the docstring claim this file retracted
+above is measured rather than asserted.
 
-It is not fully vindicated. "Not churn" overstates: holding 24 GiB fixed and
-changing only the route is **equivocal** — t(6) = −2.15, p = 0.0755, against
-F(1,12) = 7.51, p = 0.0179 for the same contrast. They disagree because the F
-test borrows variance across cells whose standard deviations span 4.6×. A
-step-sized count effect is excluded; a small one is not, and I am not picking
-the test I prefer.
+That last sentence is the only part that survives scrutiny, and the number in
+front of it does not. **Read the next subsection before quoting 94.53%
+anywhere.**
+
+It is also not fully vindicated on its own basis. "Not churn" overstates:
+holding 24 GiB fixed and changing only the route is **equivocal** — t(6) = −2.15,
+p = 0.0755, against F(1,12) = 7.51, p = 0.0179 for the same contrast. They
+disagree because the F test borrows variance across cells whose standard
+deviations span 4.6×. A step-sized count effect is excluded; a small one is not,
+and I am not picking the test I prefer.
+
+##### The headline is a property of the aggregation, not of the data
+
+@Autotune found (`8f43b362`) that on the staircase data the *sign* of the
+residual-vs-order drift is a free parameter of how the five slot rates are
+collapsed to one number per process. I ran the same sweep on my drift figure and
+found the identical problem — mean +0.4971 (p = 0.052), median +0.0853
+(p = 0.749) — so the drift claim is downgraded to "not robust" and asserts
+nothing in either direction.
+
+The question I had not thought to ask, because I had pre-registered the mean and
+stopped there, is whether the **result** is aggregation-dependent too. It is,
+and far more than the drift number:
+
+| aggregation | bytes-only η² | route η² | route p | diagonal (hi_lo − lo_hi) |
+|---|---|---|---|---|
+| **mean** (pre-registered) | 94.53% | 2.11% | 0.0179 | **+0.01019** |
+| median | 86.09% | 0.04% | 0.8553 | **−0.00170** |
+| max coordinate | 34.31% | 39.87% | 0.0010 | **−0.03093** |
+| min coordinate | 91.41% | 2.28% | 0.0593 | **+0.02284** |
+
+Three things follow.
+
+**The diagonal difference changes sign.** That is the one contrast holding total
+prior bytes fixed and the entire reason these four cells exist. On mean and min
+the 48×512 MiB route is faster; on median and max the 24×1 GiB route is. This
+design cannot give the route effect a *direction*, never mind a magnitude — which
+is a stronger limitation than the equivocal p-values above, and supersedes them.
+
+**On max coordinate the conclusion inverts outright**: bytes 34.31%, route
+39.87%, p = 0.0010. Had I pre-registered max, I would now be reporting that count
+matters and bytes mostly does not, at a *smaller* p than the one I did report.
+
+**The qualitative claim survives on three of four bases** (bytes-only 86–95%,
+route 0–2%), with max the outlier. But "three of four" was not the
+pre-registration's promise. The mean stays primary — switching after seeing this
+table is precisely the post-hoc selection the pre-registration exists to
+prevent — so what changes is the *strength*: 94.53% is one basis's figure, not a
+property of the data.
+
+Why the bases diverge is itself unestablished and worth stating. The five slots
+within a process differ systematically — that is the slot effect the earlier work
+measured — so mean, median, max and min are **not four noisy estimates of one
+quantity; they are four different quantities**. Choosing among them is a
+modelling decision, and the pre-registration made it silently. Fixing an analysis
+in advance protects against choosing the test after the numbers; it does nothing
+about a choice you did not notice you were making.
 
 Three corrections found while reading my own output, all one defect:
 

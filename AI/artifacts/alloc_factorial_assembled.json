@@ -6,6 +6,41 @@
   "device_name": "AMD Instinct MI355X",
   "shuffle_seed": 20260803,
   "n_processes": 16,
+  "headline_sweep_READ_BEFORE_QUOTING": {
+    "mean_PREREGISTERED_PRIMARY": {
+      "total_prior_bytes_only_eta_squared_pct": 94.53,
+      "saturated_eta_squared_pct": 96.64,
+      "route_eta_squared_pct": 2.11,
+      "route_F": 7.513,
+      "route_p": 0.0179,
+      "diagonal_hi_lo_minus_lo_hi_TBps": 0.01019
+    },
+    "median": {
+      "total_prior_bytes_only_eta_squared_pct": 86.09,
+      "saturated_eta_squared_pct": 86.13,
+      "route_eta_squared_pct": 0.04,
+      "route_F": 0.035,
+      "route_p": 0.8553,
+      "diagonal_hi_lo_minus_lo_hi_TBps": -0.0017
+    },
+    "max_coordinate": {
+      "total_prior_bytes_only_eta_squared_pct": 34.31,
+      "saturated_eta_squared_pct": 74.18,
+      "route_eta_squared_pct": 39.87,
+      "route_F": 18.531,
+      "route_p": 0.001,
+      "diagonal_hi_lo_minus_lo_hi_TBps": -0.03093
+    },
+    "min_coordinate": {
+      "total_prior_bytes_only_eta_squared_pct": 91.41,
+      "saturated_eta_squared_pct": 93.69,
+      "route_eta_squared_pct": 2.28,
+      "route_F": 4.339,
+      "route_p": 0.0593,
+      "diagonal_hi_lo_minus_lo_hi_TBps": 0.02284
+    },
+    "verdict": "THE HEADLINE IS AGGREGATION-DEPENDENT. Total-prior-bytes eta^2 ranges 34.31% to 94.53%. Worse, the diagonal difference -- the only contrast holding total bytes fixed, and the reason these four cells exist -- CHANGES SIGN, from -0.03093 to +0.02284 TB/s. This design cannot give the route effect a direction. On the max-coordinate basis the conclusion inverts outright: bytes 34.31%, route 39.87%, p=0.0010. The qualitative bytes story holds on three of four bases and the pre-registered mean is kept as primary, but 94.53% is one basis's number and must not be quoted as a property of the data."
+  },
   "preconditions": {
     "prefix_high_water_GiB_by_cell": {
       "hi_lo": [
@@ -174,7 +209,40 @@
     "permutation_p_two_sided": 0.052,
     "permutation_draws": 20000,
     "permutation_seed": 20260804,
-    "residual_drift_verdict": "NOT a null. Removing the cell mean leaves a substantial positive drift with collection order (Pearson +0.4441, Spearman +0.4971). 20000-draw two-sided permutation test on the same series gives p=0.0519. This does NOT threaten the bytes result: the shuffle left total prior bytes essentially uncorrelated with position (Spearman -0.1917), so drift cannot manufacture a bytes effect, and the 94.53% survives. But 'collection order does nothing' is unsupported and is not claimed anywhere in this artifact.",
+    "aggregation_sweep": {
+      "mean_PREREGISTERED_PRIMARY": {
+        "residual_spearman": 0.4971,
+        "residual_pearson": 0.4441,
+        "permutation_p_two_sided": 0.052,
+        "raw_spearman": 0.0
+      },
+      "median": {
+        "residual_spearman": 0.0853,
+        "residual_pearson": 0.0148,
+        "permutation_p_two_sided": 0.7491,
+        "raw_spearman": -0.0941
+      },
+      "max_coordinate": {
+        "residual_spearman": 0.2059,
+        "residual_pearson": 0.2583,
+        "permutation_p_two_sided": 0.4413,
+        "raw_spearman": 0.2
+      },
+      "min_coordinate": {
+        "residual_spearman": 0.15,
+        "residual_pearson": 0.2112,
+        "permutation_p_two_sided": 0.5752,
+        "raw_spearman": -0.0676
+      },
+      "no_aggregation_80_slot_obs": {
+        "residual_spearman": 0.1845,
+        "residual_pearson": 0.1641,
+        "note": "cell x slot-index residuals over all 80 observations, nothing collapsed. These are not independent -- five share a process -- so no p is quoted."
+      },
+      "verdict": "NOT ROBUST. Residual Spearman ranges +0.0853 to +0.4971 across four aggregations of the same 16 processes, with permutation p from 0.0520 to 0.7491. No basis reaches p<.05. Nothing here licenses 'there is drift' or 'there is no drift'. The pre-registered mean is the basis that looks MOST like a finding, which is why all four are published rather than the one."
+    },
+    "residual_drift_verdict": "NOT ROBUST TO AGGREGATION, and therefore NOT A CLAIM in either direction. On the pre-registered per-process mean the residual drift is Spearman +0.4971 (p=0.052), which reads as a near-significant finding. On the median of the same five slot rates it is +0.0853 (p=0.749). Same 16 processes, same residualization, and the pre-registered basis is the one that looks most like a result. See `aggregation_sweep` for all four. What survives is only this: the shuffle left total prior bytes essentially uncorrelated with position (Spearman -0.1917) IN THIS REALIZED DRAW, so no aggregation's drift can manufacture the bytes effect, and the 94.53% stands on all four.",
+    "and_that_last_clause_is_about_one_draw": "randomization makes drift independent of treatment in the ASSIGNMENT DISTRIBUTION; it does not prevent a realized shuffle from aligning with drift. -0.1917 is a diagnostic on the draw that happened, not the distributional property, and it should not be read as the latter.",
     "corr_RAW_rate_vs_position_pearson_DO_NOT_QUOTE_AS_THE_CONTROL": -0.0362,
     "why_that_field_is_named_that": "the raw-rate correlation is -0.0362 and reads as a clean null. It is the wrong quantity: cell means differ by up to 0.064 TB/s, so the raw series is dominated by which cell each process drew and a residual drift hides underneath it. Twelve times the magnitude, opposite sign. It is kept because it is what the first draft of this function published, and a reader comparing artifacts should be able to see the corrected pair side by side.",
     "corr_total_prior_bytes_vs_position_spearman": -0.1917,
@@ -248,8 +316,8 @@
     "why_absolute": "a percentage-of-own-mean threshold grants a fast cell more absolute room than a slow one. Comparing a cell range as a percent of its own mean against a band width as a percent of 4.885 is two denominators in one comparison, and it once turned 9/20 into 10/20.",
     "n_processes": 16
   },
-  "conclusion": "Prior-allocation TOTAL BYTES moves the copy rate; the ROUTE to a given total does not move it by anything like a staircase step. Total prior bytes alone (12 / 24 / 48 GiB -> 4.9077 / 4.9568 / 4.9715 TB/s) explains 94.53% of the variance across 16 processes, a 0.0638 TB/s swing that is the same size as the staircase's 0.060 step. Splitting the two routes to 24 GiB adds 2.11% more. So the staircase axis is better described as prior bytes than as prior allocation count -- but see the two limits below before that sentence is reused anywhere.",
-  "two_limits_on_that_conclusion": "FIRST: 'count does not matter' is not established. The diagonal is the only contrast holding total bytes fixed, and it is equivocal -- t(6)=-2.15 p=0.0755 against F(1,12)=7.51 p=0.0179 for the same comparison. A step-sized route effect is excluded; a small one is not. SECOND: the response is strongly concave (+0.0491 TB/s from 12->24 GiB, then only +0.0147 from 24->48), so the two routes are being compared at 24 GiB, on the part of the curve that is already flattening. A route effect could be larger lower down and this design would not see it. Both are why the count=0 and count=13 anchor cells are declared, not optional.",
+  "conclusion": "On the pre-registered per-process mean: prior-allocation TOTAL BYTES moves the copy rate (12/24/48 GiB -> 4.9077/4.9568/4.9715 TB/s, 94.53% of the variance, a 0.0638 TB/s swing the size of the staircase's own 0.060 step), and the ROUTE to a given total adds 2.11%. So the staircase axis is better described as prior bytes than as prior allocation count. BUT SEE `headline_sweep_READ_BEFORE_QUOTING` FIRST: that 94.53% is one aggregation's figure, ranging 34.31% to 94.53% across four, and the diagonal contrast changes sign between them. The qualitative claim survives on three of four bases; the number does not survive on any but its own.",
+  "three_limits_on_that_conclusion": "FIRST: 'count does not matter' is not established. The diagonal is the only contrast holding total bytes fixed, and it is equivocal -- t(6)=-2.15 p=0.0755 against F(1,12)=7.51 p=0.0179 for the same comparison. A step-sized route effect is excluded; a small one is not. SECOND: the response is strongly concave (+0.0491 TB/s from 12->24 GiB, then only +0.0147 from 24->48), so the two routes are being compared at 24 GiB, on the part of the curve that is already flattening. A route effect could be larger lower down and this design would not see it. THIRD, and worst: the diagonal difference changes sign across per-process aggregations (-0.03093 to +0.02284 TB/s), so this design cannot give the route effect a direction at all, let alone a magnitude. All three are why the count=0 and count=13 anchor cells are declared, not optional -- and the third is why more repeats per cell are needed as much as more cells.",
   "unit_of_analysis": "per-process mean over the five identical-buffer slots, n=4 per cell. The five slots share one process and one allocator state; they are repeated measures, not replicates.",
   "what_this_cannot_do": "it separates two candidate axes and identifies no mechanism. Nothing here explains why a level differs, and no factorial or ordering control can.",
   "manifest": {
@@ -267,14 +335,14 @@
       },
       {
         "path": "AI/assemble_alloc_factorial.py",
-        "sha256": "9a211c397ad4aa53a913375eb8b89fe7f0ba34e5247ed7d4742b7614a4bd0d15",
-        "bytes": 34405
+        "sha256": "c09edf49d484246e67de64ee7a44c68bb07dff7eb47479c833fe9ee502ab35f5",
+        "bytes": 44158
       }
     ],
     "what_this_proves": "the assembler read exactly these bytes. It does not prove they came from a GPU, and a manifest cannot."
   },
   "git": {
-    "commit": "0b39533",
+    "commit": "3a201ca",
     "worktree_dirty": true,
     "worktree_dirty_paths": [
       "AI/artifacts/alloc_factorial_assembled.json",
