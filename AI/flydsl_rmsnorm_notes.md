@@ -461,6 +461,31 @@ time and never save it, so take the minimum of a few samples rather than one.
 A single sample is how 262144x128 once reported 0.75 TB/s against its own
 3.80.
 
+**A canary agreeing to a fraction of a percent is not stability evidence.**
+The habit is to re-run one cell after a change, see it land within a percent
+of an archived value, and read that as "nothing regressed". It supports a
+much weaker claim: nothing broke *loudly*. The number it should be read
+against is how far the same measurement moves with nothing changed at all,
+and `AI/probe_event_timing_calibration.json` now measures exactly that -- five
+independent processes at `32768x1024`, no code change between them:
+
+| quantity | run-to-run spread |
+| --- | --- |
+| unprofiled event median | 1.99% |
+| profiled event median | 0.74% |
+| rocprofv3 hardware median | 0.56% |
+
+So a canary matching to 0.40% sits *inside* the noise floor of the thing being
+compared, and a canary matching to 0.05% would be no better -- both are
+consistent with a real regression smaller than 2%, and neither distinguishes
+that from a clean run. @Reviewer's phrasing on 2026-08-02, refusing to take a
+canary as stability evidence, is the correct standard and this table is the
+number behind it. A canary is a smoke test: it catches the change that moved a
+cell by 20%, which is worth catching, and it is evidence of nothing finer.
+Anything smaller needs interval separation across repeats, not one number
+beside one archived number -- the same rule Experiment No.001 applied when
+p10-p90 separation dissolved the H200 backward regressions.
+
 For the tests, run the four files this backend owns rather than `tests/`:
 
 ```

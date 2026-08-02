@@ -1485,6 +1485,47 @@ def test_the_over_read_figures_match_the_field_the_probe_actually_stores():
             )
 
 
+def test_the_noise_floor_a_canary_is_read_against_is_the_measured_one():
+    # @Reviewer, 2026-08-02: he will not take a canary as stability evidence.
+    # Correct, and I had just done it -- reported a canary matching an archived
+    # run to 0.40% as if that showed nothing regressed, in the same message
+    # arguing that a single draw cannot show reproducibility. The canary is a
+    # single draw. The reasoning I applied to the probe's figures is the
+    # reasoning I failed to apply to my own verification step.
+    #
+    # The repeats make the missing number available: how far the same
+    # measurement moves with nothing changed. The notes now carry it as a
+    # table, and a table of measured figures goes stale exactly the way the
+    # over-read figures did, so it is pinned to the sidecar rather than typed.
+    sidecar = json.loads(
+        (BENCHMARK_PATH.parents[1] / "AI" / "probe_event_timing_calibration.json").read_text()
+    )
+    notes = (BENCHMARK_PATH.parents[1] / "AI" / "flydsl_rmsnorm_notes.md").read_text()
+
+    record = next(r for r in sidecar["measurements"] if (r["m"], r["n"]) == (32768, 1024))
+    reps = record["per_rotation"]["repeats"]
+    fields = {
+        "unprofiled event median": "event_median_us_unprofiled",
+        "profiled event median": "event_median_us_profiled",
+        "rocprofv3 hardware median": "hardware_median_us",
+    }
+    for label, field in fields.items():
+        values = [rep[field] for rep in reps]
+        spread = (max(values) / min(values) - 1.0) * 100
+        row = re.search(rf"^\|\s*{label}\s*\|\s*([\d.]+)%\s*\|$", notes, re.MULTILINE)
+        assert row, label
+        assert float(row.group(1)) == pytest.approx(spread, abs=0.005), label
+
+    # And the point the table exists to make, which is the part a reader acts
+    # on: the canary agreement I quoted is *inside* that floor. If a future
+    # run tightened the noise enough for 0.40% to sit outside it, this claim
+    # would need rewriting rather than silently continuing to look supported.
+    unprofiled = [rep["event_median_us_unprofiled"] for rep in reps]
+    floor = (max(unprofiled) / min(unprofiled) - 1.0) * 100
+    assert floor > 0.40, floor
+    assert "is not stability evidence" in notes
+
+
 def test_the_sidecar_names_the_code_and_the_card_that_produced_it():
     # @Reviewer's last item on this artifact: it was *checkable* but not
     # *authenticated*. He recomputed from it and refuted a figure I had quoted,
