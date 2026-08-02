@@ -19,28 +19,67 @@ reported as one. What makes it evidential anyway is the shape:
 
   * The first step goes the predicted direction *while paying a spill cost that
     should push the other way*. Occupancy 1.00 -> 1.94, bandwidth 38.1% ->
-    52.8%. A confound that works against your hypothesis and loses is worth
-    more than one you had to argue away.
-  * The later steps reverse, and they track spills rather than occupancy:
-    occupancy keeps climbing (2.80, 3.67) while bandwidth falls back (43.1%,
-    34.4%) as spills go 97, 137. So "more occupancy is always faster" is *not*
-    what this shows, and the probe does not claim it.
+    52.7%. A confound that works against your hypothesis and loses is worth
+    more than one you had to argue away. And the confound is smaller than the
+    spill count suggests: `agpr_count` goes 8 -> 0 exactly as
+    `vgpr_spill_count` goes 0 -> 8, with scratch 0 -> 36 B/lane (9 dwords).
+    Those are the same eight registers relocated from AGPRs to scratch, not
+    eight new spills. @Reviewer found this, and it closes the AGPR question
+    from the measured side: those 8 AGPRs are what push the allocation to 264
+    and the capacity from 2 to 1, and this row removes them and watches the
+    capacity come back.
+  * The later steps reverse while occupancy keeps climbing (2.80, 3.69) and
+    bandwidth falls back (43.2%, 34.4%) as spills go 97, 137. So "more
+    occupancy is always faster" is *not* what this shows, and the probe does
+    not claim it. The sharpest single row: the highest occupancy in the table
+    is also its worst bandwidth, below the unhinted kernel at 1.00 wave/SIMD.
 
 The control is the load-bearing part. At N=49152 the kernel is already at 2
-waves/SIMD, so the same hint has nothing to move: allocation stays at 232 and
-bandwidth is 76.8% vs 76.7%, unchanged. The flag therefore does not make
+waves/SIMD, so hint=2 has nothing to move: allocation stays at 232 and
+bandwidth is 76.7% vs 77.0%, unchanged. The flag therefore does not make
 kernels generically faster -- it moves bandwidth only where it moves occupancy.
 Without this row the experiment would not distinguish "occupancy drives
 bandwidth" from "this compiler flag is good for you".
+
+**The control runs the whole ladder, and that cost me a claim.** The first
+version ran the control only at none/2 -- enough for the step the main result
+rests on, but it left the 3/4 reversal uncontrolled, and I had written that
+reversal up as occupancy and spills trading off *at the treatment width*.
+@Reviewer pointed out there was no width where spills should not matter to read
+it against. With one, the reversal turns out to be generic: at N=49152, hint=3
+and 4 take bandwidth from 76.7% to 46.5% and 43.2%. High settings of this flag
+are harmful at both widths, so the 3/4 rows support "more occupancy is not
+always faster" and nothing more specific than that. The main claim is untouched
+-- it lives on the none->2 step, where the control is flat and the treatment
+is not.
+
+A second thing the control needs, which it had by luck and now asserts: an
+allocation that does not move is equally consistent with a hint the compiler
+honoured but could not act on, and a hint that never reached the compiler.
+Only the second would invalidate the control, and the alloc assert passes
+either way. The raw `vgpr_count` moving (230 -> 228) while granularity-8
+allocation stays at 232 is what tells them apart, so the probe now requires it.
 
 What this still does not establish. Occupancy and spill count both move with
 the hint, so the first step is a two-variable change read in the direction
 where the variables disagree. A cleaner lever would change occupancy at
 constant spills; I do not have one. The claim supported here is directional --
 at the cliff, restoring occupancy restores a substantial part of the lost
-bandwidth -- not quantitative, and not "occupancy is the whole story": even at
-the best hint, 52.8% is well short of the 76.8% the kernel reaches one width
-below.
+bandwidth -- not quantitative, and not "occupancy is the whole story". The
+last point does not need a cross-width extrapolation to make: the sweeps
+contain a pair at the *same* occupancy and different N (N=57344 hint=2 at 1.937
+waves/SIMD, N=49152 unhinted at 1.960 -- about 1% apart) whose bandwidths
+differ by a factor of 1.45. Restoring occupancy buys back 38% of the cliff and
+no more. That pair is emitted as `equal_occupancy_pair` with its separation
+alongside, so a reader can see how well matched the held-fixed axis actually
+is; @Reviewer identified it.
+
+Provenance: @Reviewer noted that only the occupancy sidecar had been
+reproduced across GPUs while this had not, and the two were easy to read as
+both cross-checked. Rerunning the extended ladder on device 5 closes that: the
+four treatment rows from device 6 (commit 276398f) reproduce to within 0.2% on
+every bandwidth figure, with identical vgpr/spill/scratch counts, which is
+expected for the static half and worth stating for the timed half.
 
 Run:  HIP_VISIBLE_DEVICES=<idle> python AI/probe_rmsnorm_occupancy_intervention.py
 Writes AI/data/rmsnorm_fwd_occupancy_intervention.json.
@@ -82,7 +121,12 @@ TREATMENT_N = 57344
 CONTROL_N = 49152
 
 HINTS = ["none", 2, 3, 4]
-CONTROL_HINTS = ["none", 2]
+# The control runs the SAME hint ladder as the treatment. Running only
+# none/2 controlled the step the main claim rests on but left the reversal at
+# 3/4 uncontrolled: without 3/4 here, "the reversal is spills interacting with
+# occupancy" cannot be told apart from "this flag is simply harmful at high
+# settings". @Reviewer caught the gap.
+CONTROL_HINTS = ["none", 2, 3, 4]
 
 WARMUP = 20
 INNER = 20
@@ -311,13 +355,78 @@ def main():
         print(f"control N={CONTROL_N} hint={hint} ...", flush=True)
         control.append(_row(CONTROL_N, hint))
 
-    # The control only controls if the hint really had nothing to move there.
-    base, hinted = control[0], control[1]
+    # The control only controls if the hint really had nothing to move there,
+    # at the hint the main claim is read against (2). At 3 and 4 the allocation
+    # is *expected* to move here too -- those rows exist to test the reversal,
+    # not to serve as a null.
+    base = control[0]
+    hinted = next(r for r in control if r["waves_per_eu_hint"] == 2)
     if base["vgpr_alloc_wave64"] != hinted["vgpr_alloc_wave64"]:
         raise SystemExit(
-            "the control width's allocation moved under the hint; it is no longer a "
+            "the control width's allocation moved under hint=2; it is no longer a "
             "control and the treatment cannot be read against it"
         )
+    # ...and a flat control is only evidence if the flag ARRIVED. An
+    # allocation that does not move is consistent with two very different
+    # things: a hint the compiler honoured but could not act on, and a hint
+    # that never reached the compiler at all. The first assert passes either
+    # way, so on its own it launders the second case as a control. The
+    # raw vgpr_count moving while the granularity-8 allocation does not is
+    # what distinguishes them. @Reviewer pointed out this was recorded but
+    # never asserted -- it held by luck.
+    if not any(r["vgpr_count"] != base["vgpr_count"] for r in control[1:]):
+        raise SystemExit(
+            "no control row's vgpr_count moved under any hint: the flag may not be "
+            "reaching the compiler at all, in which case a flat control is not evidence"
+        )
+
+    # 'Occupancy is not the whole story' reads sharpest off a pair that is at
+    # the same occupancy and different N -- no cross-width extrapolation
+    # needed. @Reviewer identified the pair; it is computed here rather than
+    # written into prose so it cannot drift away from the rows above it. The
+    # gap is only meaningful if the two really are at the same occupancy, so
+    # the separation is emitted alongside instead of being asserted small.
+    t_hinted = next(r for r in treatment if r["waves_per_eu_hint"] == 2)
+    t_base = treatment[0]
+    equal_occ = {
+        "why": (
+            "two rows at essentially the same measured occupancy and different N. If "
+            "occupancy determined bandwidth these would agree; see bandwidth_ratio for "
+            "how far apart they are, and occupancy_separation_pct for how well matched "
+            "they are on the axis being held fixed"
+        ),
+        "a": {
+            "n": t_hinted["n"],
+            "hint": 2,
+            "waves_per_simd": t_hinted["measured_waves_per_simd"],
+            "pct_of_ceiling": t_hinted["pct_of_ceiling"],
+        },
+        "b": {
+            "n": base["n"],
+            "hint": "none",
+            "waves_per_simd": base["measured_waves_per_simd"],
+            "pct_of_ceiling": base["pct_of_ceiling"],
+        },
+        "occupancy_separation_pct": round(
+            100
+            * abs(t_hinted["measured_waves_per_simd"] - base["measured_waves_per_simd"])
+            / base["measured_waves_per_simd"],
+            2,
+        ),
+        "bandwidth_ratio": round(base["pct_of_ceiling"] / t_hinted["pct_of_ceiling"], 3),
+        "fraction_of_cliff_recovered_pct": round(
+            100
+            * (t_hinted["pct_of_ceiling"] - t_base["pct_of_ceiling"])
+            / (base["pct_of_ceiling"] - t_base["pct_of_ceiling"]),
+            1,
+        ),
+        "highest_occupancy_is_worst_bandwidth": (
+            "sharper still: the highest occupancy in the treatment ladder is hint=4 at "
+            f"{treatment[-1]['measured_waves_per_simd']:.3f} waves/SIMD, and its bandwidth "
+            f"({treatment[-1]['pct_of_ceiling']:.1f} pct) is the WORST in the table -- below "
+            f"the unhinted {t_base['pct_of_ceiling']:.1f} pct at 1.000 waves/SIMD"
+        ),
+    }
 
     payload = {
         "what": "does bandwidth follow occupancy at fixed N? forcing the register "
@@ -367,19 +476,49 @@ def main():
             "disagree: bandwidth improves 38.1 -> 52.8 pct despite the spill count going "
             "0 -> 8, i.e. the confound pushes against the hypothesis and loses. The later "
             "steps reverse and track spills (97, 137) while occupancy keeps rising, so "
-            "'more occupancy is always faster' is NOT supported and is not claimed."
+            "'more occupancy is always faster' is NOT supported and is not claimed. "
+            "What those later steps are NOT evidence for: see reversal_control. "
+            "The first step's confound is smaller than the raw spill count suggests: "
+            "agpr_count goes 8 -> 0 as vgpr_spill_count goes 0 -> 8, and the scratch "
+            "allocation goes 0 -> 36 B/lane (9 dwords). Those are the same 8 registers "
+            "moving from AGPRs to scratch, not 8 newly created spills. @Reviewer found "
+            "this. It also closes the AGPR question from the static side: those 8 AGPRs "
+            "are what push the allocation to 264 and the capacity from 2 to 1, and this "
+            "run removes them and measures the capacity coming back."
         ),
         "control_note": (
-            "At N=49152 the default allocation is already at 2 waves/SIMD, so the hint has "
-            "nothing to move: the probe asserts vgpr_alloc is unchanged, and bandwidth is "
-            "flat. This is what separates 'occupancy drives bandwidth' from 'this compiler "
-            "flag is generically good'."
+            "At N=49152 the default allocation is already at 2 waves/SIMD, so hint=2 has "
+            "nothing to move: the probe asserts vgpr_alloc is unchanged there, and "
+            "bandwidth is flat. This is what separates 'occupancy drives bandwidth' from "
+            "'this compiler flag is generically good'. The flatness is only evidence if "
+            "the flag reached the compiler, and an unchanged allocation cannot show that "
+            "on its own -- so the probe also asserts that the raw vgpr_count moves under "
+            "some hint while the granularity-8 allocation does not. The control runs the "
+            "full none/2/3/4 ladder, not just none/2, so the reversal seen in the "
+            "treatment at 3 and 4 can be read against a width where the same settings "
+            "apply."
+        ),
+        "equal_occupancy_pair": equal_occ,
+        "reversal_control": (
+            "The control now runs the full none/2/3/4 ladder, and the reversal at 3 and 4 "
+            "happens THERE TOO: at N=49152, hint=3 takes bandwidth from 76.7 to 46.5 pct "
+            "and hint=4 to 43.2 pct, at 61 and 101 spills, while measured occupancy rises "
+            "to 2.82 and 3.88. So the treatment's reversal is not specific to the width "
+            "that was over the register boundary -- high settings of this flag are harmful "
+            "at both widths. The earlier reading, that the reversal showed occupancy and "
+            "spills trading off at the treatment width, was not supported: it had no "
+            "control at those settings, and with one the effect is generic. This does not "
+            "touch the main claim, which rests on the none->2 step, where the control IS "
+            "flat (76.7 -> 77.0) and the treatment moves (38.1 -> 52.7). It does mean the "
+            "3/4 rows are evidence against 'more occupancy is always faster' and evidence "
+            "for nothing else. @Reviewer asked for these rows."
         ),
         "still_open": (
             "Directional only. A clean lever would change occupancy at constant spills; "
             "none is available here. Restoring occupancy recovers part of the lost "
-            "bandwidth, not all of it -- 52.8 pct against the 76.8 pct the kernel reaches "
-            "one width below."
+            "bandwidth, not all of it. Cross-device: the four treatment rows reproduce "
+            "device 6 (commit 276398f) to within 0.2 pct on bandwidth with identical "
+            "register and spill counts; the control's 3/4 rows are single-device so far."
         ),
         "treatment_sweep": treatment,
         "control_sweep": control,

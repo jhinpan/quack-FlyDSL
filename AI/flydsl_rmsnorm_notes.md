@@ -1008,9 +1008,11 @@ register-budget section at the end of this file) and they put a capacity step
 on this same boundary. Occupancy has since been measured there too: it halves
 from 1.96 to 1.00 waves/SIMD between 49152 and 57344, matching the computed
 bound. An intervention at fixed N then moved it back -- forcing 2 waves at
-57344 recovers bandwidth from 38.1% to 52.8%, while the same hint at 49152,
+57344 recovers bandwidth from 38.1% to 52.7%, while the same hint at 49152,
 where it has nothing to move, changes nothing. So the direction is established;
-the magnitude is not, and the lever also adds spills. **The cap is not raised
+the magnitude is not, the lever also adds spills, and occupancy is demonstrably
+not the whole story -- a pair matched at ~1.94 waves/SIMD still differs 1.45x in
+bandwidth across the two widths. **The cap is not raised
 on the strength of this.** A constant that is conservative by 6x costs
 reachable shapes; a constant moved on a mechanism whose magnitude is unmeasured
 costs correctness somewhere unmeasured. The finding is
@@ -1326,11 +1328,19 @@ stale cache entry cannot be reported as a fresh measurement.
 **The regenerated sidecar records one thing the old one could not: `agpr_count`.**
 It is 0 everywhere up to N=49152, then 8 at 57344 and 44 at 65536. On gfx950
 the VGPR and AGPR banks share one 512-slot file per SIMD, so a nonzero AGPR
-count is not free -- the honest allocation at 65536 is 344, not 300. It happens
-not to move either bound here (both rows are already at 1 wave/SIMD either
-way), so no conclusion changes. But the old artifact could not have told anyone
-that, and the AGPRs appear *exactly* at the cliff, which is the kind of
-coincidence worth having in the record rather than discovering later.
+count is not free -- the honest allocation at 65536 is 344, not 300. The AGPRs
+appear *exactly* at the cliff, which the old artifact could not have told
+anyone.
+
+I wrote here that this "happens not to move either bound," on the grounds that
+both rows are at 1 wave/SIMD with or without the AGPRs. That is true of 65536
+and **false of 57344, which is the row that matters**: 256 VGPRs would allow 2
+waves, and it is precisely the 8 AGPRs that take the allocation to 264 and the
+capacity to 1. @Reviewer refuted the sentence once from the static side, and the
+intervention has now refuted it a second time by measurement — remove those 8
+registers with `waves_per_eu=2` and the capacity comes back to a measured 1.937
+(see the intervention section). A line dismissing a quantity as inconsequential
+turned out to be describing the cause of the whole cliff.
 
 **The first three rows used to read 21, 21 and 12 waves/SIMD, which the hardware
 cannot do.** `floor(512 / vgpr_alloc)` is the register file's limit and I stored
@@ -1368,16 +1378,48 @@ rocprofv3's `MeanOccupancyPerActiveCU`; raw at
 
 | N | vgpr | alloc | computed bound | **measured waves/SIMD** | measured/bound | bandwidth % of ceiling |
 |---|------|-------|----------------|-------------------------|----------------|------------------------|
-| 32768 | 156 | 160 | 3 | 2.800 | 0.93 | -- |
-| 40960 | 226 | 232 | 2 | 1.956 | 0.98 | -- |
-| 49152 | 230 | 232 | 2 | 1.960 | 0.98 | 77.5 |
+| 32768 | 156 | 160 | 3 | 2.775 | 0.93 | -- |
+| 40960 | 226 | 232 | 2 | 1.952 | 0.98 | -- |
+| 49152 | 230 | 232 | 2 | 1.959 | 0.98 | 77.5 |
 | 57344 | 264 | 264 | 1 | **1.000** | 1.00 | 37.8 |
 | 65536 | 300 | 304 | 1 | **1.000** | 1.00 | 39.2 |
 
-(These are the regenerated values, taken on **device 5** while @Reviewer was
-verifying on device 6. The original run on device 6 gave 2.784 / 1.955 / 1.958 /
-1.000 / 1.000 -- so the sweep reproduces across GPUs to within 0.6% on its worst
-row and exactly at the boundary, which is worth more than either run alone.)
+There are now three runs of this sweep: one on device 6 and two on device 5,
+taken while @Reviewer was verifying on device 6. I first summarised the spread
+as "reproduces across GPUs to within 0.6% on its worst row", and @Reviewer
+pointed out that 0.6% covers only the boundary sweep — the discriminating sweep
+at m=16384 has a row that moves 2.0%, more than three times as much. He is
+right, and with a third run the split is sharper than a single number can be:
+
+| sweep | worst cross-device (6 vs 5) | worst same-device (5 vs 5) | which row |
+|---|---|---|---|
+| boundary, m=4096 | 0.57% | 0.88% | N=32768, `registers` |
+| discriminating, m=16384 | 1.96% | 1.38% | N=8192, `hardware_cap` |
+
+**The spread is not a device effect.** The two device-5 runs differ from each
+other about as much as either differs from device 6 — 0.88% vs 0.57% on the
+boundary sweep's worst row, 1.38% vs 1.96% on the discriminating sweep's. What
+the third run shows is run-to-run variance in the counter, so "reproduces across
+GPUs to within 0.6%" was quoting a number that had nothing to do with GPUs. The
+figure is real and the reproduction is real; the attribution was not.
+
+What the spread does track is slack — how far a row sits below its own
+constraint. Taking `measured/bound` against all three constraints:
+
+| row | measured/bound | spread over 3 runs |
+|---|---|---|
+| boundary N=57344, 65536 | 1.000 | 0.00% |
+| boundary N=49152 | 0.979 | 0.07% |
+| discriminating N=49152 | 0.985 | 0.46% |
+| boundary N=32768 | 0.925 | 0.89% |
+| discriminating N=32768 | 0.871 | 0.94% |
+| discriminating N=8192 | 0.775 | 2.00% |
+
+Rows pinned against their bound do not move at all; rows with slack move by up
+to 2%. It is not monotone (`N=16384` at ratio 0.796 has only 0.36% spread), so I
+am not claiming a law — but the two tightest rows in the whole set are the two
+cliff rows the conclusion rests on, and they are bit-stable across three runs
+and two devices. That is the part worth having.
 
 **Occupancy does halve at the boundary, and it is now observed rather than
 derived.** The 2 → 1 step falls between 49152 and 57344, the same edge as the
@@ -1402,41 +1444,103 @@ second. So the intervention it called for has now been run.
 compile hint. At N=57344 it pushes the allocation from 264 VGPRs to 256 --
 across the boundary, at a width that has not changed.
 
-| hint | vgpr | alloc | measured waves/SIMD | vgpr spills | scratch | bandwidth % |
-|------|------|-------|---------------------|-------------|---------|-------------|
-| none | 264 | 264 | 1.000 | 0 | 0 | 38.1 |
-| 2 | 256 | 256 | **1.940** | 8 | 36 | **52.8** |
-| 3 | 168 | 168 | 2.798 | 97 | 392 | 43.1 |
-| 4 | 128 | 128 | 3.680 | 137 | 552 | 34.4 |
+| hint | vgpr | agpr | alloc | measured waves/SIMD | vgpr spills | scratch | bandwidth % |
+|------|------|------|-------|---------------------|-------------|---------|-------------|
+| none | 264 | 8 | 264 | 1.000 | 0 | 0 | 38.1 |
+| 2 | 256 | 0 | 256 | **1.937** | 8 | 36 | **52.7** |
+| 3 | 168 | 0 | 168 | 2.796 | 97 | 392 | 43.2 |
+| 4 | 128 | 0 | 128 | 3.687 | 137 | 552 | 34.4 |
 
-Control, N=49152 (already at 2 waves, so the hint has nothing to move):
+Control, N=49152 (already at 2 waves, so hint=2 has nothing to move):
 
-| hint | alloc | measured waves/SIMD | spills | bandwidth % |
-|------|-------|---------------------|--------|-------------|
-| none | 232 | 1.959 | 0 | 76.6 |
-| 2 | 232 | 1.954 | 0 | 77.0 |
+| hint | vgpr | alloc | measured waves/SIMD | spills | bandwidth % |
+|------|------|-------|---------------------|--------|-------------|
+| none | 230 | 232 | 1.960 | 0 | 76.7 |
+| 2 | 228 | 232 | 1.952 | 0 | 77.0 |
+| 3 | 168 | 168 | 2.820 | 61 | 46.5 |
+| 4 | 128 | 128 | 3.884 | 101 | 43.2 |
 
 **Restoring occupancy at the cliff recovers a substantial part of the lost
-bandwidth: 38.1% → 52.8%.** The control is the load-bearing row -- where the
-hint cannot move occupancy it does not move bandwidth either (76.6 vs 77.0),
-which is what separates "occupancy drives bandwidth here" from "this compiler
-flag is generically good". The probe asserts the control's allocation is
-unchanged and aborts if it is not.
+bandwidth: 38.1% → 52.7%.** The control's hint=2 row is the load-bearing one --
+where the hint cannot move occupancy it does not move bandwidth either (76.7 vs
+77.0), which is what separates "occupancy drives bandwidth here" from "this
+compiler flag is generically good". The probe asserts the control's allocation
+is unchanged at that hint and aborts if it is not.
+
+**The eight spills are the eight AGPRs.** @Reviewer noticed that at the first
+step `agpr_count` goes 8 → 0 exactly as `vgpr_spill_count` goes 0 → 8, with
+scratch 0 → 36 B/lane, or 9 dwords. Those are the same eight registers moving
+from AGPRs to scratch, not eight newly created spills, so the confound in the
+first step is smaller than the raw count suggests. It also closes a loop that
+had been left open in two separate sections: the static reading of the artifact
+said those 8 AGPRs are what push the allocation to 264 and the capacity from 2
+to 1, and this row removes them and measures the capacity coming back. The
+arithmetic prediction and the intervention are the same claim, made twice, and
+the notes previously had them pages apart with nothing pointing between them.
 
 **The lever is not clean, and the reading depends on saying how.** It buys
 occupancy with spills, so the first step is a two-variable change. What makes
 it evidential is the direction of the disagreement: bandwidth improves *while*
 the spill count goes 0 → 8, i.e. the confound pushes against the hypothesis and
-loses. The later steps then reverse and track spills (97, 137) while occupancy
-keeps climbing -- so "more occupancy is always faster" is **not** shown, and I
-am not claiming it. A clean lever would move occupancy at constant spills; I
-do not have one.
+loses. A clean lever would move occupancy at constant spills; I do not have one.
+
+**And the reversal at hints 3 and 4 was over-read, because it had no control.**
+I had written that the later steps "track spills rather than occupancy", which
+frames the reversal as a property of the width that was over the register
+boundary. @Reviewer pointed out the control only ran none/2, so there was no
+width where spills should not matter to read the reversal against. Running the
+full ladder on the control answers it, and not in my favour: at N=49152 hint=3
+takes bandwidth from 76.7% to 46.5% and hint=4 to 43.2%. **High settings of
+this flag are harmful at both widths**, so the 3/4 rows show that more occupancy
+is not always faster, and nothing more specific than that. The main claim is
+untouched — it rests on the none→2 step, where the control is flat and the
+treatment is not — but the mechanism I attached to the reversal was an
+interpretation dressed as an observation, and it took the missing control to
+see that.
 
 So the claim is directional, not quantitative, and occupancy is not the whole
-story: even at the best hint 52.8% is well short of the 76.8% the kernel
-reaches one width below. What remains unestablished is the *magnitude* of the
-occupancy contribution, and "latency-hiding-bound" is still an assumption about
-the kernel rather than a finding.
+story. **That last point does not need a cross-width comparison to make**, which
+is how I had been making it. There is a pair in the sweeps at the *same*
+occupancy and different N:
+
+| | measured waves/SIMD | bandwidth % |
+|---|---|---|
+| N=57344, hint=2 | 1.937 | **52.7** |
+| N=49152, hint=none | 1.960 | **76.7** |
+
+Occupancy matched to about 1%, bandwidth differing by a factor of 1.45.
+Restoring occupancy buys back 38% of the cliff and no more. @Reviewer found this
+pair; it is emitted as `equal_occupancy_pair` with its own occupancy separation
+alongside, so the reader can check the axis that is supposed to be held fixed
+actually is. The sharpest single row is blunter still: **the highest occupancy
+in the treatment table (3.687 waves/SIMD, hint=4) has its worst bandwidth
+(34.4%), below the unhinted kernel running at 1.000.**
+
+What remains unestablished is the *magnitude* of the occupancy contribution, and
+"latency-hiding-bound" is still an assumption about the kernel rather than a
+finding.
+
+Provenance: the treatment ladder now reproduces across two GPUs — device 6 in
+`276398f` and device 5 here — to within 0.2% on every bandwidth figure, with
+identical register and spill counts. The control's 3/4 rows are single-device so
+far. This distinction is worth stating because the previous version of this
+section sat next to a cross-reproduced occupancy table and was easy to read as
+having the same backing.
+
+**The timing regimes line up, and that is checkable rather than asserted.**
+@Reviewer verified it on the device-6 run and it holds here: the intervention
+times with cuda events, best of 10 × 20 inner calls, which is the eager regime,
+and its unhinted rows land on the width-cliff sidecar's *eager* column to
++0.09% at 57344 and −0.21% at 49152, across two commits, two probes and two
+devices. The cliff's graph column at the same shapes is 409.5 and 171.1 µs, so
+at 57344 the intervention is unambiguously reading eager (0.09% vs 0.84%); at
+49152 the two regimes are only 1.2% apart and the separation there is weaker
+evidence than the first. This matters twice over: the intervention's bandwidth
+percentages are directly comparable to the cliff's because they are the same
+measurement of the same thing, and the unhinted baseline is demonstrably not
+drifting. Worth noting the ceiling denominator is shared too — 6.075 TB/s from
+the cliff sidecar's `two_read_one_write` probe, not a copy kernel, which on this
+part reads MALL-inflated.
 
 **Two traps had to be cleared to get this number, and both are worth recording
 because either would have produced a confident wrong answer.**
