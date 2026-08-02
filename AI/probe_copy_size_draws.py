@@ -43,6 +43,38 @@ the old ones. A staircase in the high-water mark, reversible. This is why
 "allocation history does nothing" and "editing the harness moved it 13%" are
 both true and were never in conflict: the history rows never changed the peak.
 
+  UPDATE -- the paragraph above was an assertion this file could not support,
+  and it is now partly measured and partly still wrong. Read both halves.
+
+  It could not be supported because this probe's prefix allocates n buffers of
+  one fixed size, so count and bytes move together and no row of it can tell
+  them apart. Worse, every prefix here tops out at 10.5 GiB, below the 12 GiB
+  the measurement itself allocates -- so the process high-water was 12 GiB in
+  every condition and "peak simultaneously-live bytes" was CONSTANT across the
+  entire treatment. The sentence named a quantity the experiment held fixed.
+  That is why the field was renamed `n_prior_512mib_allocs`.
+
+  `AI/probe_alloc_factorial.py` measures it: count {24,48} x per-buffer size
+  {512 MiB, 1 GiB}, 16 processes, prefixes at 12/24/24/48 GiB.
+
+    VINDICATED: total prior bytes explains 94.53% of the variance, a swing of
+    0.0638 TB/s (4.9077 -> 4.9568 -> 4.9715 at 12/24/48 GiB) which is the size
+    of the staircase step. Bytes is the better description of the axis.
+
+    STILL WRONG: "not churn" overstates. Holding total bytes at 24 GiB and
+    changing only the route (24x1GiB vs 48x512MiB) is equivocal -- t(6)=-2.15
+    p=0.0755, F(1,12)=7.51 p=0.0179 for the same contrast. A step-sized count
+    effect is excluded; a small one is not. And the response is concave
+    (+0.0491 for 12->24, +0.0147 for 24->48), so the routes are compared where
+    the curve is already flattening.
+
+  ALSO: the staircase's steps sit at 13, 17 and 21 prior allocations -- 6.5 to
+  10.5 GiB. The factorial's cells all start at 12 GiB, so it characterises the
+  curve ABOVE the region where this file found its steps. The two are adjacent,
+  not overlapping, and count=0 and count=13 anchor cells are declared to join
+  them. Do not read "94.53% is bytes" as settled for the 13/17/21 steps
+  themselves; it is measured at 12 GiB and up.
+
 The measurement is imported from the roofline probe rather than reimplemented,
 so there is one definition of "copy rate across identical buffers" in the tree
 and it cannot drift from the one that produced the committed sidecar.
@@ -248,12 +280,21 @@ def _sweep_steps(out_path):
     # row is still its own fresh process. The order of *processes* is what varies.
     #
     # But ascending-then-descending is still not enough, and @Reviewer is right
-    # about why: all-up-then-all-down makes level an exact function of collection
-    # position, `level == min(seq, 43 - seq)`. A single transient centred on the
-    # turnaround therefore satisfies BOTH direction tests -- it raises the levels
-    # collected near the middle in each pass, which is exactly where the high
-    # levels are. Time reversal does not break a symmetric confound; it is
-    # symmetric itself.
+    # about why: all-up-then-all-down makes level a deterministic function of
+    # SYMMETRIC collection position -- group the 88 positions by distance from
+    # the nearest end and every one of the 44 classes holds exactly one level.
+    # A single transient centred on the turnaround therefore satisfies BOTH
+    # direction tests -- it raises the levels collected near the middle in each
+    # pass, which is exactly where the high levels are. Time reversal does not
+    # break a symmetric confound; it is symmetric itself.
+    #
+    # Stated as the property rather than as `level == min(seq, 43 - seq)`, which
+    # is what it was written as first. That formula is the identity only when
+    # each pass holds one row per level; with SWEEP_REPS=2 the position axis
+    # doubles and it reads 86 exceptions out of 88 while the confound is
+    # untouched. The assembler's check had the same bug and reported the
+    # confound as WEAKER than it is -- a guard failing toward flattering the
+    # claim it restrains. Both now test the property.
     #
     # The interleaved pass breaks the functional relationship outright. Levels
     # are visited in a fixed shuffle (seeded, so the artifact is reproducible),

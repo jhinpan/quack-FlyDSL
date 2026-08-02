@@ -99,6 +99,19 @@ def _preconditions(rows, live_gib):
         "diagonal_pair_reached_the_same_peak": matched,
         "diagonal_pair_peak_GiB": diag_peaks[diag[0]][0] if matched else None,
         "every_prefix_above_measurement_live_set": all(above.values()),
+        "which_cells_are_above": above,
+        "the_one_that_is_not": (
+            "lo_lo reaches exactly 12.0 GiB, which EQUALS the measurement's own live "
+            "set rather than exceeding it, so `every_prefix_above...` is false. This is "
+            "a boundary case I built in without noticing: 24 x 512 MiB is 12 GiB on the "
+            "nose. lo_lo is therefore the one cell that does not clear the design's own "
+            "stated bar, and it is also the cell furthest from the others (4.9077 vs "
+            "~4.95-4.97). The three cells that carry the primary comparison -- lo_hi, "
+            "hi_lo at 24 GiB and hi_hi at 48 -- are all strictly above it, so the "
+            "diagonal test is unaffected. The anchor role lo_lo was given is what "
+            "suffers: it was meant to show the grid is not flat, and it does, but from "
+            "a point that sits at the boundary rather than clear of it."
+        ),
         "measurement_live_set_GiB": live_gib,
         "why_this_gates_everything": (
             "count and bytes are separated by lo_hi vs hi_lo reaching one peak by two "
@@ -121,10 +134,33 @@ def _factorial(means):
     artifact once published one as the other: a saturated cell term (98.4%) read
     as a main effect (0.04%) differ by three orders of magnitude and by their
     entire meaning.
+
+    READ THE FACTOR NAMES CAREFULLY -- I got them wrong here on the first pass,
+    and the failure is the same one this probe was built to fix.
+
+    `bytes_f` is `buffer_mib`: the size of EACH prior buffer, 512 MiB or 1 GiB.
+    It is NOT total prior bytes, which is `count * buffer_mib`. So the row
+    labelled `count_given_bytes` compares 24 vs 48 allocations at a fixed
+    PER-BUFFER size -- and doubling the count at fixed per-buffer size doubles
+    the total too, 12->24 GiB and 24->48 GiB. Neither Type-II main effect holds
+    total prior bytes constant. Both are confounded with it, exactly as the
+    staircase's single axis was, and I nearly published two significant
+    p-values (p=0.0000 and p=0.0003) as though the probe had separated them.
+
+    Only ONE contrast in this design holds total prior bytes fixed: the
+    diagonal, lo_hi vs hi_lo, 24 GiB either way. That is why it is the primary
+    comparison, and it is the reason the four cells were chosen. The factorial
+    below is a decomposition of the grid, not four independent questions --
+    `route_at_fixed_total_bytes` is the unconfounded one.
+
+    The general form, again: a factor name is a claim about what is held
+    constant, and a 2x2 whose two factors multiply into a third quantity does
+    not hold that third quantity constant on either margin.
     """
     for r in means:
         r["count_f"] = str(r["count"])
         r["bytes_f"] = str(r["buffer_mib"])
+        r["total_f"] = str(r["prefix_high_water_GiB"])
 
     gm = statistics.fmean(r["TBps_at_min"] for r in means)
     tot = sum((r["TBps_at_min"] - gm) ** 2 for r in means)
@@ -146,8 +182,8 @@ def _factorial(means):
 
     tests = {}
     for label, base, full in (
-        ("count_given_bytes", ["bytes_f"], ["bytes_f", "count_f"]),
-        ("bytes_given_count", ["count_f"], ["count_f", "bytes_f"]),
+        ("count_given_PER_BUFFER_size", ["bytes_f"], ["bytes_f", "count_f"]),
+        ("PER_BUFFER_size_given_count", ["count_f"], ["count_f", "bytes_f"]),
     ):
         r0, p0 = _additive_fit(means, base)
         r1, p1 = _additive_fit(means, full)
@@ -168,9 +204,48 @@ def _factorial(means):
     df2 = len(means) - len(by)
     fi = (inter_ss / df1) / (within / df2) if within > 0 and df1 > 0 and df2 > 0 else 0.0
 
+    # The unconfounded contrast, and the only one in the grid. A 3-level model on
+    # TOTAL prior bytes (12/24/48 GiB) pools lo_hi and hi_lo into one 24 GiB
+    # level; the saturated 4-cell model splits them. The difference between the
+    # two is precisely "does the ROUTE to 24 GiB matter, holding 24 GiB fixed" --
+    # which is the question the probe was built for, stated as a model comparison
+    # rather than as a t-test, so it is on the same footing as the rows above.
+    tby = defaultdict(list)
+    for r in means:
+        tby[r["total_f"]].append(r["TBps_at_min"])
+    tmu = {k: statistics.fmean(v) for k, v in tby.items()}
+    rss_total = sum((r["TBps_at_min"] - tmu[r["total_f"]]) ** 2 for r in means)
+    d1, d2 = len(by) - len(tby), len(means) - len(by)
+    fr = ((rss_total - within) / d1) / (within / d2) if within > 0 and d1 > 0 else 0.0
+
     return {
         "cells": cells,
         "grand_mean_TBps": gm,
+        "total_prior_bytes_only_model": {
+            "levels_GiB": {
+                k: round(v, 5) for k, v in sorted(tmu.items(), key=lambda x: float(x[0]))
+            },
+            "eta_squared_pct": round((1 - rss_total / tot) * 100.0, 4) if tot > 0 else 0.0,
+            "note": (
+                "one number per distinct total prior byte count, pooling the two routes "
+                "to 24 GiB. Compare to the saturated figure below: the gap between them "
+                "is everything the ROUTE explains."
+            ),
+        },
+        "route_at_fixed_total_bytes": {
+            "SS": rss_total - within,
+            "eta_squared_pct": round((rss_total - within) / tot * 100.0, 4) if tot > 0 else 0.0,
+            "F": round(fr, 4),
+            "df": [d1, d2],
+            "p": round(_f_sf(fr, d1, d2), 4),
+            "this_is_the_only_unconfounded_term_in_this_dict": True,
+            "why": (
+                "it is the sole comparison in the grid where total prior bytes is held "
+                "fixed at 24 GiB while the route to it changes (24x1GiB vs 48x512MiB). "
+                "Both Type-II 'main effects' below change the total on every contrast "
+                "they average over, because count * per-buffer size IS the total."
+            ),
+        },
         "saturated_between_cell_eta_squared_pct": round(between / tot * 100.0, 4)
         if tot > 0
         else 0.0,
@@ -186,10 +261,19 @@ def _factorial(means):
         "how_to_read_these": (
             "the saturated between-cell figure is what four separate cell means explain, "
             "and it is large by construction whenever cells differ at all. The Type-II "
-            "rows are each factor adjusted for the other, which is the number that "
-            "answers 'does count matter once bytes are held' -- these are not "
-            "interchangeable and publishing the first as the second overstates by "
-            "orders of magnitude."
+            "rows are each factor adjusted for the OTHER FACTOR ONLY -- not for total "
+            "prior bytes, which neither of them holds fixed. Read "
+            "`route_at_fixed_total_bytes` for the question this probe exists to answer; "
+            "the Type-II rows describe the grid's shape and must not be quoted as "
+            "'count matters independent of bytes'."
+        ),
+        "the_trap_in_this_dict": (
+            "`count_given_PER_BUFFER_size` is significant, and it is NOT evidence that "
+            "count matters at fixed bytes. Doubling count at fixed per-buffer size "
+            "doubles the total. The name says which variable is adjusted for, and a "
+            "reader in a hurry will read it as which quantity is held constant. Those "
+            "differ here, and the fields were renamed from `count_given_bytes` / "
+            "`bytes_given_count` for exactly that reason."
         ),
     }
 
@@ -236,6 +320,27 @@ def _diagonal(means):
         "smallest_difference_this_could_detect_pct": round(half / ma * 100.0, 4),
         "staircase_step_size_for_scale_TBps": round(STAIRCASE_HIGH_TBPS - STAIRCASE_LOW_TBPS, 5),
         "powered_for_a_staircase_sized_step": half < (STAIRCASE_HIGH_TBPS - STAIRCASE_LOW_TBPS),
+        "verdict_against_the_preregistered_rule": (
+            "p=0.0755 at alpha=.05 does not reject, but the interval is what carries "
+            "the content and it is NOT a clean null: [-0.0218, +0.0014] TB/s excludes "
+            "everything below -0.022 and only barely includes zero. The point estimate "
+            "-0.0102 TB/s is one sixth of the staircase's 0.060 step and the design "
+            "could resolve 0.0116, so a step-sized route effect is firmly excluded "
+            "while a small one is not. Read as: at 24 GiB held fixed, the route "
+            "(24 x 1 GiB vs 48 x 512 MiB) does not produce a staircase-sized change, "
+            "and whether it produces a small one is unresolved at n=4."
+        ),
+        "the_model_comparison_disagrees_and_that_matters": (
+            "the same contrast tested as a model comparison against the pooled "
+            "within-cell variance gives F(1,12)=7.51, p=0.0179 -- significant at the "
+            "same alpha the t-test misses. They differ because the F test borrows "
+            "variance from all four cells (df=12) while the t-test uses only the two "
+            "diagonal cells (df=6). Neither is wrong; the F test's extra power is "
+            "bought with an equal-variance assumption across cells whose stdevs run "
+            "0.0018 to 0.0083, a 4.6x spread. I am not picking the one I like: the "
+            "honest statement is that the route effect sits right at the resolution "
+            "limit of this design, which is why the follow-up below is not optional."
+        ),
         "why_the_interval_and_not_just_p": (
             "with n=4 per cell a large p is compatible with an effect the design simply "
             "could not see. The interval says which differences are excluded; if it is "
@@ -463,6 +568,27 @@ def main():
         "anchor_limitation": _anchor(means),
         "order_control": _order_control(means),
         "band": _band(means, rows),
+        "conclusion": (
+            "Prior-allocation TOTAL BYTES moves the copy rate; the ROUTE to a given "
+            "total does not move it by anything like a staircase step. Total prior "
+            "bytes alone (12 / 24 / 48 GiB -> 4.9077 / 4.9568 / 4.9715 TB/s) explains "
+            "94.53% of the variance across 16 processes, a 0.0638 TB/s swing that is "
+            "the same size as the staircase's 0.060 step. Splitting the two routes to "
+            "24 GiB adds 2.11% more. So the staircase axis is better described as prior "
+            "bytes than as prior allocation count -- but see the two limits below "
+            "before that sentence is reused anywhere."
+        ),
+        "two_limits_on_that_conclusion": (
+            "FIRST: 'count does not matter' is not established. The diagonal is the only "
+            "contrast holding total bytes fixed, and it is equivocal -- t(6)=-2.15 "
+            "p=0.0755 against F(1,12)=7.51 p=0.0179 for the same comparison. A "
+            "step-sized route effect is excluded; a small one is not. SECOND: the "
+            "response is strongly concave (+0.0491 TB/s from 12->24 GiB, then only "
+            "+0.0147 from 24->48), so the two routes are being compared at 24 GiB, on "
+            "the part of the curve that is already flattening. A route effect could be "
+            "larger lower down and this design would not see it. Both are why the "
+            "count=0 and count=13 anchor cells are declared, not optional."
+        ),
         "unit_of_analysis": (
             "per-process mean over the five identical-buffer slots, n=4 per cell. The "
             "five slots share one process and one allocator state; they are repeated "

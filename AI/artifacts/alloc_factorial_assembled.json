@@ -1,0 +1,277 @@
+{
+  "what": "Does prior-allocation COUNT or prior-allocation BYTES move the copy rate? Four cells cross 24/48 allocations with 512 MiB/1 GiB buffers; lo_hi and hi_lo reach the same 24 GiB prior peak by two different routes.",
+  "analysis_was_written_before_the_numbers": "AI/assemble_alloc_factorial.py was authored while the 16-process sweep was still running and committed before its output was read. Unit of analysis, thresholds, the band's units, the anchor limitation and its follow-up are all fixed there. Only which pre-registered branch is taken was decided by the data.",
+  "what_the_author_had_already_seen": "two smoke-test rows, run to check that lo_hi and hi_lo really reach the same 24 GiB peak before spending 16 processes on a design that rests on it. Their rates were on screen: lo_hi 4.9648/5.0411/4.9977/4.8784/4.8843 and hi_lo 4.9869/4.8870/4.9478/5.0067/4.9663 TB/s. That is one process per diagonal cell, and it is disclosed because 'written before the numbers' is otherwise a claim a reader cannot check and I cannot honestly make. Those two processes are NOT in the artifact -- the sweep ran fresh -- so they biased the choice of analysis, if at all, and not the analysis itself.",
+  "and_the_file_mtime_will_not_show_this": "assemble_alloc_factorial.py's mtime is LATER than alloc_factorial.json's, because ruff format rewrote it after the sweep finished. The ordering claim above rests on the commit sequence, not on mtimes, and a reader checking the obvious filesystem evidence would find it says the opposite.",
+  "device_name": "AMD Instinct MI355X",
+  "shuffle_seed": 20260803,
+  "n_processes": 16,
+  "preconditions": {
+    "prefix_high_water_GiB_by_cell": {
+      "hi_lo": [
+        24.0
+      ],
+      "lo_hi": [
+        24.0
+      ],
+      "hi_hi": [
+        48.0
+      ],
+      "lo_lo": [
+        12.0
+      ]
+    },
+    "diagonal_pair": [
+      "lo_hi",
+      "hi_lo"
+    ],
+    "diagonal_pair_reached_the_same_peak": true,
+    "diagonal_pair_peak_GiB": 24.0,
+    "every_prefix_above_measurement_live_set": false,
+    "which_cells_are_above": {
+      "hi_lo": true,
+      "lo_hi": true,
+      "hi_hi": true,
+      "lo_lo": false
+    },
+    "the_one_that_is_not": "lo_lo reaches exactly 12.0 GiB, which EQUALS the measurement's own live set rather than exceeding it, so `every_prefix_above...` is false. This is a boundary case I built in without noticing: 24 x 512 MiB is 12 GiB on the nose. lo_lo is therefore the one cell that does not clear the design's own stated bar, and it is also the cell furthest from the others (4.9077 vs ~4.95-4.97). The three cells that carry the primary comparison -- lo_hi, hi_lo at 24 GiB and hi_hi at 48 -- are all strictly above it, so the diagonal test is unaffected. The anchor role lo_lo was given is what suffers: it was meant to show the grid is not flat, and it does, but from a point that sits at the boundary rather than clear of it.",
+    "measurement_live_set_GiB": 12.0,
+    "why_this_gates_everything": "count and bytes are separated by lo_hi vs hi_lo reaching one peak by two routes. If that is false the two cells differ in both factors at once and the design has reproduced the staircase's confound at larger numbers.",
+    "and_this_one": "the staircase's prefixes all sat BELOW the 12 GiB the measurement itself allocates, so its process high-water was constant at 12 GiB across every condition -- peak bytes never varied in the treatment that named itself after peak bytes. Here every prefix exceeds it, so the axis is real."
+  },
+  "primary_comparison": {
+    "lo_hi_mean_TBps": 4.951748951447703,
+    "hi_lo_mean_TBps": 4.961941941481479,
+    "difference_TBps": -0.010192990033775828,
+    "difference_pct_of_lo_hi": -0.2058,
+    "ci95_TBps": [
+      -0.02182,
+      0.00143
+    ],
+    "t": -2.1459,
+    "df": 6,
+    "p": 0.0755,
+    "smallest_difference_this_could_detect_TBps": 0.01162,
+    "smallest_difference_this_could_detect_pct": 0.2347,
+    "staircase_step_size_for_scale_TBps": 0.06,
+    "powered_for_a_staircase_sized_step": true,
+    "verdict_against_the_preregistered_rule": "p=0.0755 at alpha=.05 does not reject, but the interval is what carries the content and it is NOT a clean null: [-0.0218, +0.0014] TB/s excludes everything below -0.022 and only barely includes zero. The point estimate -0.0102 TB/s is one sixth of the staircase's 0.060 step and the design could resolve 0.0116, so a step-sized route effect is firmly excluded while a small one is not. Read as: at 24 GiB held fixed, the route (24 x 1 GiB vs 48 x 512 MiB) does not produce a staircase-sized change, and whether it produces a small one is unresolved at n=4.",
+    "the_model_comparison_disagrees_and_that_matters": "the same contrast tested as a model comparison against the pooled within-cell variance gives F(1,12)=7.51, p=0.0179 -- significant at the same alpha the t-test misses. They differ because the F test borrows variance from all four cells (df=12) while the t-test uses only the two diagonal cells (df=6). Neither is wrong; the F test's extra power is bought with an equal-variance assumption across cells whose stdevs run 0.0018 to 0.0083, a 4.6x spread. I am not picking the one I like: the honest statement is that the route effect sits right at the resolution limit of this design, which is why the follow-up below is not optional.",
+    "why_the_interval_and_not_just_p": "with n=4 per cell a large p is compatible with an effect the design simply could not see. The interval says which differences are excluded; if it is wider than the staircase step this probe cannot call the null either way, and that is a result about the probe rather than about the allocator."
+  },
+  "factorial": {
+    "cells": {
+      "hi_hi": {
+        "n": 4,
+        "mean_TBps": 4.9715056250133305,
+        "stdev_TBps": 0.004119285442501166,
+        "min_TBps": 4.9656579893160115,
+        "max_TBps": 4.975212728497028
+      },
+      "hi_lo": {
+        "n": 4,
+        "mean_TBps": 4.961941941481479,
+        "stdev_TBps": 0.008254228996558645,
+        "min_TBps": 4.949715979307041,
+        "max_TBps": 4.9676896062154405
+      },
+      "lo_hi": {
+        "n": 4,
+        "mean_TBps": 4.951748951447703,
+        "stdev_TBps": 0.004702971681790611,
+        "min_TBps": 4.946017608872525,
+        "max_TBps": 4.957387660564931
+      },
+      "lo_lo": {
+        "n": 4,
+        "mean_TBps": 4.907718420353369,
+        "stdev_TBps": 0.0018466841569812376,
+        "min_TBps": 4.90588392677091,
+        "max_TBps": 4.909373126710382
+      }
+    },
+    "grand_mean_TBps": 4.948228734573971,
+    "total_prior_bytes_only_model": {
+      "levels_GiB": {
+        "12.0": 4.90772,
+        "24.0": 4.95685,
+        "48.0": 4.97151
+      },
+      "eta_squared_pct": 94.5295,
+      "note": "one number per distinct total prior byte count, pooling the two routes to 24 GiB. Compare to the saturated figure below: the gap between them is everything the ROUTE explains."
+    },
+    "route_at_fixed_total_bytes": {
+      "SS": 0.00020779409165727045,
+      "eta_squared_pct": 2.1063,
+      "F": 7.5132,
+      "df": [
+        1,
+        12
+      ],
+      "p": 0.0179,
+      "this_is_the_only_unconfounded_term_in_this_dict": true,
+      "why": "it is the sole comparison in the grid where total prior bytes is held fixed at 24 GiB while the route to it changes (24x1GiB vs 48x512MiB). Both Type-II 'main effects' below change the total on every contrast they average over, because count * per-buffer size IS the total."
+    },
+    "saturated_between_cell_eta_squared_pct": 96.6358,
+    "within_cell_eta_squared_pct": 3.3642,
+    "main_effects_type_II": {
+      "count_given_PER_BUFFER_size": {
+        "type_II_SS": 0.005473069206923145,
+        "eta_squared_pct": 55.4782,
+        "F": 46.8137,
+        "df": [
+          1,
+          13
+        ],
+        "p": 0.0
+      },
+      "PER_BUFFER_size_given_count": {
+        "type_II_SS": 0.0028723398413977455,
+        "eta_squared_pct": 29.1157,
+        "F": 24.5685,
+        "df": [
+          1,
+          13
+        ],
+        "p": 0.0003
+      }
+    },
+    "interaction": {
+      "SS": 0.0011879635808953466,
+      "eta_squared_pct": 12.0419,
+      "F": 42.9531,
+      "df": [
+        1,
+        12
+      ],
+      "p": 0.0
+    },
+    "how_to_read_these": "the saturated between-cell figure is what four separate cell means explain, and it is large by construction whenever cells differ at all. The Type-II rows are each factor adjusted for the OTHER FACTOR ONLY -- not for total prior bytes, which neither of them holds fixed. Read `route_at_fixed_total_bytes` for the question this probe exists to answer; the Type-II rows describe the grid's shape and must not be quoted as 'count matters independent of bytes'.",
+    "the_trap_in_this_dict": "`count_given_PER_BUFFER_size` is significant, and it is NOT evidence that count matters at fixed bytes. Doubling count at fixed per-buffer size doubles the total. The name says which variable is adjusted for, and a reader in a hurry will read it as which quantity is held constant. Those differ here, and the fields were renamed from `count_given_bytes` / `bytes_given_count` for exactly that reason."
+  },
+  "anchor_limitation": {
+    "all_counts_are_past_every_known_staircase_step": true,
+    "known_step_locations_n_prior_allocs": [
+      13,
+      17,
+      21
+    ],
+    "counts_tested": [
+      24,
+      48
+    ],
+    "grand_mean_TBps": 4.948228734573971,
+    "staircase_low_TBps": 4.917,
+    "staircase_high_TBps": 4.977,
+    "grand_mean_is_nearer": "high",
+    "no_zero_count_cell_in_this_run": true,
+    "what_that_costs": "without a count=0 condition in these same processes there is no internal evidence that the prefix moves the rate AT ALL here. A null across the four cells is then ambiguous between 'count and bytes both do not matter' and 'the curve is flat above 21 and this probe never left the plateau'. The comparison to the staircase levels above is across sessions and processes, so it is context, not an internal control.",
+    "declared_followup": "add count=0 and count=13 cells at 512 MiB in one shuffled run with the existing four. Declared here, before the numbers were read, so that adding it later is a pre-registered step rather than a reaction to the result."
+  },
+  "order_control": {
+    "corr_rate_vs_collection_position": -0.0362,
+    "first_half_mean_TBps": 4.947046850133366,
+    "second_half_mean_TBps": 4.949410619014575,
+    "half_difference_TBps": -0.0023637688812092605,
+    "half_difference_pct_of_total_variance": 0.227,
+    "counts_in_first_half": [
+      24,
+      24,
+      24,
+      24,
+      48,
+      48,
+      48,
+      48
+    ],
+    "counts_in_second_half": [
+      24,
+      24,
+      24,
+      24,
+      48,
+      48,
+      48,
+      48
+    ],
+    "shuffle_balanced_the_counts_across_halves": true,
+    "why_not_position_as_a_factor": "16 distinct positions on 16 rows is a saturated model: it explains 100% of the variance by construction and says nothing. The trend and the half-split are the tests that can fail."
+  },
+  "band": {
+    "band_TBps": [
+      4.885,
+      4.895
+    ],
+    "band_width_TBps": 0.01,
+    "cell_mean_separations": {
+      "hi_hi_vs_hi_lo": {
+        "difference_TBps": 0.009563683531851552,
+        "in_band_widths": 0.956
+      },
+      "hi_hi_vs_lo_hi": {
+        "difference_TBps": 0.01975667356562738,
+        "in_band_widths": 1.976
+      },
+      "hi_hi_vs_lo_lo": {
+        "difference_TBps": 0.06378720465996146,
+        "in_band_widths": 6.379
+      },
+      "hi_lo_vs_lo_hi": {
+        "difference_TBps": 0.010192990033775828,
+        "in_band_widths": 1.019
+      },
+      "hi_lo_vs_lo_lo": {
+        "difference_TBps": 0.05422352112810991,
+        "in_band_widths": 5.422
+      },
+      "lo_hi_vs_lo_lo": {
+        "difference_TBps": 0.04403053109433408,
+        "in_band_widths": 4.403
+      }
+    },
+    "within_cell_range_TBps_by_cell": {
+      "hi_hi": 0.00955,
+      "hi_lo": 0.01797,
+      "lo_hi": 0.01137,
+      "lo_lo": 0.00349
+    },
+    "largest_within_cell_range_in_band_widths": 1.797,
+    "why_absolute": "a percentage-of-own-mean threshold grants a fast cell more absolute room than a slow one. Comparing a cell range as a percent of its own mean against a band width as a percent of 4.885 is two denominators in one comparison, and it once turned 9/20 into 10/20.",
+    "n_processes": 16
+  },
+  "conclusion": "Prior-allocation TOTAL BYTES moves the copy rate; the ROUTE to a given total does not move it by anything like a staircase step. Total prior bytes alone (12 / 24 / 48 GiB -> 4.9077 / 4.9568 / 4.9715 TB/s) explains 94.53% of the variance across 16 processes, a 0.0638 TB/s swing that is the same size as the staircase's 0.060 step. Splitting the two routes to 24 GiB adds 2.11% more. So the staircase axis is better described as prior bytes than as prior allocation count -- but see the two limits below before that sentence is reused anywhere.",
+  "two_limits_on_that_conclusion": "FIRST: 'count does not matter' is not established. The diagonal is the only contrast holding total bytes fixed, and it is equivocal -- t(6)=-2.15 p=0.0755 against F(1,12)=7.51 p=0.0179 for the same comparison. A step-sized route effect is excluded; a small one is not. SECOND: the response is strongly concave (+0.0491 TB/s from 12->24 GiB, then only +0.0147 from 24->48), so the two routes are being compared at 24 GiB, on the part of the curve that is already flattening. A route effect could be larger lower down and this design would not see it. Both are why the count=0 and count=13 anchor cells are declared, not optional.",
+  "unit_of_analysis": "per-process mean over the five identical-buffer slots, n=4 per cell. The five slots share one process and one allocator state; they are repeated measures, not replicates.",
+  "what_this_cannot_do": "it separates two candidate axes and identifies no mechanism. Nothing here explains why a level differs, and no factorial or ordering control can.",
+  "manifest": {
+    "n_inputs": 3,
+    "entries": [
+      {
+        "path": "AI/artifacts/alloc_factorial.json",
+        "sha256": "cdcc6b511a2f52129f471e6b246b1cd24d40067f5e7c94fc28a21c3f11722a47",
+        "bytes": 59262
+      },
+      {
+        "path": "AI/probe_alloc_factorial.py",
+        "sha256": "91c36cbb1876eb4212771079328a4c47f9c44ee1e6097c991be514e2f932c676",
+        "bytes": 8515
+      },
+      {
+        "path": "AI/assemble_alloc_factorial.py",
+        "sha256": "bb2c3dd28ec24868436d739b0f1739a265e9099eabc18057857ee9fb8facca7c",
+        "bytes": 28979
+      }
+    ],
+    "what_this_proves": "the assembler read exactly these bytes. It does not prove they came from a GPU, and a manifest cannot."
+  },
+  "git": {
+    "commit": "7ba33a6",
+    "worktree_dirty": true,
+    "worktree_dirty_paths": [
+      "AI/artifacts/",
+      "AI/assemble_alloc_factorial.py",
+      "AI/probe_copy_size_draws.py"
+    ],
+    "worktree_dirty_note": "cannot read clean in the commit that contains this artifact: writing the file dirties the tree the flag describes. The path list is what makes the flag checkable."
+  }
+}
