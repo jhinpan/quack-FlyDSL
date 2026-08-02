@@ -1,0 +1,595 @@
+{
+  "what": "relative buffer layout per cell, reproducing _identical_buffer_spread's allocation sequence without timing it",
+  "device_name": "AMD Instinct MI355X",
+  "reps_per_cell": 3,
+  "allocation_sequence_still_matches_the_measurement": {
+    "dst_allocated_before_srcs": true,
+    "five_srcs": true,
+    "same_elem_count_expr": true,
+    "measured_at_mib": 2048
+  },
+  "layout_deterministic_within_cell": {
+    "lo_lo": true,
+    "lo_hi": true,
+    "hi_lo": true,
+    "hi_hi": true,
+    "zero": true,
+    "step": true
+  },
+  "all_cells_deterministic": true,
+  "why_offsets_and_not_pointers": "absolute pointers differ every process because the virtual base moves; the relative layout does not. Comparing absolutes would report six differences and mean nothing.",
+  "DOES_LAYOUT_EXPLAIN_THE_ARGMIN": {
+    "argmin_by_cell": {
+      "hi_hi": 0,
+      "hi_lo": 1,
+      "lo_hi": 3,
+      "lo_lo": 2,
+      "step": 1,
+      "zero": 4
+    },
+    "distinct_layouts": 2,
+    "cells_sharing_the_largest_layout": [
+      "hi_hi",
+      "hi_lo",
+      "lo_hi",
+      "lo_lo",
+      "step"
+    ],
+    "distinct_argmins_among_them": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "layout_explains_argmin": false,
+    "the_refutation": "5 of 6 cells have byte-identical relative layouts and 4 distinct argmin slots between them. A variable that does not vary cannot explain an outcome that does, so relative virtual layout is not the mechanism. This was written expecting to confirm it.",
+    "what_survives": "physical placement. The caching allocator hands out virtual addresses; the driver chooses the physical pages behind them from a free-list whose fragmentation the prefix history does change. MI355X interleaves channels and MALL sets by physical address, so identical virtual offsets can still stripe differently -- the one state this table cannot distinguish. No userspace physical-address visibility on ROCm, so this tool cannot go further.",
+    "the_one_layout_distinct_cell": "zero is the only cell with its own layout, and its argmin is the only one no count>0 cell shares. One draw. With five cells sharing a layout and disagreeing four ways, reading the sixth as support would be fitting a rule to the single point that did not refute it."
+  },
+  "rows": [
+    {
+      "dst_offset": 10747904000,
+      "src_offsets": [
+        8598323200,
+        6448742400,
+        4299161600,
+        2149580800,
+        0
+      ],
+      "src_minus_dst": [
+        -2149580800,
+        -4299161600,
+        -6448742400,
+        -8598323200,
+        -10747904000
+      ],
+      "dst_ptr_absolute": 138171530608640,
+      "src_ptrs_absolute": [
+        138169381027840,
+        138167231447040,
+        138165081866240,
+        138162932285440,
+        138160782704640
+      ],
+      "all_2MiB_aligned": true,
+      "n_segments": 6,
+      "cell": "lo_lo",
+      "count": 24,
+      "buffer_mib": 512
+    },
+    {
+      "dst_offset": 10747904000,
+      "src_offsets": [
+        8598323200,
+        6448742400,
+        4299161600,
+        2149580800,
+        0
+      ],
+      "src_minus_dst": [
+        -2149580800,
+        -4299161600,
+        -6448742400,
+        -8598323200,
+        -10747904000
+      ],
+      "dst_ptr_absolute": 130118332710912,
+      "src_ptrs_absolute": [
+        130116183130112,
+        130114033549312,
+        130111883968512,
+        130109734387712,
+        130107584806912
+      ],
+      "all_2MiB_aligned": true,
+      "n_segments": 6,
+      "cell": "lo_lo",
+      "count": 24,
+      "buffer_mib": 512
+    },
+    {
+      "dst_offset": 10747904000,
+      "src_offsets": [
+        8598323200,
+        6448742400,
+        4299161600,
+        2149580800,
+        0
+      ],
+      "src_minus_dst": [
+        -2149580800,
+        -4299161600,
+        -6448742400,
+        -8598323200,
+        -10747904000
+      ],
+      "dst_ptr_absolute": 138281387819008,
+      "src_ptrs_absolute": [
+        138279238238208,
+        138277088657408,
+        138274939076608,
+        138272789495808,
+        138270639915008
+      ],
+      "all_2MiB_aligned": true,
+      "n_segments": 6,
+      "cell": "lo_lo",
+      "count": 24,
+      "buffer_mib": 512
+    },
+    {
+      "dst_offset": 10747904000,
+      "src_offsets": [
+        8598323200,
+        6448742400,
+        4299161600,
+        2149580800,
+        0
+      ],
+      "src_minus_dst": [
+        -2149580800,
+        -4299161600,
+        -6448742400,
+        -8598323200,
+        -10747904000
+      ],
+      "dst_ptr_absolute": 128942048542720,
+      "src_ptrs_absolute": [
+        128939898961920,
+        128937749381120,
+        128935599800320,
+        128933450219520,
+        128931300638720
+      ],
+      "all_2MiB_aligned": true,
+      "n_segments": 6,
+      "cell": "lo_hi",
+      "count": 24,
+      "buffer_mib": 1024
+    },
+    {
+      "dst_offset": 10747904000,
+      "src_offsets": [
+        8598323200,
+        6448742400,
+        4299161600,
+        2149580800,
+        0
+      ],
+      "src_minus_dst": [
+        -2149580800,
+        -4299161600,
+        -6448742400,
+        -8598323200,
+        -10747904000
+      ],
+      "dst_ptr_absolute": 137279922241536,
+      "src_ptrs_absolute": [
+        137277772660736,
+        137275623079936,
+        137273473499136,
+        137271323918336,
+        137269174337536
+      ],
+      "all_2MiB_aligned": true,
+      "n_segments": 6,
+      "cell": "lo_hi",
+      "count": 24,
+      "buffer_mib": 1024
+    },
+    {
+      "dst_offset": 10747904000,
+      "src_offsets": [
+        8598323200,
+        6448742400,
+        4299161600,
+        2149580800,
+        0
+      ],
+      "src_minus_dst": [
+        -2149580800,
+        -4299161600,
+        -6448742400,
+        -8598323200,
+        -10747904000
+      ],
+      "dst_ptr_absolute": 138797253656576,
+      "src_ptrs_absolute": [
+        138795104075776,
+        138792954494976,
+        138790804914176,
+        138788655333376,
+        138786505752576
+      ],
+      "all_2MiB_aligned": true,
+      "n_segments": 6,
+      "cell": "lo_hi",
+      "count": 24,
+      "buffer_mib": 1024
+    },
+    {
+      "dst_offset": 10747904000,
+      "src_offsets": [
+        8598323200,
+        6448742400,
+        4299161600,
+        2149580800,
+        0
+      ],
+      "src_minus_dst": [
+        -2149580800,
+        -4299161600,
+        -6448742400,
+        -8598323200,
+        -10747904000
+      ],
+      "dst_ptr_absolute": 129907610877952,
+      "src_ptrs_absolute": [
+        129905461297152,
+        129903311716352,
+        129901162135552,
+        129899012554752,
+        129896862973952
+      ],
+      "all_2MiB_aligned": true,
+      "n_segments": 6,
+      "cell": "hi_lo",
+      "count": 48,
+      "buffer_mib": 512
+    },
+    {
+      "dst_offset": 10747904000,
+      "src_offsets": [
+        8598323200,
+        6448742400,
+        4299161600,
+        2149580800,
+        0
+      ],
+      "src_minus_dst": [
+        -2149580800,
+        -4299161600,
+        -6448742400,
+        -8598323200,
+        -10747904000
+      ],
+      "dst_ptr_absolute": 135681321992192,
+      "src_ptrs_absolute": [
+        135679172411392,
+        135677022830592,
+        135674873249792,
+        135672723668992,
+        135670574088192
+      ],
+      "all_2MiB_aligned": true,
+      "n_segments": 6,
+      "cell": "hi_lo",
+      "count": 48,
+      "buffer_mib": 512
+    },
+    {
+      "dst_offset": 10747904000,
+      "src_offsets": [
+        8598323200,
+        6448742400,
+        4299161600,
+        2149580800,
+        0
+      ],
+      "src_minus_dst": [
+        -2149580800,
+        -4299161600,
+        -6448742400,
+        -8598323200,
+        -10747904000
+      ],
+      "dst_ptr_absolute": 126772016316416,
+      "src_ptrs_absolute": [
+        126769866735616,
+        126767717154816,
+        126765567574016,
+        126763417993216,
+        126761268412416
+      ],
+      "all_2MiB_aligned": true,
+      "n_segments": 6,
+      "cell": "hi_lo",
+      "count": 48,
+      "buffer_mib": 512
+    },
+    {
+      "dst_offset": 10747904000,
+      "src_offsets": [
+        8598323200,
+        6448742400,
+        4299161600,
+        2149580800,
+        0
+      ],
+      "src_minus_dst": [
+        -2149580800,
+        -4299161600,
+        -6448742400,
+        -8598323200,
+        -10747904000
+      ],
+      "dst_ptr_absolute": 131398367182848,
+      "src_ptrs_absolute": [
+        131396217602048,
+        131394068021248,
+        131391918440448,
+        131389768859648,
+        131387619278848
+      ],
+      "all_2MiB_aligned": true,
+      "n_segments": 6,
+      "cell": "hi_hi",
+      "count": 48,
+      "buffer_mib": 1024
+    },
+    {
+      "dst_offset": 10747904000,
+      "src_offsets": [
+        8598323200,
+        6448742400,
+        4299161600,
+        2149580800,
+        0
+      ],
+      "src_minus_dst": [
+        -2149580800,
+        -4299161600,
+        -6448742400,
+        -8598323200,
+        -10747904000
+      ],
+      "dst_ptr_absolute": 126997636317184,
+      "src_ptrs_absolute": [
+        126995486736384,
+        126993337155584,
+        126991187574784,
+        126989037993984,
+        126986888413184
+      ],
+      "all_2MiB_aligned": true,
+      "n_segments": 6,
+      "cell": "hi_hi",
+      "count": 48,
+      "buffer_mib": 1024
+    },
+    {
+      "dst_offset": 10747904000,
+      "src_offsets": [
+        8598323200,
+        6448742400,
+        4299161600,
+        2149580800,
+        0
+      ],
+      "src_minus_dst": [
+        -2149580800,
+        -4299161600,
+        -6448742400,
+        -8598323200,
+        -10747904000
+      ],
+      "dst_ptr_absolute": 123957067907072,
+      "src_ptrs_absolute": [
+        123954918326272,
+        123952768745472,
+        123950619164672,
+        123948469583872,
+        123946320003072
+      ],
+      "all_2MiB_aligned": true,
+      "n_segments": 6,
+      "cell": "hi_hi",
+      "count": 48,
+      "buffer_mib": 1024
+    },
+    {
+      "dst_offset": 11112808448,
+      "src_offsets": [
+        8963227648,
+        6448742400,
+        4299161600,
+        2149580800,
+        0
+      ],
+      "src_minus_dst": [
+        -2149580800,
+        -4664066048,
+        -6813646848,
+        -8963227648,
+        -11112808448
+      ],
+      "dst_ptr_absolute": 133170273976320,
+      "src_ptrs_absolute": [
+        133168124395520,
+        133165609910272,
+        133163460329472,
+        133161310748672,
+        133159161167872
+      ],
+      "all_2MiB_aligned": true,
+      "n_segments": 6,
+      "cell": "zero",
+      "count": 0,
+      "buffer_mib": 512
+    },
+    {
+      "dst_offset": 11112808448,
+      "src_offsets": [
+        8963227648,
+        6448742400,
+        4299161600,
+        2149580800,
+        0
+      ],
+      "src_minus_dst": [
+        -2149580800,
+        -4664066048,
+        -6813646848,
+        -8963227648,
+        -11112808448
+      ],
+      "dst_ptr_absolute": 129736581840896,
+      "src_ptrs_absolute": [
+        129734432260096,
+        129731917774848,
+        129729768194048,
+        129727618613248,
+        129725469032448
+      ],
+      "all_2MiB_aligned": true,
+      "n_segments": 6,
+      "cell": "zero",
+      "count": 0,
+      "buffer_mib": 512
+    },
+    {
+      "dst_offset": 11112808448,
+      "src_offsets": [
+        8963227648,
+        6448742400,
+        4299161600,
+        2149580800,
+        0
+      ],
+      "src_minus_dst": [
+        -2149580800,
+        -4664066048,
+        -6813646848,
+        -8963227648,
+        -11112808448
+      ],
+      "dst_ptr_absolute": 139811232940032,
+      "src_ptrs_absolute": [
+        139809083359232,
+        139806568873984,
+        139804419293184,
+        139802269712384,
+        139800120131584
+      ],
+      "all_2MiB_aligned": true,
+      "n_segments": 6,
+      "cell": "zero",
+      "count": 0,
+      "buffer_mib": 512
+    },
+    {
+      "dst_offset": 10747904000,
+      "src_offsets": [
+        8598323200,
+        6448742400,
+        4299161600,
+        2149580800,
+        0
+      ],
+      "src_minus_dst": [
+        -2149580800,
+        -4299161600,
+        -6448742400,
+        -8598323200,
+        -10747904000
+      ],
+      "dst_ptr_absolute": 127198493147136,
+      "src_ptrs_absolute": [
+        127196343566336,
+        127194193985536,
+        127192044404736,
+        127189894823936,
+        127187745243136
+      ],
+      "all_2MiB_aligned": true,
+      "n_segments": 6,
+      "cell": "step",
+      "count": 13,
+      "buffer_mib": 512
+    },
+    {
+      "dst_offset": 10747904000,
+      "src_offsets": [
+        8598323200,
+        6448742400,
+        4299161600,
+        2149580800,
+        0
+      ],
+      "src_minus_dst": [
+        -2149580800,
+        -4299161600,
+        -6448742400,
+        -8598323200,
+        -10747904000
+      ],
+      "dst_ptr_absolute": 125850745831424,
+      "src_ptrs_absolute": [
+        125848596250624,
+        125846446669824,
+        125844297089024,
+        125842147508224,
+        125839997927424
+      ],
+      "all_2MiB_aligned": true,
+      "n_segments": 6,
+      "cell": "step",
+      "count": 13,
+      "buffer_mib": 512
+    },
+    {
+      "dst_offset": 10747904000,
+      "src_offsets": [
+        8598323200,
+        6448742400,
+        4299161600,
+        2149580800,
+        0
+      ],
+      "src_minus_dst": [
+        -2149580800,
+        -4299161600,
+        -6448742400,
+        -8598323200,
+        -10747904000
+      ],
+      "dst_ptr_absolute": 135926470672384,
+      "src_ptrs_absolute": [
+        135924321091584,
+        135922171510784,
+        135920021929984,
+        135917872349184,
+        135915722768384
+      ],
+      "all_2MiB_aligned": true,
+      "n_segments": 6,
+      "cell": "step",
+      "count": 13,
+      "buffer_mib": 512
+    }
+  ],
+  "git": {
+    "head": "7a8f571dcb95e1c00c889184c36d09dcf909be4d",
+    "dirty": true
+  }
+}

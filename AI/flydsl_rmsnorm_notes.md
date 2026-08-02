@@ -1382,6 +1382,49 @@ structure that is the actual finding*. Why a placement is faster remains
 unexplained — `count=13` was chosen because it is the first staircase step, and
 nothing predicted this.
 
+###### The obvious mechanism is wrong: the layout is byte-identical across cells that disagree
+
+`AI/probe_alloc_layout.py`, run at `AI/artifacts/alloc_layout.json`. The first
+thing to check is the one that would explain everything at once: the prefix
+moves where the six measurement buffers land, and some addresses are better than
+others. That would give unanimity within a cell (same layout every process),
+disagreement between cells (different layout per cell), and non-monotonicity in
+bytes (addresses are not monotone in the bytes allocated before them) from a
+single cause. I wrote the probe expecting to confirm it.
+
+It reproduces `_identical_buffer_spread`'s allocation sequence exactly and
+records pointers instead of timing anything — one 2 GiB `dst`, then five 2 GiB
+`srcs`, after the same prefix — with the sequence asserted against that
+function's source so an edit there fails loudly rather than silently leaving
+this file describing a layout nothing measures.
+
+| cell | count | size | dst offset | src offsets | argmin |
+|---|---|---|---|---|---|
+| zero | 0 | 512 | 11112808448 | 8963227648, 6448742400, 4299161600, 2149580800, 0 | 4 |
+| step | 13 | 512 | 10747904000 | 8598323200, 6448742400, 4299161600, 2149580800, 0 | 1 |
+| lo_lo | 24 | 512 | 10747904000 | 8598323200, 6448742400, 4299161600, 2149580800, 0 | 2 |
+| lo_hi | 24 | 1024 | 10747904000 | 8598323200, 6448742400, 4299161600, 2149580800, 0 | 3 |
+| hi_lo | 48 | 512 | 10747904000 | 8598323200, 6448742400, 4299161600, 2149580800, 0 | 1 |
+| hi_hi | 48 | 1024 | 10747904000 | 8598323200, 6448742400, 4299161600, 2149580800, 0 | 0 |
+
+**Five of six cells are byte-identical and carry four distinct argmins.** A
+variable that does not vary cannot explain an outcome that does. Relative
+virtual layout is not the mechanism. Deterministic in all six cells across three
+independent processes, six allocator segments everywhere, all buffers 2 MiB
+aligned — so this is not a null from noisy measurement, it is the same layout.
+
+What survives is **physical** placement. The caching allocator hands out virtual
+addresses; the driver picks the physical pages behind them from a free-list
+whose fragmentation the prefix history does change. MI355X interleaves channels
+and MALL sets by physical address, so identical virtual offsets can still stripe
+differently — precisely the state this table cannot distinguish. I have no
+userspace physical-address visibility on ROCm, so this tool stops here.
+
+`zero` is the one layout-distinct cell, and its argmin is the one no `count>0`
+cell shares. That is one draw. With five cells sharing a layout and disagreeing
+four ways, reading the sixth as support would be fitting a rule to the single
+point that did not refute it.
+
 Three corrections found while reading my own output, all one defect:
 
 - **Both Type-II "main effects" came back significant** (p = 0.0000 and
