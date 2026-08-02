@@ -423,6 +423,24 @@ on its existing deterministic heuristic and is not tuned in this stage.
 
 ## Measuring this backend
 
+The suite figure quoted in every handoff on this branch -- **737 passed, 2
+skipped** -- is this invocation, and it is written down here because I quoted
+it repeatedly without recording it and then could not reproduce my own number:
+
+```
+HIP_VISIBLE_DEVICES=<idle> python -m pytest \
+    tests/test_rmsnorm_flydsl.py tests/test_rmsnorm_flydsl_config.py \
+    tests/test_benchmark_rmsnorm_flydsl.py tests/test_import_isolation.py -q
+```
+
+The two skips are the two- and eight-device tests. `python -m pytest tests/`
+does *not* work on this host: 37 modules fail collection with
+`ModuleNotFoundError: No module named 'cuda'`, because the cutedsl tests import
+`cuda.bindings`, which does not exist on ROCm. That is also why the cutedsl
+head-to-head cannot be run here at all. Dropping `test_import_isolation.py`
+gives 733, which is the arithmetic behind a discrepancy I spent a while
+chasing.
+
 `AI/probe_rmsnorm_flydsl_bandwidth.py` backs the throughput numbers here and
 `AI/probe_rmsnorm_flydsl_accuracy.py` backs the error figures. Run both before
 and after a change; between them they cover long rows, the short rows the
@@ -868,48 +886,77 @@ budget above 8k with `reload_from="smem"`, which this backend has no analogue
 for.
 
 There *is* a cliff, and it is worth keeping a cap for -- but it sits between
-**49152 and 57344**, not at 8192, and the two are separated by a confound that the obvious
-sweep does not control. Holding total elements at 2^25 and sweeping N makes
-`m` fall as N rises, so block count falls with it; at N=65536 only 512 blocks
-remain for 256 CUs. Pricing starvation on its own -- N fixed at 8192, where
-`elems_per_thread` is 32 and there is no register pressure, sweeping `m` --
-costs 78.5% -> 5.3% of ceiling from m=4096 down to m=256, entirely from block
-count. So the naive sweep's degradation is mostly starvation, not width.
+**49152 and 57344**, not at 8192. Holding `m` fixed at 4096 (16 blocks/CU
+throughout) isolates width against the `two_read_one_write` ceiling. Sidecar:
+`AI/data/rmsnorm_fwd_width_cliff.json`, generator
+`AI/probe_rmsnorm_width_cliff.py`.
 
-Holding `m` fixed at 4096 (16 blocks/CU throughout) isolates width, against the
-`two_read_one_write` ceiling:
+| N | elems/thread | share of ceiling | working set | timing |
+| --- | --- | --- | --- | --- |
+| 32768 | 128 | 83.1% | 512 MiB | clean |
+| 49152 | 192 | 77.5% | 768 MiB | clean |
+| 57344 | 224 | **37.8%** | 896 MiB | clean |
+| 65536 | 256 | 39.6% | 1024 MiB | clean |
+| 98304 | 384 | 39.2% | 1536 MiB | clean |
 
-| N | elems/thread | share of ceiling |
-| --- | --- | --- |
-| 8192 | 32 | 80.5% |
-| 32768 | 128 | 81.6% |
-| 49152 | 192 | 77.6% |
-| 57344 | 224 | 38.8% |
-| 65536 | 256 | 39.8% |
-| 98304 | 384 | 40.1% |
+Flat to 49152, then halves between 49152 and 57344. The step is abrupt, not a
+slope. Every row above is past the MALL, is timed at least 13x above the host
+floor, and carries a dispatch floor under 1% of its own measurement; eager and
+graph-replay timing agree on all five to within 0.9 points. That is a real
+width limit.
 
-Flat to 49152, then halves between 49152 and 57344 -- the step is abrupt, not a
-slope, and it reproduces to a tenth of a point over three processes.
-(**Unarchived**: this table has no committed sidecar and no generator, so it is
-in the same category as the figures the "a cited number needs a sidecar"
-section above condemns. It is also the bandwidth half of the mechanism argument
-made further down, which makes it the load-bearing unbacked table in this file
-and the next one to regenerate.) That is a real width limit and it does look like
-occupancy collapse from per-thread live state -- so the comment's *mechanism* is
-probably right while its *value* is off by 8x. What is not yet done is
-confirming the mechanism directly: no register count, occupancy figure or spill
-report has been read out of the compiled kernel, and until one is, "register
-budget" remains the plausible story rather than the measured one.
-(Partly overtaken: the register counts and spill reports *have* since been read
-out -- see the register-budget section at the end of this file -- and they put
-the capacity step on this same boundary. The occupancy figure has still not
-been measured, so the mechanism is still not confirmed; only its register half
-is.) **The cap is
-not raised on the strength of this.** A constant that is conservative by 6x
-costs reachable shapes; a constant moved on an unconfirmed mechanism costs
-correctness somewhere unmeasured. The finding is that 8192 is not where the
-hardware objects, and that whoever raises it should raise it to 49152 and say
-why -- not that it should be raised today.
+**The N=8192 row has been removed, and the block-count control with it.**
+Writing the generator for this table -- the last unbacked one in the file --
+turned up three floors that the original protocol could not see, and two of the
+published series were made of them:
+
+1. *The eager path is host-bound below ~30 us.* Wall time of the Python call
+   with the GPU never awaited is ~30 us; measured eager time at N=8192 is
+   ~31 us. The number was the harness, not the kernel.
+2. *Graph replay has its own floor* -- ~9.5 us for a single captured call,
+   converging to 1.49 us per kernel at K=256, measured from a 64-element
+   `add_` that moves 512 bytes. So switching timing vehicles does not by
+   itself fix (1); the floor has to be amortised and then reported, which the
+   sidecar now does per row.
+3. *MALL residency differs across rows.* N=8192 at m=4096 has a 128 MiB
+   working set and is cache-resident, while the ceiling probe's is 512 MiB and
+   is not -- so its "share of ceiling" divided a cache-resident numerator by a
+   DRAM-resident denominator. Timed properly it reads **103.7%**, above the
+   roofline, which is the same tell that already got `N=16384` excluded two
+   paragraphs down. That exclusion was right and did not go far enough: 16384
+   sits *at* the 256 MiB boundary and 8192 is well inside it, so the row that
+   was kept was the more cache-resident of the two.
+
+The block-count control fails on the same three grounds at once. It reported
+78.5% -> 5.3% of ceiling from m=4096 to m=256 and that was read as starvation,
+but under the published protocol the wall time across that entire range is
+**flat at ~30 us** -- sixteen times the work, no change in the clock. A falling
+TB/s from a fixed time and a shrinking byte count is arithmetic, not
+starvation. Every row of it is also MALL-resident. Block-count starvation is
+real and does appear once the floor is amortised away (102% -> 40% of ceiling
+over the same range, still cache-resident and so still not a DRAM-bandwidth
+measurement), but it is a different curve than the one published, and it no
+longer supports the claim it was cited for: **the naive sweep's degradation was
+attributed to starvation on the strength of a series that was measuring the
+host.** Both series are retained in the sidecar so the two can be compared;
+neither is quoted here as a bandwidth result.
+
+What survives is the cliff itself, which is the one row-pair in the section
+that was never affected by any of this. What does not survive is the argument
+that the confound in the naive sweep was *quantified* -- it was not, and the
+sidecar now says so.
+
+That cliff does look like occupancy collapse from per-thread live state -- so
+the comment's *mechanism* is plausible while its *value* is off by 6x. The
+register counts and spill reports have since been read out (see the
+register-budget section at the end of this file) and they put a computed
+capacity step on this same boundary. The occupancy figure itself has still not
+been measured, so what is established is that two boundaries coincide, not that
+one causes the other. **The cap is not raised on the strength of this.** A
+constant that is conservative by 6x costs reachable shapes; a constant moved on
+an unconfirmed mechanism costs correctness somewhere unmeasured. The finding is
+that 8192 is not where the hardware objects, and that whoever raises it should
+raise it to 49152 and say why -- not that it should be raised today.
 
 Note also that the `N=16384, m=4096` cell read **104.3%** of ceiling, above the
 roofline. That working set is 256 MiB, exactly the MALL boundary that
