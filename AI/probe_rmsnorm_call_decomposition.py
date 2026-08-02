@@ -114,6 +114,52 @@ def _host_us(call, reps=REPS, rounds=ROUNDS, warmup=WARMUP):
     }
 
 
+def _compiled_host_row(x, weight, n, eager_row):
+    """Host cost of the same call under torch.compile, plus a recompile guard.
+
+    Two ways this measurement lies if taken naively. Dynamo compiles lazily, so
+    the first calls include compilation and the warmup inside `_host_us` is not
+    necessarily enough; and a graph break or a recompile mid-measurement would
+    show up as host time that is an artifact of the harness rather than a
+    property of the compiled path. So the frame counters are read before and
+    after the timed region and reported -- if they move, the number is not what
+    it says it is.
+
+    Reported against the eager flydsl host cost measured in the same process on
+    the same tensors, because the interesting quantity is whether dynamo removes
+    the host floor or adds to it, not the absolute figure.
+    """
+    from torch._dynamo.utils import counters
+
+    compiled = torch.compile(flydsl_rmsnorm.rmsnorm, fullgraph=False, dynamic=False)
+    call = functools.partial(compiled, x, weight, eps=1e-6)
+    for _ in range(WARMUP):
+        call()
+    torch.cuda.synchronize()
+
+    before = int(sum(counters["frames"].values())) if "frames" in counters else None
+    row = _host_us(call)
+    after = int(sum(counters["frames"].values())) if "frames" in counters else None
+
+    row["available"] = True
+    row["dynamo_frame_counter_before"] = before
+    row["dynamo_frame_counter_after"] = after
+    row["recompiled_during_measurement"] = (
+        None if before is None or after is None else before != after
+    )
+    row["graph_breaks"] = int(sum(counters["graph_break"].values()))
+    row["eager_host_us_same_process"] = eager_row["median_us"]
+    row["ratio_compiled_over_eager"] = (
+        round(row["median_us"] / eager_row["median_us"], 3) if eager_row["median_us"] else None
+    )
+    row["what"] = (
+        "host wall time of torch.compile(flydsl_rmsnorm.rmsnorm), same timer and "
+        "same tensors as the eager row above; ratio > 1 means dynamo adds host "
+        "overhead rather than removing it"
+    )
+    return row
+
+
 def _capture(call, k):
     """Capture k sequential calls into one graph, holding every output alive.
 
@@ -221,6 +267,12 @@ def main():
         "what": "wall time of the Python call with the GPU never awaited, so it is "
         "host dispatch and not a device stall",
     }
+
+    # torch.compile over the same call. The notes claimed dynamo roughly doubles
+    # the host cost rather than folding it away; that was measured once by hand
+    # and never archived, so it is regenerated here under the same timer.
+    print("measuring torch.compile host cost ...", flush=True)
+    host["torch_compile"] = _compiled_host_row(hx, hw, hn, host["flydsl_public_api"])
     del hx, hw
     torch.cuda.empty_cache()
 
@@ -275,11 +327,11 @@ def main():
         "host_cost": host,
         "graph_replay": graph_rows,
         "not_covered": (
-            "The stage-by-stage attribution (11.3 / 16.3 / 19.4 / 26.1 us), the 6.38 us "
-            "FlyDSL dispatch floor and the 52.9 us torch.compile figure are NOT "
-            "regenerated here. They need in-situ stubbing of quack internals and a "
-            "dynamo run respectively, which is a separate probe; they remain unbacked "
-            "and are marked as such in the notes."
+            "The stage-by-stage attribution (11.3 / 16.3 / 19.4 / 26.1 us) and the 6.38 us "
+            "FlyDSL dispatch floor are NOT regenerated here. They need in-situ stubbing of "
+            "quack internals, which is a separate probe; they remain unbacked and are "
+            "marked as such in the notes. The torch.compile figure IS covered now -- see "
+            "host.torch_compile, which supersedes the previously unbacked 52.9 us."
         ),
     }
 

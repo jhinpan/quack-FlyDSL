@@ -643,9 +643,18 @@ the vendoring notes rather than in a wrapper micro-optimization.
 
 **CUDA-graph capture removes it; `torch.compile` does not.** I wrote the
 opposite here first, on the strength of "compiled paths don't pay Python", and
-measuring took one command: at `256x4096`, eager is 26.9 us of host time and
-`torch.compile` is **52.9** -- twice as bad, not zero (both **unbacked**; the
-sidecar does not run dynamo). Device time is identical
+measuring took one command: at `256x4096`, eager is **31.3 us** of host time and
+`torch.compile` is **59.3 us** -- 1.90x, i.e. twice as bad rather than zero.
+Both are now regenerated in `AI/data/rmsnorm_call_decomposition.json`
+(`host_cost.torch_compile`) with dynamo's frame counter read either side of the
+timed region: 4 frames before and after, zero graph breaks, so no compilation
+or recompile is hiding inside the measurement.
+
+This **retires the previously unbacked 26.9 / 52.9 pair.** The *conclusion*
+survives -- the ratio was 1.97 and measures 1.90, agreeing to 4% -- but both
+absolute numbers were low by 13-16%, and the eager 26.9 also disagreed with the
+30.1 and 31.3 this same shape has now returned twice under the archived timer.
+The old pair was the outlier, not this run. Device time is identical
 either way (2.66 us under graph replay, both, one `rmsnorm_kernel_0` per call),
 so dynamo is adding ~26 us of its own host overhead on top of ours rather than
 folding ours away. That 2.66 us carries the same caveat as the pair above: the
@@ -947,7 +956,8 @@ graph-replay timing agree on all five to within 0.9 points. That is a real
 width limit.
 
 **The N=8192 row has been removed, and the block-count control with it.**
-Writing the generator for this table -- the last unbacked one in the file --
+Writing the generator for this table -- the last *table* without one, though
+several individual figures elsewhere were still unbacked at the time --
 turned up three floors that the original protocol could not see, and two of the
 published series were made of them:
 

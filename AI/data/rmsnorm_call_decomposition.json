@@ -9,11 +9,11 @@
   "hip": "7.2.26015-fc0010cf6a",
   "python": "3.10.12",
   "host": "mia1-p02-g23",
-  "commit": "f4512d47ee383aaad0aa45d5bad0125bea486dd8",
+  "commit": "276398f07bd5ac2c84318783a20986572487c340",
   "worktree_dirty": true,
   "source_sha256_16": {
     "quack/rmsnorm_flydsl.py": "0c44997dc710d8e5",
-    "AI/probe_rmsnorm_call_decomposition.py": "756e6fd1b75cfd10"
+    "AI/probe_rmsnorm_call_decomposition.py": "2309032179c2b4ce"
   },
   "protocol": {
     "reps_per_round": 20,
@@ -25,13 +25,13 @@
     "graph_outputs_held": "every captured output retained during capture so the allocator cannot alias all K writes onto one buffer",
     "exclusivity": "single visible device; rocm-smi utilisation at start recorded below"
   },
-  "exclusivity_check": "\n\n============================ ROCm System Management Interface ============================\n=================================== % time GPU is busy ===================================\nGPU[0]\t\t: GPU use (%): 0\nGPU[0]\t\t: GFX Activity: 834537303\nGPU[1]\t\t: GPU use (%): 0\nGPU[1]\t\t: GFX Activity: 908823120\nGPU[2]\t\t: GPU use (%): 0\nGPU[2]\t\t: GFX Activity: 830607844\nGPU[3]\t\t: GPU use (%): 1\nGPU[3]\t\t: GFX Activity: 2228506872\nGPU[4]\t\t: GPU use (%): 0\nGPU[4]\t\t: GFX Activity: 898576128\nGPU[5]\t\t: GPU use (%): 0\nGPU[5]\t\t: GFX Activity: 872897894\nGPU[6]\t\t: GPU use (%): 0\nGPU[6]\t\t: GFX Activity: 852422666\nGPU[7]\t\t: GPU use (%): 0\nGPU[7]\t\t: GFX Activity: 865703446\n==========================================================================================\n================================== End of ROCm SMI Log ===================================\n",
+  "exclusivity_check": "\n\n============================ ROCm System Management Interface ============================\n=================================== % time GPU is busy ===================================\nGPU[0]\t\t: GPU use (%): 0\nGPU[0]\t\t: GFX Activity: 834683466\nGPU[1]\t\t: GPU use (%): 0\nGPU[1]\t\t: GFX Activity: 908966609\nGPU[2]\t\t: GPU use (%): 0\nGPU[2]\t\t: GFX Activity: 830749977\nGPU[3]\t\t: GPU use (%): 1\nGPU[3]\t\t: GFX Activity: 2228687745\nGPU[4]\t\t: GPU use (%): 0\nGPU[4]\t\t: GFX Activity: 898718191\nGPU[5]\t\t: GPU use (%): 0\nGPU[5]\t\t: GFX Activity: 873038625\nGPU[6]\t\t: GPU use (%): 0\nGPU[6]\t\t: GFX Activity: 852898661\nGPU[7]\t\t: GPU use (%): 0\nGPU[7]\t\t: GFX Activity: 865846636\n==========================================================================================\n================================== End of ROCm SMI Log ===================================\n",
   "replay_floor_us_by_calls_per_graph": {
-    "1": 9.483075141906738,
-    "4": 3.5370249301195145,
-    "16": 2.082499908283353,
-    "64": 1.6050077974796295,
-    "256": 1.4817304909229279
+    "1": 9.47905033826828,
+    "4": 3.5290248692035675,
+    "16": 2.0749999675899744,
+    "64": 1.6015702858567238,
+    "256": 1.4812558656558394
   },
   "replay_floor_note": "Measured from a 64-element add_ moving 512 bytes, so it is dispatch, not work. This is the reason no single headline ratio is published here. The notes previously quoted 2.11 us (flydsl) against 3.88 us (torch) at 1x4096 as 'roughly 2x'. Both figures sit BELOW the K=1 floor, so they were taken at some larger K that was never recorded, and the comparison is K-dependent: at K=1 the two are indistinguishable because the floor swamps both, while net of the floor at K=256 the gap is about 4.6x. The raw ratio is arithmetically correct and mechanically misleading, because most of what it divides is a constant both sides pay. Read the net columns, and read them with the K they were taken at.",
   "host_cost": {
@@ -40,30 +40,50 @@
       4096
     ],
     "flydsl_public_api": {
-      "min_us": 30.143451294861734,
-      "median_us": 30.749401776120067,
-      "max_us": 31.094398582354188,
+      "min_us": 30.816398793831468,
+      "median_us": 31.303352443501353,
+      "max_us": 31.920851324684918,
       "samples_us": [
-        31.094398582354188,
-        30.749401776120067,
-        30.768450233154,
-        30.143451294861734,
-        30.61545139644295
+        31.830850639380515,
+        31.920851324684918,
+        31.303352443501353,
+        31.14989958703518,
+        30.816398793831468
       ]
     },
     "torch_public_api": {
-      "min_us": 5.729397526010871,
-      "median_us": 6.460899021476507,
-      "max_us": 7.642849232070148,
+      "min_us": 6.386899622157216,
+      "median_us": 6.9299014285206795,
+      "max_us": 10.587298311293125,
       "samples_us": [
-        5.729397526010871,
-        6.802397547289729,
-        5.957399844191968,
-        6.460899021476507,
-        7.642849232070148
+        6.386899622157216,
+        8.427348802797496,
+        6.9299014285206795,
+        6.842848961241543,
+        10.587298311293125
       ]
     },
-    "what": "wall time of the Python call with the GPU never awaited, so it is host dispatch and not a device stall"
+    "what": "wall time of the Python call with the GPU never awaited, so it is host dispatch and not a device stall",
+    "torch_compile": {
+      "min_us": 58.88135056011379,
+      "median_us": 59.3118485994637,
+      "max_us": 60.85030036047101,
+      "samples_us": [
+        60.85030036047101,
+        59.27534948568791,
+        59.942351072095335,
+        58.88135056011379,
+        59.3118485994637
+      ],
+      "available": true,
+      "dynamo_frame_counter_before": 4,
+      "dynamo_frame_counter_after": 4,
+      "recompiled_during_measurement": false,
+      "graph_breaks": 0,
+      "eager_host_us_same_process": 31.303352443501353,
+      "ratio_compiled_over_eager": 1.895,
+      "what": "host wall time of torch.compile(flydsl_rmsnorm.rmsnorm), same timer and same tensors as the eager row above; ratio > 1 means dynamo adds host overhead rather than removing it"
+    }
   },
   "graph_replay": [
     {
@@ -71,54 +91,54 @@
       "n": 4096,
       "by_calls_per_graph": {
         "1": {
-          "flydsl_per_call_us": 9.501074999570847,
-          "torch_per_call_us": 9.497074782848358,
-          "empty_kernel_floor_us": 9.483075141906738,
-          "flydsl_net_of_floor_us": 0.017999857664108276,
-          "torch_net_of_floor_us": 0.013999640941619873,
-          "raw_ratio_torch_over_flydsl": 0.9995789721981282,
-          "net_ratio_torch_over_flydsl": null,
-          "floor_pct_of_flydsl": 99.81054925190126
+          "flydsl_per_call_us": 11.319074779748917,
+          "torch_per_call_us": 10.378074645996094,
+          "empty_kernel_floor_us": 9.47905033826828,
+          "flydsl_net_of_floor_us": 1.8400244414806366,
+          "torch_net_of_floor_us": 0.8990243077278137,
+          "raw_ratio_torch_over_flydsl": 0.9168659848915941,
+          "net_ratio_torch_over_flydsl": 0.4885936770515853,
+          "floor_pct_of_flydsl": 83.74403847236131
         },
         "4": {
-          "flydsl_per_call_us": 3.997024893760681,
-          "torch_per_call_us": 5.271049961447716,
-          "empty_kernel_floor_us": 3.5370249301195145,
-          "flydsl_net_of_floor_us": 0.4599999636411667,
-          "torch_net_of_floor_us": 1.7340250313282013,
-          "raw_ratio_torch_over_flydsl": 1.3187433407472082,
-          "net_ratio_torch_over_flydsl": 3.769619931276487,
-          "floor_pct_of_flydsl": 88.49144111263298
+          "flydsl_per_call_us": 3.995025157928467,
+          "torch_per_call_us": 5.270025134086609,
+          "empty_kernel_floor_us": 3.5290248692035675,
+          "flydsl_net_of_floor_us": 0.4660002887248993,
+          "torch_net_of_floor_us": 1.7410002648830414,
+          "raw_ratio_torch_over_flydsl": 1.3191469204212134,
+          "net_ratio_torch_over_flydsl": 3.7360497557777936,
+          "floor_pct_of_flydsl": 88.33548550251099
         },
         "16": {
-          "flydsl_per_call_us": 2.5312500074505806,
-          "torch_per_call_us": 4.1487812995910645,
-          "empty_kernel_floor_us": 2.082499908283353,
-          "flydsl_net_of_floor_us": 0.44875009916722775,
-          "torch_net_of_floor_us": 2.0662813913077116,
-          "raw_ratio_torch_over_flydsl": 1.6390247061251866,
-          "net_ratio_torch_over_flydsl": 4.60452575975411,
-          "floor_pct_of_flydsl": 82.27160107273643
+          "flydsl_per_call_us": 2.5362500455230474,
+          "torch_per_call_us": 4.131281282752752,
+          "empty_kernel_floor_us": 2.0749999675899744,
+          "flydsl_net_of_floor_us": 0.46125007793307304,
+          "torch_net_of_floor_us": 2.056281315162778,
+          "raw_ratio_torch_over_flydsl": 1.6288935272944525,
+          "net_ratio_torch_over_flydsl": 4.458061718660875,
+          "floor_pct_of_flydsl": 81.81369858436217
         },
         "64": {
-          "flydsl_per_call_us": 2.073453040793538,
-          "torch_per_call_us": 3.75315616838634,
-          "empty_kernel_floor_us": 1.6050077974796295,
-          "flydsl_net_of_floor_us": 0.4684452433139086,
-          "torch_net_of_floor_us": 2.1481483709067106,
-          "raw_ratio_torch_over_flydsl": 1.8100994305373597,
-          "net_ratio_torch_over_flydsl": 4.585697905074512,
-          "floor_pct_of_flydsl": 77.40748239301199
+          "flydsl_per_call_us": 2.072828123345971,
+          "torch_per_call_us": 3.75846098177135,
+          "empty_kernel_floor_us": 1.6015702858567238,
+          "flydsl_net_of_floor_us": 0.4712578374892473,
+          "torch_net_of_floor_us": 2.156890695914626,
+          "raw_ratio_torch_over_flydsl": 1.8132043556531936,
+          "net_ratio_torch_over_flydsl": 4.576880264540619,
+          "floor_pct_of_flydsl": 77.26498245650293
         },
         "256": {
-          "flydsl_per_call_us": 1.9581387750804424,
-          "torch_per_call_us": 3.6640118341892958,
-          "empty_kernel_floor_us": 1.4817304909229279,
-          "flydsl_net_of_floor_us": 0.47640828415751457,
-          "torch_net_of_floor_us": 2.182281343266368,
-          "raw_ratio_torch_over_flydsl": 1.8711706651326458,
-          "net_ratio_torch_over_flydsl": 4.580695625655497,
-          "floor_pct_of_flydsl": 75.67035134484055
+          "flydsl_per_call_us": 1.9582167733460665,
+          "torch_per_call_us": 3.663931740447879,
+          "empty_kernel_floor_us": 1.4812558656558394,
+          "flydsl_net_of_floor_us": 0.47696090769022703,
+          "torch_net_of_floor_us": 2.1826758747920394,
+          "raw_ratio_torch_over_flydsl": 1.8710552326580288,
+          "net_ratio_torch_over_flydsl": 4.576215449945486,
+          "floor_pct_of_flydsl": 75.64309967199245
         }
       }
     },
@@ -127,57 +147,57 @@
       "n": 4096,
       "by_calls_per_graph": {
         "1": {
-          "flydsl_per_call_us": 9.86507534980774,
-          "torch_per_call_us": 9.873100370168686,
-          "empty_kernel_floor_us": 9.483075141906738,
-          "flydsl_net_of_floor_us": 0.382000207901001,
-          "torch_net_of_floor_us": 0.39002522826194763,
-          "raw_ratio_torch_over_flydsl": 1.0008134778576327,
-          "net_ratio_torch_over_flydsl": 1.0210078952706392,
-          "floor_pct_of_flydsl": 96.12775174688913
+          "flydsl_per_call_us": 10.439074784517288,
+          "torch_per_call_us": 10.572075098752975,
+          "empty_kernel_floor_us": 9.47905033826828,
+          "flydsl_net_of_floor_us": 0.9600244462490082,
+          "torch_net_of_floor_us": 1.0930247604846954,
+          "raw_ratio_torch_over_flydsl": 1.0127406228024103,
+          "net_ratio_torch_over_flydsl": 1.138538466135257,
+          "floor_pct_of_flydsl": 90.8035485321662
         },
         "4": {
-          "flydsl_per_call_us": 4.4550251215696335,
-          "torch_per_call_us": 5.754049867391586,
-          "empty_kernel_floor_us": 3.5370249301195145,
-          "flydsl_net_of_floor_us": 0.918000191450119,
-          "torch_net_of_floor_us": 2.217024937272072,
-          "raw_ratio_torch_over_flydsl": 1.2915864019559713,
-          "net_ratio_torch_over_flydsl": 2.4150593408591217,
-          "floor_pct_of_flydsl": 79.39405129265172
+          "flydsl_per_call_us": 4.444025084376335,
+          "torch_per_call_us": 5.747025087475777,
+          "empty_kernel_floor_us": 3.5290248692035675,
+          "flydsl_net_of_floor_us": 0.9150002151727676,
+          "torch_net_of_floor_us": 2.218000218272209,
+          "raw_ratio_torch_over_flydsl": 1.2932026661326332,
+          "net_ratio_torch_over_flydsl": 2.4240433843541918,
+          "floor_pct_of_flydsl": 79.41055242038139
         },
         "16": {
-          "flydsl_per_call_us": 3.0387812294065952,
-          "torch_per_call_us": 4.7100312076509,
-          "empty_kernel_floor_us": 2.082499908283353,
-          "flydsl_net_of_floor_us": 0.9562813211232424,
-          "torch_net_of_floor_us": 2.627531299367547,
-          "raw_ratio_torch_over_flydsl": 1.5499737730612024,
-          "net_ratio_torch_over_flydsl": 2.7476551526503354,
-          "floor_pct_of_flydsl": 68.53076121870141
+          "flydsl_per_call_us": 3.02628125064075,
+          "torch_per_call_us": 4.716281313449144,
+          "empty_kernel_floor_us": 2.0749999675899744,
+          "flydsl_net_of_floor_us": 0.9512812830507755,
+          "torch_net_of_floor_us": 2.64128134585917,
+          "raw_ratio_torch_over_flydsl": 1.5584411767579676,
+          "net_ratio_torch_over_flydsl": 2.7765513659519665,
+          "floor_pct_of_flydsl": 68.5659988525732
         },
         "64": {
-          "flydsl_per_call_us": 2.562836045399308,
-          "torch_per_call_us": 4.307218827307224,
-          "empty_kernel_floor_us": 1.6050077974796295,
-          "flydsl_net_of_floor_us": 0.9578282479196787,
-          "torch_net_of_floor_us": 2.7022110298275948,
-          "raw_ratio_torch_over_flydsl": 1.6806454845363035,
-          "net_ratio_torch_over_flydsl": 2.821185359375824,
-          "floor_pct_of_flydsl": 62.62623784931033
+          "flydsl_per_call_us": 2.5753281079232693,
+          "torch_per_call_us": 4.313781391829252,
+          "empty_kernel_floor_us": 1.6015702858567238,
+          "flydsl_net_of_floor_us": 0.9737578220665455,
+          "torch_net_of_floor_us": 2.7122111059725285,
+          "raw_ratio_torch_over_flydsl": 1.6750414747377034,
+          "net_ratio_torch_over_flydsl": 2.7853035369888706,
+          "floor_pct_of_flydsl": 62.18898015089119
         },
         "256": {
-          "flydsl_per_call_us": 2.463378943502903,
-          "torch_per_call_us": 4.231753759086132,
-          "empty_kernel_floor_us": 1.4817304909229279,
-          "flydsl_net_of_floor_us": 0.9816484525799751,
-          "torch_net_of_floor_us": 2.750023268163204,
-          "raw_ratio_torch_over_flydsl": 1.7178655237949771,
-          "net_ratio_torch_over_flydsl": 2.80143391550771,
-          "floor_pct_of_flydsl": 60.15032704695934
+          "flydsl_per_call_us": 2.4591581895947456,
+          "torch_per_call_us": 4.223935771733522,
+          "empty_kernel_floor_us": 1.4812558656558394,
+          "flydsl_net_of_floor_us": 0.9779023239389062,
+          "torch_net_of_floor_us": 2.742679906077683,
+          "raw_ratio_torch_over_flydsl": 1.7176348352074096,
+          "net_ratio_torch_over_flydsl": 2.8046562922873575,
+          "floor_pct_of_flydsl": 60.23426520194462
         }
       }
     }
   ],
-  "not_covered": "The stage-by-stage attribution (11.3 / 16.3 / 19.4 / 26.1 us), the 6.38 us FlyDSL dispatch floor and the 52.9 us torch.compile figure are NOT regenerated here. They need in-situ stubbing of quack internals and a dynamo run respectively, which is a separate probe; they remain unbacked and are marked as such in the notes."
+  "not_covered": "The stage-by-stage attribution (11.3 / 16.3 / 19.4 / 26.1 us) and the 6.38 us FlyDSL dispatch floor are NOT regenerated here. They need in-situ stubbing of quack internals, which is a separate probe; they remain unbacked and are marked as such in the notes. The torch.compile figure IS covered now -- see host.torch_compile, which supersedes the previously unbacked 52.9 us."
 }
