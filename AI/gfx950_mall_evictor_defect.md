@@ -9,9 +9,15 @@ What is *not* done is re-collection, and the earlier wording for this was
 false. It said "no MI355X cell has been re-measured under the fixed harness";
 the 12-run artifact under `AI/gate_llc_before_after/` **is** MI355X
 `torch.nn.functional.rms_norm` measured before and after, on four shapes
-(`512x4096`, `4096x4096`, `32768x1024`, `32768x2048`), fwd only, 8 rows each.
-@Reviewer caught the overclaim. The real gap is narrower and needs stating as
-such: **no FlyDSL or Quack cell, no backward pass, and no full-90 matrix** has
+(`512x4096`, `4096x4096`, `32768x1024`, `32768x2048`), fwd only. The run and
+row counts, from the tree rather than from memory: **12 directories, 59 CSV
+rows.** `before_{A,B}` and `after_{A,B}` are 8 rows each (four shapes ×
+`same` and `float32` weights) = 32; `before_{C,D}` and `after_{C,D}` are 4
+each (`same` only) = 16; `isolate_gateonly` and `isolate_targetonly` 4 each =
+8; `after_v3_schema` 2; `isolate_nomargin` 1. "8 rows each" was true of four
+of the twelve and stated of all twelve — @Reviewer's blocker 1, and the
+second time in this file that I have generalized one instance into an
+invariant. The real gap is narrower and needs stating as such: **no FlyDSL or Quack cell, no backward pass, and no full-90 matrix** has
 been re-collected. Blocks Experiment No.002 (MI355X flydsl-vs-torch matrix) —
 any MI355X numbers taken before the fix are **unsound on 41 of the 90
 benchmarked cells**.
@@ -678,14 +684,38 @@ The ordering among the four points from 256.000 to 256.008 MiB is **not
 established**, and two successive attempts to say so were themselves wrong.
 The first claimed the interquartile ranges "overlap almost completely" while
 quoting 6019–6191 against 6254–6453 — intervals that are *disjoint*, as
-@Reviewer caught. Per-run IQRs, recomputed from all 75 raw rounds:
+@Reviewer caught. Per-run median and IQR, **every cell recomputed the same
+way** — median and quartiles of all 75 individual round latencies, converted
+to GB/s:
 
 | WS | run `1b53896` | run `742196f` | run `21e91f6` |
 | --- | --- | --- | --- |
-| 256.000000 MiB | 6446.6 / 6421.7–6465.2 | 6391.3 / 6379.0–6409.5 | 6415.6 / 6379.2–6428.1 |
-| 256.001953 MiB | 6331.1 / 6266.0–6391.4 | 6236.9 / 6179.4–6354.9 | 6248.5 / 6202.3–6331.1 |
-| 256.003906 MiB | 6078.7 / 6018.8–6190.9 | 6128.8 / 6045.9–6173.9 | 6391.3 / 6373.2–6422.0 |
-| 256.007812 MiB | 6379.4 / 6254.4–6453.0 | 6156.8 / 6089.9–6214.0 | 6367.3 / 6289.7–6391.5 |
+| 256.000000 MiB | 6446.6 / 6421.7–6465.2 | 6397.3 / 6379.0–6409.5 | 6415.6 / 6379.2–6428.1 |
+| 256.001953 MiB | 6331.1 / 6266.0–6391.4 | 6248.5 / 6179.4–6354.9 | 6248.5 / 6202.3–6331.1 |
+| 256.003906 MiB | 6078.7 / 6018.8–6190.9 | 6123.2 / 6045.9–6173.9 | 6391.3 / 6373.2–6422.0 |
+| 256.007812 MiB | 6379.4 / 6254.4–6453.0 | 6162.6 / 6089.9–6214.0 | 6367.3 / 6289.7–6391.5 |
+
+**The previous version of this table was not one convention.** It said "from
+all 75 raw rounds", and the `742196f` column's four medians (`6391.3 / 6236.9
+/ 6128.8 / 6156.8`) were instead the sidecar's `gbps_median` field — the
+median of five per-repeat medians, each itself the median of 15 rounds. The
+flattened-75 medians for that column are `6397.3 / 6248.5 / 6123.2 / 6162.6`,
+which is what now appears. The IQRs in that column were already flat-75, so
+the column mixed two aggregations *within itself*. @Reviewer's blocker 5. The
+differences are small (≤14 GB/s) and no conclusion below changes, but "the
+adjacent numbers were close" is not a reason to leave two conventions under
+one heading — that is exactly how the 28 GB/s comparison in the next paragraph
+would have been quoted across incompatible units.
+
+For contrast, the five-repeat-median values the sidecar reports directly, which
+are *not* what this table uses:
+
+| WS | `1b53896` | `742196f` | `21e91f6` |
+| --- | --- | --- | --- |
+| 256.000000 MiB | 6440.4 | 6391.3 | 6397.4 |
+| 256.001953 MiB | 6348.9 | 6236.9 | 6295.4 |
+| 256.003906 MiB | 6067.8 | 6128.8 | 6391.4 |
+| 256.007812 MiB | 6397.6 | 6156.8 | 6367.3 |
 
 **"Within any single run the last two IQRs are disjoint" was false, and the
 table above it says so.** Recomputing the last two rows against each other:
@@ -697,10 +727,14 @@ added to correct a different overclaim — and the correction runs *toward* the
 noise reading, which is the conclusion the rest of this paragraph already
 argues for. Two of three runs cannot separate these points at all.
 
-**Across** runs the comparison inverts outright:
-256.003906 reads *below* 256.007812 by 300 and by 28 GB/s in the first two runs
-and *above* it in the third, having moved 262 GB/s — many times its own ~50 GB/s
-IQR width — between runs taken minutes apart on an otherwise idle card. Whatever
+**Across** runs the comparison inverts outright. On the flat-75 convention of
+the table above, 256.003906 reads *below* 256.007812 by 301 and by 39 GB/s in
+the first two runs and *above* it by 24 in the third, having itself moved 313
+GB/s across the three — against per-run IQR widths at that point of 172 / 128 /
+49 GB/s, i.e. roughly two to six times the widest of them — between runs taken
+minutes apart on an otherwise idle card. (The "300 / 28 / 262 / ~50" figures
+here previously mixed the two aggregations the table used; these are all
+flat-75.) Whatever
 orders these four points is not the working set. That is a claim about
 reproducibility, not a statistical test, and it is the strongest one available
 here: back-to-back blocks cannot separate a working-set effect from drift.

@@ -92,20 +92,40 @@ against head will not apply, because the anchor lines have been renamed.
 `same` only.
 Every table here is `same`, so the extra rows are context, not inputs.
 
+Exact counts, so no one has to infer them: **12 run directories, 59 CSV rows.**
+
+| runs | rows each | total |
+| --- | --- | --- |
+| `before_A`, `before_B`, `after_A`, `after_B` | 8 (4 shapes × `same`+`float32`) | 32 |
+| `before_C`, `before_D`, `after_C`, `after_D` | 4 (4 shapes, `same`) | 16 |
+| `isolate_gateonly`, `isolate_targetonly` | 4 | 8 |
+| `after_v3_schema` | 2 | 2 |
+| `isolate_nomargin` | 1 | 1 |
+
 The contention canary is `quiet: true` in all twelve runs, with
 `closing_over_opening` in 0.975-1.020, so nothing here is a neighbour on the
 node. `last_level_cache_bytes` is `268435456` with `torch_l2_cache_size`
 `4194304` in the after runs; both keys are absent from the before runs because
 that commit did not record them -- which is itself the defect.
 
-These artifacts are schema **v2** and current head emits **v3**. A fresh run will
-not match them field for field: `fad422c` renamed `l2_target_bytes` (which had
-been carrying `3 x LLC` under an L2 name) to `rotation_target_bytes`, added
+These artifacts are **eleven schema v2 and one schema v3** -- `after_v3_schema/`
+is the v3 one, which is what it was collected to demonstrate. Calling the whole
+set "v2" was wrong, and the directory name refutes it on its own; @Reviewer's
+blocker 2. Current head emits **v4**. A fresh run will not match any of them
+field for field: `fad422c` renamed `l2_target_bytes` (which had been carrying
+`3 x LLC` under an L2 name) to `rotation_target_bytes`, added
 `evictor_threshold_bytes` per row, and added `last_level_cache_provenance`,
-`rotation_target_bytes` and `evictor_gate` to the environment. The
-`methodology.cache` string in these files also still describes the old "below
-the L2 target / between individually timed calls" rule, which was wrong on both
-counts. **None of this changed the timing path** -- the numbers below stand, and
+`rotation_target_bytes` and `evictor_gate` to the environment; v4 then renamed
+`l2_eviction_between_calls` to `evictor_ran_per_rotation`.
+
+**All twelve** `methodology.steady_state` strings here -- the eleven v2 and the
+one v3 alike -- assert timing with "per-call events", which the code has never
+done in these runs. The `methodology.cache` string likewise still describes the
+old "below the L2 target / between individually timed calls" rule, wrong on both
+counts. These are frozen artifacts and are not being edited; the strings are
+wrong *in the files*, which is why they are named here. Any consumer reading
+their methodology should read this paragraph instead.
+**None of this changed the timing path** -- the numbers below stand, and
 the v3 rerun in `after_v3_schema/` reproduces `4096x4096` and `32768x1024`
 to 0.12% and 0.14% of the four-run v2 medians.
 
@@ -152,12 +172,29 @@ Two rows need further care.
 the four and rounding; @Reviewer recomputed all eight. The full set is worse
 for the before side, not better, but quoting a subset was the error either
 way.) The after medians are 8.000 / 8.000 / 8.000 / 8.005 us -- three of them
-identical to the microsecond, which is the hipEvent quantum at this duration,
-not four independent agreeing measurements. Read the after side as "at the
-event-timer floor", not as "stable at 1050 GB/s". At 8-10 us per call this cell is close to launch overhead and
-the before configuration is simply unstable; the honest statement is that the
-after side is stable at 1050 and the before side was not measuring anything
-repeatable. It should not be quoted as a speedup.
+identical to the microsecond across independent runs.
+
+**The "event quantum" explanation for that was wrong, and so was the paragraph
+that used to follow it.** It said to read the after side as "at the event-timer
+floor, *not* stable at 1050 GB/s", and then two lines later said "the honest
+statement is that the after side is stable at 1050". Those are the two
+positions on offer and it asserted both; @Reviewer's blocker 6.
+
+Measured rather than argued, by `AI/probe_event_timing_calibration.py` (sidecar
+committed beside it): 400 `elapsed_time` reads of a single `512x4096`
+`rms_norm` return **106 distinct values** with a typical spacing of 0.04 us,
+not 1 us. There is no microsecond quantum here, so three identical 8.000 us
+medians are not a quantization artifact. They are three medians of 40 samples
+each landing on the same value, which is what a tight distribution does.
+
+What the same probe *does* support: this cell is launch-dominated. Its
+hardware kernel time is 5.7 us and one-pair-per-rotation event timing reads
+6.6 us (+16%), against +1% at `32768x1024`. So the after side is repeatable at
+~8 us, a meaningful fraction of which is not the kernel, and the before side
+(p90-p10 spreads of 24.8-92.2%) was not repeatable at all. Both of those are
+observations. The +24.7% is a ratio between a stable number and an unstable
+one and should still not be quoted as a speedup -- but the reason is the before
+side's instability and this cell's launch overhead, not a timer floor.
 
 `32768x1024` is the cell the investigation started from, and its `-13.8%` is the
 headline: 3109 GB/s was measured against a resident MALL. It is fixed by the
