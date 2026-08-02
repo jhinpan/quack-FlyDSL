@@ -51,6 +51,7 @@ PROVIDERS = ("flydsl", "quack", "torch")
 #   v3  l2_target_bytes -> rotation_target_bytes; + evictor_threshold_bytes,
 #       last_level_cache_provenance, rotation_target_bytes, evictor_gate
 #   v4  l2_eviction_between_calls -> evictor_ran_per_rotation
+#   v5  + peak_bw_probe (which probe peak_bw_pct's denominator came from)
 #
 # v4 is a rename with no behavioural change, and it is a *breaking* rename on
 # purpose. The old name asserted the evictor ran between individually timed
@@ -62,6 +63,15 @@ PROVIDERS = ("flydsl", "quack", "torch")
 # loudly against a v4 artifact rather than silently read a field whose meaning
 # it has wrong. The v2/v3 artifacts under AI/gate_llc_before_after/ keep the
 # old name and are frozen; their schema_version distinguishes them.
+#
+# v5 is additive. It exists because `comparison_scope` told the reader to
+# compare `peak_bw_pct` across vendors, and that column's denominator is
+# whichever of the three probes won on that host -- two_read_one_write on H200,
+# write on MI355X, measured the same day with this harness on both. A reader
+# with only results.csv could not see that the two percentages divide by
+# different references. Recording the probe does not make the columns
+# comparable; it makes their incomparability visible, which is the part that
+# was missing.
 RESULT_FIELDS = (
     "schema_version",
     "provider",
@@ -82,6 +92,7 @@ RESULT_FIELDS = (
     "logical_gbps",
     "peak_bw_gbps",
     "peak_bw_pct",
+    "peak_bw_probe",
     "rotation_buffers",
     "rotation_working_set_bytes",
     "rotation_target_bytes",
@@ -1339,7 +1350,7 @@ def _device_arch(torch: Any) -> str:
 def _environment(torch: Any, args: argparse.Namespace, output_dir: Path) -> dict[str, Any]:
     properties = torch.cuda.get_device_properties(0)
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "status": "running",
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         # Every provider is checked against the fp32 reference before it is
@@ -1349,8 +1360,18 @@ def _environment(torch: Any, args: argparse.Namespace, output_dir: Path) -> dict
         "runtime_scope": f"{properties.name} / {_device_arch(torch)}",
         "comparison_scope": (
             "same-device providers. RMSNorm is memory bound, so a cross-vendor "
-            "comparison of microseconds mostly reports the HBM bandwidth ratio; "
-            "compare peak_bw_pct instead"
+            "comparison of microseconds mostly reports the HBM bandwidth ratio. "
+            "peak_bw_pct is NOT the cross-vendor fix: its denominator is "
+            "whichever of the three probes won on that host, and the winner "
+            "differs by host (two_read_one_write on H200, write on MI355X), so "
+            "the two percentages are ratios against different references. "
+            "Measured 2026-08-02, fwd bf16, this harness on both: the choice of "
+            "denominator moves 32768x8192 from FlyDSL +30.0 points (copy) to "
+            "+4.6 (two_read_one_write) to -32.7 (write) -- it inverts the "
+            "conclusion, it does not merely scale it. For a cross-vendor "
+            "statement pick one probe present on both hosts and divide by that "
+            "same probe on each; achievable_bandwidth.probes carries all three "
+            "for exactly this purpose"
         ),
         "command": [sys.executable, *sys.argv],
         "working_directory": str(Path.cwd()),
@@ -1640,7 +1661,7 @@ def _run(
             logical_gbps = byte_count / stats["median_us"] / 1000.0
             peak_bw_pct = logical_gbps / peak_bw["median_gbps"] * 100.0
             row = {
-                "schema_version": 4,
+                "schema_version": 5,
                 "provider": provider_name,
                 "provider_detail": prepared.provider_detail,
                 "operation": cell.operation,
@@ -1659,6 +1680,12 @@ def _run(
                 "logical_gbps": _round(logical_gbps),
                 "peak_bw_gbps": _round(peak_bw["median_gbps"]),
                 "peak_bw_pct": _round(peak_bw_pct),
+                # Which probe the denominator came from. Without it a reader of
+                # results.csv alone cannot tell that two hosts' peak_bw_pct are
+                # ratios against different references -- and the winner does
+                # differ by host, so a cross-vendor delta computed from this
+                # column is not a comparison unless both rows agree here.
+                "peak_bw_probe": peak_bw["best_probe"],
                 "rotation_buffers": rotation_buffers,
                 "rotation_working_set_bytes": rotation_working_set_bytes,
                 "rotation_target_bytes": rotation_target_bytes,

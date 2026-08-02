@@ -5,6 +5,7 @@ import csv
 import hashlib
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import types
@@ -740,13 +741,81 @@ def test_the_rename_bumped_the_schema_so_a_reader_can_tell_the_versions_apart():
     # The parent emitted v3 under both field names, so this asserts the bump
     # itself and fails against it -- a frozen-artifact check alone would pass
     # on the parent and guard nothing.
+    #
+    # Asserted as an invariant rather than against the literal 4 it was written
+    # for: the first version pinned `count('"schema_version": 4,') == 2` and
+    # broke the moment v5 was added, which would have trained the next person
+    # to edit the number until the test went quiet. What actually has to hold
+    # is that the two emission sites agree, that the version only moves
+    # forward, and that no frozen artifact claims a version at or above the
+    # rename.
     source = Path(benchmark.__file__).read_text(encoding="utf-8")
-    assert source.count('"schema_version": 4,') == 2, "row and environment must agree"
-    assert '"schema_version": 3,' not in source
+    emitted = re.findall(r'"schema_version": (\d+),', source)
+    assert len(emitted) == 2, "row and environment are the two emission sites"
+    assert emitted[0] == emitted[1], f"the two sites disagree: {emitted}"
+    current = int(emitted[0])
+    assert current >= 4, "the rename must have bumped the schema past v3"
     frozen = Path(benchmark.__file__).resolve().parents[1] / "AI" / "gate_llc_before_after"
     for environment_path in sorted(frozen.glob("*/environment.json")):
         recorded = json.loads(environment_path.read_text(encoding="utf-8"))["schema_version"]
         assert recorded < 4, f"{environment_path} predates the rename but claims v{recorded}"
+
+
+def test_a_row_records_which_probe_its_peak_percentage_divides_by():
+    # Measured cross-vendor on 2026-08-02, fwd bf16, this harness on both
+    # hosts: the achievable-bandwidth probe that wins differs by host
+    # (two_read_one_write on H200 at 4314 GB/s, write on MI355X at 6664), so
+    # peak_bw_pct on the two hosts divides by different references. Under
+    # `copy` FlyDSL leads cutedsl by +30.0 points at 32768x8192; under `write`
+    # it trails by -32.7. The denominator inverts the conclusion.
+    #
+    # comparison_scope used to recommend peak_bw_pct as the cross-vendor
+    # measure, which made the one number it named the least comparable one.
+    # The column cannot be made comparable here -- the fix is to record which
+    # probe it came from so the incomparability is visible in results.csv
+    # alone, rather than only to a reader who also opens environment.json.
+    assert "peak_bw_probe" in benchmark.RESULT_FIELDS
+    assert benchmark.RESULT_FIELDS.index("peak_bw_probe") == (
+        benchmark.RESULT_FIELDS.index("peak_bw_pct") + 1
+    ), "the probe belongs beside the number it qualifies"
+
+
+def test_comparison_scope_does_not_recommend_the_column_it_cannot_compare():
+    # The prose half of the same defect, and the shape that keeps recurring
+    # here: a methodology string asserting a property the data does not have.
+    # "compare peak_bw_pct instead" was advice that produced a sign error.
+    torch = types.SimpleNamespace(
+        __version__="2.9.1",
+        version=types.SimpleNamespace(hip="7.2", cuda=None),
+        cuda=types.SimpleNamespace(
+            device_count=lambda: 1,
+            get_device_properties=lambda _: types.SimpleNamespace(
+                name="AMD Instinct MI355X",
+                gcnArchName="gfx950:sramecc+:xnack-",
+                total_memory=309220868096,
+                multi_processor_count=256,
+                L2_cache_size=4 * 1024**2,
+            ),
+        ),
+    )
+    environment = benchmark._environment(
+        torch,
+        argparse.Namespace(
+            shapes=[(512, 4096)],
+            dtype_weight_modes=[("bfloat16", "same")],
+            operations=["fwd"],
+            providers=["flydsl"],
+            eps=1e-6,
+            warmup_rounds=3,
+            sample_rounds=40,
+            max_rotation_buffers=4,
+            l2_target_ratio=3.0,
+        ),
+        Path("/tmp"),
+    )
+    scope = environment["comparison_scope"]
+    assert "compare peak_bw_pct instead" not in scope
+    assert "peak_bw_probe" in scope or "same probe" in scope
 
 
 def test_the_methodology_string_points_at_evidence_instead_of_asserting_a_number():
