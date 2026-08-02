@@ -204,7 +204,20 @@ practical fix**. But the reason is the size of the requirement, not an
 ## Measurement
 
 `AI/probe_gfx950_mall_rotation.py`, MI355X (gfx950), one GPU, SPX/NPS1,
-`HIP_VISIBLE_DEVICES=7`, torch 2.9.1+rocm7.2.0. Kernel held *exactly* fixed
+`HIP_VISIBLE_DEVICES=0`, torch 2.9.1+rocm7.2.0.
+
+**Which physical card that is:** `HIP_VISIBLE_DEVICES=0` selects PCI bus
+`0x75` (`0000:75:00.0`), which `rocm-smi` lists as **GPU 3**, not GPU 0 —
+torch's enumeration order does not match `rocm-smi`'s on this host. So neither
+the earlier `HIP_VISIBLE_DEVICES=7` in this line nor my later correction to
+"GPU 0" named the right card; the mask value is an index into the visible set
+and never denoted a physical GPU. The sidecar records `device_pci_bus_id` so
+the card is identifiable regardless of anyone's numbering. Note also that
+torch's `uuid` field does not correspond to `rocm-smi --showuniqueid`, so PCI
+BDF is the only cross-checkable identifier here — the same partial-identity
+hazard @Autotune flagged for the KFD helper.
+
+Kernel held *exactly* fixed
 (`copy_` between rotating buffer pairs); only the number of rotation buffers
 varies, so any systematic difference is cache residency and not kernel
 selection. Every figure below is emitted by that script, which also writes
