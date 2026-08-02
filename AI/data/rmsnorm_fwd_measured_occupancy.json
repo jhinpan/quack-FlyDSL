@@ -3,19 +3,19 @@
   "generator": "AI/probe_rmsnorm_measured_occupancy.py",
   "note": "gfx950 MI355X, bf16 fwd, has_weight only. This closes the half of @Reviewer's blocker that the computed 2->1 VGPR-capacity step was arithmetic rather than an observation: the step is now measured. Two guards run on every row and abort the probe rather than publish -- the wave64->rocprof VGPR relation, and the dispatch count behind the positional width recovery. MAX_N was raised in-process for the probe only; the shipped cap is unchanged.",
   "device": "AMD Instinct MI355X",
-  "device_uuid": "66636163-3034-3537-3439-313935646234",
-  "HIP_VISIBLE_DEVICES": "6",
+  "device_uuid": "66353633-3535-3138-3838-643861663866",
+  "HIP_VISIBLE_DEVICES": "5",
   "torch": "2.9.1+rocm7.2.0.git7e1940d4",
   "hip": "7.2.26015-fc0010cf6a",
   "python": "3.10.12",
   "host": "mia1-p02-g23",
-  "commit": "47c2e11219cbf9d96ae2fc6b03cd7a07e87cc7f2",
+  "commit": "6393608630eaff731c808f76cb6411ae8592d4a9",
   "worktree_dirty": true,
   "shipped_max_n": 8192,
   "source_sha256_16": {
     "quack/rmsnorm_flydsl.py": "0c44997dc710d8e5",
     "quack/flydsl/rmsnorm_config.py": "0f0d3adb593bc518",
-    "AI/probe_rmsnorm_measured_occupancy.py": "6e7a950715254c5e"
+    "AI/probe_rmsnorm_measured_occupancy.py": "b0dad4e18d80c7fd"
   },
   "counter": "MeanOccupancyPerActiveCU",
   "rocprofv3_invocation": "rocprofv3 --pmc MeanOccupancyPerActiveCU -d <dir> -o <tag> --output-format csv -- python AI/probe_rmsnorm_measured_occupancy.py --inner <m> <n,n,...>. The --output-format csv is load-bearing: the default output is a .db with rocpd_kernel_dispatch and no counter table.",
@@ -28,6 +28,99 @@
   "simds_per_cu": 4,
   "vgpr_units_note": "rocprof's VGPR_Count and the artifact's vgpr_count are the same kernel in different units: rocprof_vgpr = roundup(ceil(artifact_vgpr / 2), 4), exact on 10 of 10 widths. Five of those (2048/16384/24576/32768/40960) were held out -- the relation was fitted on the other five and predicted these before they were measured. The factor of 2 is wave64 architectural VGPRs vs 32-lane physical register-file entries. Neither source was wrong; the sidecar was missing the units. All register arithmetic here uses the artifact (wave64) numbers.",
   "binding_note": "A register bound can only be observed where it is the smaller constraint. grid_supply_waves_per_simd = (grid_size / 64) / (CUs * 4) is how many waves the launch geometry supplies; register_bound_is_binding says whether the register limit is at or below it. Rows where it is False cannot discriminate between candidate bounds, and the m=1024 reading that prompted this probe was one of those. Measured occupancy is also an average over active CUs and over the kernel's life, so it sits slightly under a bound it is genuinely at.",
+  "vgpr_relation_audit": [
+    {
+      "n": 1024,
+      "m": 1024,
+      "set": "fit",
+      "artifact_vgpr_count": 20,
+      "rocprof_vgpr_count": 12,
+      "predicted_from_artifact": 12,
+      "agrees": true
+    },
+    {
+      "n": 2048,
+      "m": 1024,
+      "set": "held_out",
+      "artifact_vgpr_count": 20,
+      "rocprof_vgpr_count": 12,
+      "predicted_from_artifact": 12,
+      "agrees": true
+    },
+    {
+      "n": 4096,
+      "m": 1024,
+      "set": "fit",
+      "artifact_vgpr_count": 36,
+      "rocprof_vgpr_count": 20,
+      "predicted_from_artifact": 20,
+      "agrees": true
+    },
+    {
+      "n": 8192,
+      "m": 1024,
+      "set": "fit",
+      "artifact_vgpr_count": 60,
+      "rocprof_vgpr_count": 32,
+      "predicted_from_artifact": 32,
+      "agrees": true
+    },
+    {
+      "n": 16384,
+      "m": 1024,
+      "set": "held_out",
+      "artifact_vgpr_count": 94,
+      "rocprof_vgpr_count": 48,
+      "predicted_from_artifact": 48,
+      "agrees": true
+    },
+    {
+      "n": 24576,
+      "m": 1024,
+      "set": "held_out",
+      "artifact_vgpr_count": 120,
+      "rocprof_vgpr_count": 60,
+      "predicted_from_artifact": 60,
+      "agrees": true
+    },
+    {
+      "n": 32768,
+      "m": 1024,
+      "set": "held_out",
+      "artifact_vgpr_count": 156,
+      "rocprof_vgpr_count": 80,
+      "predicted_from_artifact": 80,
+      "agrees": true
+    },
+    {
+      "n": 40960,
+      "m": 1024,
+      "set": "held_out",
+      "artifact_vgpr_count": 226,
+      "rocprof_vgpr_count": 116,
+      "predicted_from_artifact": 116,
+      "agrees": true
+    },
+    {
+      "n": 49152,
+      "m": 1024,
+      "set": "fit",
+      "artifact_vgpr_count": 230,
+      "rocprof_vgpr_count": 116,
+      "predicted_from_artifact": 116,
+      "agrees": true
+    },
+    {
+      "n": 57344,
+      "m": 1024,
+      "set": "fit",
+      "artifact_vgpr_count": 264,
+      "rocprof_vgpr_count": 132,
+      "predicted_from_artifact": 132,
+      "agrees": true
+    }
+  ],
+  "vgpr_relation_audit_note": "Every width in the fit and held-out sets, with its artifact count, rocprof count and the prediction between them, so the relation is checkable from this file alone. An earlier version named held-out widths in prose that appeared in no sweep, which made the claim unauditable; @Reviewer caught it. Note what this does and does not establish: it shows the relation holds on all ten widths and which set each was in, but the committed artifact cannot by itself prove the held-out predictions were made before those widths were measured. That ordering rests on the commit history, not on this JSON.",
   "discriminating_sweep": [
     {
       "n": 4096,
@@ -43,9 +136,10 @@
       "waves_per_simd_register_limited": 12,
       "occupancy_upper_bound_waves_per_simd": 8,
       "grid_supply_waves_per_simd": 64.0,
-      "register_bound_is_binding": true,
-      "measured_waves_per_simd": 7.3114,
-      "measured_over_bound": 0.9139,
+      "register_bound_is_binding": false,
+      "limiting_constraint": "hardware_cap",
+      "measured_waves_per_simd": 7.3054,
+      "measured_over_bound": 0.9132,
       "dispatches": 3,
       "bandwidth_pct_of_ceiling_at_m4096": null
     },
@@ -63,9 +157,10 @@
       "waves_per_simd_register_limited": 8,
       "occupancy_upper_bound_waves_per_simd": 8,
       "grid_supply_waves_per_simd": 64.0,
-      "register_bound_is_binding": true,
-      "measured_waves_per_simd": 6.2343,
-      "measured_over_bound": 0.7793,
+      "register_bound_is_binding": false,
+      "limiting_constraint": "hardware_cap",
+      "measured_waves_per_simd": 6.1121,
+      "measured_over_bound": 0.764,
       "dispatches": 3,
       "bandwidth_pct_of_ceiling_at_m4096": null
     },
@@ -84,8 +179,9 @@
       "occupancy_upper_bound_waves_per_simd": 5,
       "grid_supply_waves_per_simd": 64.0,
       "register_bound_is_binding": true,
-      "measured_waves_per_simd": 3.9649,
-      "measured_over_bound": 0.793,
+      "limiting_constraint": "registers",
+      "measured_waves_per_simd": 3.9776,
+      "measured_over_bound": 0.7955,
       "dispatches": 3,
       "bandwidth_pct_of_ceiling_at_m4096": null
     },
@@ -104,8 +200,9 @@
       "occupancy_upper_bound_waves_per_simd": 3,
       "grid_supply_waves_per_simd": 64.0,
       "register_bound_is_binding": true,
-      "measured_waves_per_simd": 2.6376,
-      "measured_over_bound": 0.8792,
+      "limiting_constraint": "registers",
+      "measured_waves_per_simd": 2.6253,
+      "measured_over_bound": 0.8751,
       "dispatches": 3,
       "bandwidth_pct_of_ceiling_at_m4096": null
     },
@@ -124,8 +221,9 @@
       "occupancy_upper_bound_waves_per_simd": 2,
       "grid_supply_waves_per_simd": 64.0,
       "register_bound_is_binding": true,
-      "measured_waves_per_simd": 1.9657,
-      "measured_over_bound": 0.9828,
+      "limiting_constraint": "registers",
+      "measured_waves_per_simd": 1.9747,
+      "measured_over_bound": 0.9873,
       "dispatches": 3,
       "bandwidth_pct_of_ceiling_at_m4096": 77.5
     }
@@ -146,8 +244,9 @@
       "occupancy_upper_bound_waves_per_simd": 3,
       "grid_supply_waves_per_simd": 16.0,
       "register_bound_is_binding": true,
-      "measured_waves_per_simd": 2.7839,
-      "measured_over_bound": 0.928,
+      "limiting_constraint": "registers",
+      "measured_waves_per_simd": 2.7999,
+      "measured_over_bound": 0.9333,
       "dispatches": 3,
       "bandwidth_pct_of_ceiling_at_m4096": null
     },
@@ -166,8 +265,9 @@
       "occupancy_upper_bound_waves_per_simd": 2,
       "grid_supply_waves_per_simd": 16.0,
       "register_bound_is_binding": true,
-      "measured_waves_per_simd": 1.955,
-      "measured_over_bound": 0.9775,
+      "limiting_constraint": "registers",
+      "measured_waves_per_simd": 1.9557,
+      "measured_over_bound": 0.9779,
       "dispatches": 3,
       "bandwidth_pct_of_ceiling_at_m4096": null
     },
@@ -186,8 +286,9 @@
       "occupancy_upper_bound_waves_per_simd": 2,
       "grid_supply_waves_per_simd": 16.0,
       "register_bound_is_binding": true,
-      "measured_waves_per_simd": 1.9584,
-      "measured_over_bound": 0.9792,
+      "limiting_constraint": "registers",
+      "measured_waves_per_simd": 1.9597,
+      "measured_over_bound": 0.9798,
       "dispatches": 3,
       "bandwidth_pct_of_ceiling_at_m4096": 77.5
     },
@@ -206,6 +307,7 @@
       "occupancy_upper_bound_waves_per_simd": 1,
       "grid_supply_waves_per_simd": 16.0,
       "register_bound_is_binding": true,
+      "limiting_constraint": "registers",
       "measured_waves_per_simd": 1.0004,
       "measured_over_bound": 1.0004,
       "dispatches": 3,
@@ -226,6 +328,7 @@
       "occupancy_upper_bound_waves_per_simd": 1,
       "grid_supply_waves_per_simd": 16.0,
       "register_bound_is_binding": true,
+      "limiting_constraint": "registers",
       "measured_waves_per_simd": 1.0003,
       "measured_over_bound": 1.0003,
       "dispatches": 3,

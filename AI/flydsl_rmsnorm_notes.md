@@ -1368,11 +1368,16 @@ rocprofv3's `MeanOccupancyPerActiveCU`; raw at
 
 | N | vgpr | alloc | computed bound | **measured waves/SIMD** | measured/bound | bandwidth % of ceiling |
 |---|------|-------|----------------|-------------------------|----------------|------------------------|
-| 32768 | 156 | 160 | 3 | 2.784 | 0.93 | -- |
-| 40960 | 226 | 232 | 2 | 1.955 | 0.98 | -- |
-| 49152 | 230 | 232 | 2 | 1.958 | 0.98 | 77.5 |
+| 32768 | 156 | 160 | 3 | 2.800 | 0.93 | -- |
+| 40960 | 226 | 232 | 2 | 1.956 | 0.98 | -- |
+| 49152 | 230 | 232 | 2 | 1.960 | 0.98 | 77.5 |
 | 57344 | 264 | 264 | 1 | **1.000** | 1.00 | 37.8 |
 | 65536 | 300 | 304 | 1 | **1.000** | 1.00 | 39.2 |
+
+(These are the regenerated values, taken on **device 5** while @Reviewer was
+verifying on device 6. The original run on device 6 gave 2.784 / 1.955 / 1.958 /
+1.000 / 1.000 -- so the sweep reproduces across GPUs to within 0.6% on its worst
+row and exactly at the boundary, which is worth more than either run alone.)
 
 **Occupancy does halve at the boundary, and it is now observed rather than
 derived.** The 2 → 1 step falls between 49152 and 57344, the same edge as the
@@ -1449,18 +1454,43 @@ future toolchain breaks it. All register arithmetic here uses the wave64
 numbers, which is the pair the hardware behaves like: on the three widths where
 the two unit systems predict *different* occupancies (16384/32768/49152 at
 m=16384) the artifact predicts 5/3/2 and rocprof-units predict 8/6/4, against
-measured 3.97/2.64/1.97.
+measured 3.98/2.63/1.97.
+
+All ten widths now appear in the sidecar under `vgpr_relation_audit` with their
+fit/held-out labels. The first version named the held-out widths in prose only,
+and **two of them (2048, 24576) appeared in no sweep at all** -- so the claim
+could not be checked against the committed artifact. That is the same failure
+as quoting "737 passed" without the invocation, and @Reviewer caught it the same
+way. Note the limit of the fix: the JSON establishes that the relation holds on
+all ten and which set each width was in, but it cannot prove the held-out
+predictions were made *before* those widths were measured. That ordering rests
+on the commit history, and the payload says so rather than letting the data
+appear to prove it.
 
 *A register bound is invisible unless it is the binding constraint.* My first
 occupancy reading was taken at m=1024, where the grid supplies only 4
 waves/SIMD -- any register limit of 4 or more is unobservable there, and the
 reading would have "confirmed" whichever bound it was compared against. Every
 row now carries `grid_supply_waves_per_simd` and a `register_bound_is_binding`
-flag; all ten reported rows are binding. This is the same defect class as the
-starvation control that turned out to be measuring the host: **a number that
-agrees with your hypothesis for a reason other than the one you think.** The
-new rule from the floor work generalises to it -- before trusting a bound,
-check what the measurement reads when the bound is not the constraint.
+flag. This is the same defect class as the starvation control that turned out
+to be measuring the host: **a number that agrees with your hypothesis for a
+reason other than the one you think.** The new rule from the floor work
+generalises to it -- before trusting a bound, check what the measurement reads
+when the bound is not the constraint.
+
+**And then the guard itself had the defect it was written to catch.** The first
+version tested the *already-capped* bound against the other constraints, which
+is trivially true whenever the hardware cap binds -- so it reported all ten rows
+as register-bound, including N=4096 and N=8192, whose register limits are 12 and
+8 against a cap of 8. Those two are cap-bound. The flag now tests the uncapped
+register limit, and a `limiting_constraint` field names which of registers /
+hardware cap / grid supply is actually smallest; the two rows correctly read
+`hardware_cap` and `binding=False`. Nothing downstream moves: the three
+discriminating rows (16384/32768/49152) were always the register-bound ones and
+the cliff rows have limits 5/3/2/1, far under both other constraints. But a
+guard that says True when it should say False is worth less than no guard,
+because it launders exactly the assumption it was supposed to test. @Reviewer
+caught this one; I did not.
 
 A third trap the probe caught on its own: flydsl memoizes compilation
 *in-process* as well as on disk, so pointing `FLYDSL_RUNTIME_CACHE_DIR` at an

@@ -24,12 +24,32 @@ and the sidecar needs the units named, not the values changed. This probe
 asserts the relation on every row: if a future toolchain breaks it, the probe
 fails instead of quietly publishing two incompatible numbers.
 
+All ten widths are emitted under `vgpr_relation_audit` with their fit/held-out
+labels. The first version of this file named the held-out widths only in prose,
+and two of them appeared in no sweep at all, so a reader could not check the
+claim against the artifact -- the same failure as quoting a test count without
+the invocation. What the JSON can establish is that the relation holds on all
+ten and which set each width was in; that the held-out predictions were made
+*before* those widths were measured rests on the commit history, and the
+payload says so rather than implying the data proves it.
+
 **Occupancy is not register-bound unless enough waves exist to be bound.** At
 m=1024 and N=49152 the grid supplies only 4 waves/SIMD, so any register limit
 of 4 or more is invisible and a measurement there would "confirm" whatever it
 was compared against. Every row records `grid_supply_waves_per_simd`, and
 `register_bound_is_binding` says whether the register limit is actually the
-smaller of the two. Only rows where it is can discriminate.
+smallest of the three constraints. Only rows where it is can discriminate.
+
+That flag was wrong in the first version of this probe, in the same way the
+thing it exists to catch is wrong: it compared the *already-capped* bound
+against the other constraints, which is trivially true whenever the hardware
+cap binds, so it marked the N=4096 and N=8192 rows (register limits 12 and 8
+against a cap of 8) as register-bound when they are cap-bound. It now tests the
+uncapped `waves_per_simd_register_limited`, and `limiting_constraint` names
+which of registers / hardware cap / grid supply is actually smallest. The cliff
+rows (N >= 16384) were never affected -- their register limits are 5, 3, 2, 1,
+all well under both other constraints -- but a guard that says True when it
+should say False is worth less than no guard, and @Reviewer caught it.
 
 What the measurement decides. On the three widths where the two register
 sources predict *different* occupancies (16384, 32768, 49152 at m=16384, where
@@ -84,6 +104,16 @@ DISCRIMINATING_NS = [4096, 8192, 16384, 32768, 49152]
 # BOUNDARY: the bandwidth cliff's own m, across the 49152 -> 57344 edge.
 BOUNDARY_M = 4096
 BOUNDARY_NS = [32768, 40960, 49152, 57344, 65536]
+
+# The wave64 -> rocprof VGPR relation was established on widths split into a fit
+# set and a held-out set, and the prose said so -- but two of the held-out
+# widths (2048, 24576) appeared in no sweep, so the claim could not be audited
+# from the committed artifact alone. @Reviewer caught that. The split is now
+# declared here and every width in it is measured and emitted below, so the
+# claim is checkable without taking my word for the history.
+VGPR_RELATION_FIT_NS = [1024, 4096, 8192, 49152, 57344]
+VGPR_RELATION_HELDOUT_NS = [2048, 16384, 24576, 32768, 40960]
+VGPR_RELATION_M = 1024  # only registers are read here; occupancy is not claimed at this m
 
 REPEATS = 3  # dispatches per shape; the CSV row count is asserted against this
 
@@ -319,11 +349,64 @@ def _sweep(m, ns, tag, hw_cap, num_cus):
                 "waves_per_simd_register_limited": register_limited,
                 "occupancy_upper_bound_waves_per_simd": bound,
                 "grid_supply_waves_per_simd": round(grid_supply, 3),
-                "register_bound_is_binding": bound <= min(grid_supply, hw_cap),
+                # Compare the UNCAPPED register limit against the other two
+                # constraints. Testing the already-capped `bound` instead makes
+                # this trivially true whenever the hardware cap binds, which
+                # mislabelled the N=4096 and N=8192 rows as register-bound when
+                # they are cap-bound. @Reviewer caught it.
+                "register_bound_is_binding": (
+                    register_limited < hw_cap and register_limited <= grid_supply
+                ),
+                "limiting_constraint": (
+                    "registers"
+                    if register_limited < min(hw_cap, grid_supply)
+                    else ("hardware_cap" if hw_cap <= grid_supply else "grid_supply")
+                ),
                 "measured_waves_per_simd": round(measured, 4),
                 "measured_over_bound": round(measured / bound, 4),
                 "dispatches": len(chunk),
                 "bandwidth_pct_of_ceiling_at_m4096": BANDWIDTH_PCT_AT_M4096.get(n),
+            }
+        )
+    return out
+
+
+def _vgpr_relation_audit():
+    """Emit the fit/held-out split behind the wave64 -> rocprof VGPR relation.
+
+    The relation is `rocprof = roundup(ceil(artifact / 2), 4)`. It was derived
+    on the fit widths and then checked against the held-out ones. Prose alone
+    cannot establish that ordering after the fact, so what this records is the
+    weaker but *auditable* claim: the relation holds on every width in both
+    sets, and which set each width belongs to is declared in the source rather
+    than asserted in a paragraph.
+    """
+    all_ns = sorted(set(VGPR_RELATION_FIT_NS) | set(VGPR_RELATION_HELDOUT_NS))
+    artifacts = _artifact_registers(VGPR_RELATION_M, all_ns)
+    rows = _run_rocprof(VGPR_RELATION_M, all_ns, "vgprrel")
+    out = []
+    for i, n in enumerate(all_ns):
+        chunk = rows[i * REPEATS : (i + 1) * REPEATS]
+        rocprof_vgprs = {int(c["VGPR_Count"]) for c in chunk}
+        if len(rocprof_vgprs) != 1:
+            raise SystemExit(f"N={n}: rocprof reported differing VGPR_Count across repeats")
+        rocprof_vgpr = rocprof_vgprs.pop()
+        art_vgpr = artifacts[n]["vgpr_count"]
+        predicted = _predict_rocprof_vgpr(art_vgpr)
+        if predicted != rocprof_vgpr:
+            raise SystemExit(
+                f"N={n}: the wave64->rocprof VGPR relation broke "
+                f"(artifact {art_vgpr} predicts {predicted}, rocprof says {rocprof_vgpr})"
+            )
+        out.append(
+            {
+                "n": n,
+                "m": VGPR_RELATION_M,
+                "set": "fit" if n in VGPR_RELATION_FIT_NS else "held_out",
+                "artifact_vgpr_count": art_vgpr,
+                "rocprof_vgpr_count": rocprof_vgpr,
+                "predicted_from_artifact": predicted,
+                "agrees": predicted == rocprof_vgpr,
             }
         )
     return out
@@ -355,6 +438,8 @@ def main():
     discriminating = _sweep(DISCRIMINATING_M, DISCRIMINATING_NS, "discriminating", hw_cap, num_cus)
     print(f"boundary sweep, m={BOUNDARY_M} ...", flush=True)
     boundary = _sweep(BOUNDARY_M, BOUNDARY_NS, "boundary", hw_cap, num_cus)
+    print(f"vgpr relation audit, m={VGPR_RELATION_M} ...", flush=True)
+    vgpr_relation = _vgpr_relation_audit()
 
     payload = {
         "what": "measured occupancy (rocprofv3 MeanOccupancyPerActiveCU) against the "
@@ -417,6 +502,17 @@ def main():
             "candidate bounds, and the m=1024 reading that prompted this probe was one of "
             "those. Measured occupancy is also an average over active CUs and over the "
             "kernel's life, so it sits slightly under a bound it is genuinely at."
+        ),
+        "vgpr_relation_audit": vgpr_relation,
+        "vgpr_relation_audit_note": (
+            "Every width in the fit and held-out sets, with its artifact count, rocprof "
+            "count and the prediction between them, so the relation is checkable from this "
+            "file alone. An earlier version named held-out widths in prose that appeared in "
+            "no sweep, which made the claim unauditable; @Reviewer caught it. Note what "
+            "this does and does not establish: it shows the relation holds on all ten "
+            "widths and which set each was in, but the committed artifact cannot by itself "
+            "prove the held-out predictions were made before those widths were measured. "
+            "That ordering rests on the commit history, not on this JSON."
         ),
         "discriminating_sweep": discriminating,
         "boundary_sweep": boundary,
