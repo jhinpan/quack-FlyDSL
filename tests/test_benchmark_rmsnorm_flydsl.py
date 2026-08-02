@@ -427,9 +427,20 @@ def test_a_corrupt_mall_entry_beside_a_good_l2_entry_is_not_reported_as_success(
         ("size 262144\n", "missing_level"),
         ("level 3\n", "missing_size_level3"),
         ("level 3\nsize 0\n", "nonpositive_size_level3"),
-        ("level 3\nsize -1\n", "nonpositive_size_level3"),
+        # `size -1` moved from nonpositive_size to bad_size when the reader
+        # gained a range. Both record the skip, so this is the tag and not the
+        # behaviour -- and bad_size is the truer one: under the same unsigned
+        # reasoning that governs the node fields, a negative size is a
+        # malformed read rather than a small cache. Zero stays nonpositive
+        # because it parses in range and is genuinely a stated size of nothing.
+        ("level 3\nsize -1\n", "bad_size_level3"),
         ("", "missing_level"),
         ("level 3\nsize not-a-number\n", "bad_size_level3"),
+        # The upper bound, which did not exist before. This one is not a
+        # labelling question: 2**32 KB parsed, passed `> 0`, and returned 4 TiB
+        # as a clean kfd_topology read that then sized every rotation buffer.
+        ("level 3\nsize 4294967296\n", "bad_size_level3"),
+        ("level 4294967296\nsize 262144\n", "bad_level"),
     ],
 )
 def test_every_way_an_entry_can_go_missing_is_recorded(tmp_path, entry, tag):
@@ -930,6 +941,110 @@ def test_gfx950_still_accepts_the_topology_when_nothing_contradicts_it(tmp_path)
     assert value == 256 * 1024**2
     assert provenance["source"] == "kfd_topology"
     assert "torch_l2_exceeds_topology" not in provenance
+
+
+@pytest.mark.parametrize(
+    "properties_text,why",
+    [
+        (
+            f"gfx_target_version 4294967296\nunique_id {REAL_UID}\ndomain 0\nlocation_id 29952\n",
+            "2**32 passed the != 0 CPU test and was read as a GPU",
+        ),
+    ],
+)
+def test_an_identity_field_above_its_driver_width_is_unreadable(tmp_path, properties_text, why):
+    # The upper half of the range. @Reviewer raised it against @Autotune's tree
+    # and it reproduced here verbatim: `_field` checked `>= 0` only, so
+    # "unsigned" was half an invariant and 2**32 sailed through. Widths
+    # measured on the live topology first -- gfx_target_version tops out at
+    # 90500, domain at 0, location_id at 62720 -- so nothing healthy is
+    # reclassified by a 32-bit bound.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    _node(root, 2, properties_text, ((3, 262144),))
+    value, provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), str(root))
+    assert value == 4 * 1024**2, why
+    assert provenance["source"] == "torch_l2_fallback", why
+
+
+@pytest.mark.parametrize(
+    "properties_text,why",
+    [
+        (
+            "gfx_target_version 90500\ndomain 4294967296\nlocation_id 29952\n",
+            "an impossible domain was treated as an ordinary non-match",
+        ),
+        (
+            "gfx_target_version 90500\ndomain 0\nlocation_id 4294967296\n",
+            "2**32 masks to bus 0 device 0 and the mask cannot reject it",
+        ),
+    ],
+)
+def test_an_oversized_pci_field_is_unreadable_on_the_path_that_uses_it(
+    tmp_path, properties_text, why
+):
+    # These have no unique_id, so the PCI address is what would identify the
+    # node and its fields are load-bearing. I first wrote them with a matching
+    # unique_id and they failed -- correctly: on that path the node asserts its
+    # identity directly and the PCI fields are not what the match rests on, so
+    # refusing over them is over-refusal. The same malformed field is
+    # disqualifying or irrelevant depending on what the match is standing on,
+    # which is the distinction @Reviewer's branch-asymmetry point turns on.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    _node(root, 2, properties_text, ((3, 262144),))
+    value, provenance = benchmark._last_level_cache_bytes(
+        _hip_torch(), _properties(uuid_text=None), str(root)
+    )
+    assert value == 4 * 1024**2, why
+    assert provenance["source"] == "torch_l2_fallback", why
+    # The value alone does not discriminate here, and asserting only it would
+    # have been a test that passes on the parent while guarding nothing: the
+    # parent also declines, but by *accidental non-match* -- 2**32 simply fails
+    # the comparison -- and records nothing, so an unreadable node is
+    # indistinguishable from an absent one. What changed is that the skip is
+    # now evidence the caller can see.
+    assert provenance["skipped_nodes"] == ["2:unparseable_properties"], why
+
+
+def test_a_unique_id_above_sixty_four_bits_is_refused_on_the_pci_path(tmp_path):
+    # Validated even where it is not read. A node asserting an identity that
+    # cannot exist is not a node whose other fields are more believable, and
+    # leaving it unchecked on this path is what makes validation depend on
+    # which branch the caller took.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    _node(
+        root,
+        2,
+        "gfx_target_version 90500\nunique_id 18446744073709551616\ndomain 0\nlocation_id 29952\n",
+        ((3, 262144),),
+    )
+    value, provenance = benchmark._last_level_cache_bytes(
+        _hip_torch(), _properties(uuid_text=None), str(root)
+    )
+    assert value == 4 * 1024**2
+    assert provenance["source"] == "torch_l2_fallback"
+
+
+def test_the_real_sixty_four_bit_unique_id_is_still_accepted(tmp_path):
+    # Over-refusal control for the bound above, from the live topology: the
+    # largest unique_id this host publishes is 18206932166487137716, which
+    # needs all 64 bits. A blanket 32-bit rule would have refused every node on
+    # the machine, which is why the width is per-field and measured.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    _node(
+        root,
+        2,
+        "gfx_target_version 90500\nunique_id 18206932166487137716\ndomain 0\nlocation_id 29952\n",
+        ((3, 262144),),
+    )
+    value, provenance = benchmark._last_level_cache_bytes(
+        _hip_torch(), _properties(uuid_text=b"fcac045749195db4"), str(root)
+    )
+    assert value == 256 * 1024**2
+    assert provenance["matched_by"] == "unique_id"
 
 
 def test_off_gfx950_the_larger_torch_value_carries_torch_as_its_source(tmp_path):

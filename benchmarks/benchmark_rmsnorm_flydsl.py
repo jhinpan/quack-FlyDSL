@@ -260,6 +260,35 @@ def evictor_is_needed(rotation_working_set_bytes: int, llc_bytes: int) -> bool:
 
 KFD_NODE_ROOT = "/sys/class/kfd/kfd/topology/nodes"
 
+# Ceilings for the two cache fields, in the units KFD publishes them in. These
+# bound what a cache hierarchy can physically be, not what the field is wide
+# enough to hold -- a `size` of 2**32 KB fits the driver's u32 and is still not
+# a cache. That distinction is the whole point: the width check stops a
+# corrupt read, and these stop a well-formed impossible one.
+#
+# Live topology for scale: the deepest level published is 3 and the largest
+# entry is 262144 KB (the 256 MiB MALL). 8 and 16 GiB leave several orders of
+# magnitude of headroom for future parts while still refusing the failure that
+# actually occurred -- a 4 TiB "last level" that sized every rotation buffer.
+MAX_CACHE_LEVEL = 8
+MAX_CACHE_SIZE_KB = 16 * 1024 * 1024
+
+
+def _bounded(props: dict[str, str], name: str, ceiling: int) -> int | None:
+    """A present, parseable, non-negative value strictly below ``ceiling``.
+
+    The cache-entry counterpart to ``_field``. Same rule: absent, malformed and
+    out-of-range are the same amount of evidence, which is none, so they take
+    the same path and the caller records a skip.
+    """
+    if name not in props:
+        return None
+    try:
+        value = int(props[name])
+    except ValueError:
+        return None
+    return value if 0 <= value < ceiling else None
+
 
 def _last_level_cache_bytes(
     torch: Any, properties: Any, node_root: str = KFD_NODE_ROOT
@@ -306,11 +335,28 @@ def _last_level_cache_bytes(
     unparsed_nodes: list[str] = []
     contradicted: list[str] = []
 
-    def _field(props: dict[str, str], name: str) -> int | None:
+    def _field(props: dict[str, str], name: str, bits: int = 32) -> int | None:
         """An unsigned integer field that must be present, parse, and be in range.
 
         None means none of the three -- absent, malformed and out-of-range are
         the same amount of evidence, which is none.
+
+        ``bits`` is the field's width in the driver, and it is a required part
+        of the range: an unsigned check alone is only half an invariant.
+        @Reviewer found the other half against @Autotune's tree and it
+        reproduced verbatim here -- ``domain``, ``location_id`` and
+        ``gfx_target_version`` at 2**32 all clean-matched, and a cache ``size``
+        of 2**32 KiB returned 4 TiB as a clean ``kfd_topology`` read with no
+        degradation recorded. A rotation sized against a 4 TiB last level is
+        every allocation the harness makes.
+
+        Widths measured on the live topology before tightening, not asserted
+        from the header: ``unique_id`` reaches 18206932166487137716 and needs
+        64, while ``gfx_target_version`` (90500), ``domain`` (0),
+        ``location_id`` (62720), ``level`` (3) and ``size`` (262144 KB) all sit
+        far inside 32. Defaulting to 32 and widening only ``unique_id`` is
+        deliberate: a new field added without thought gets the tighter bound
+        and fails loudly, rather than the looser one and passing quietly.
 
         Every integer KFD publishes here is unsigned, so a negative value is a
         malformed read and not a small one. Parsing alone let three wrong
@@ -336,7 +382,7 @@ def _last_level_cache_bytes(
             value = int(props[name])
         except ValueError:
             return None
-        return value if value >= 0 else None
+        return value if 0 <= value < (1 << bits) else None
 
     try:
         for node in sorted(os.listdir(node_root)):
@@ -364,7 +410,35 @@ def _last_level_cache_bytes(
             if gfx_version == 0:
                 continue  # genuinely known to be a CPU node
 
-            node_uid = _field(props, "unique_id") if "unique_id" in props else None
+            # A node's identity fields are validated whether or not this
+            # caller's branch happens to consult them. @Reviewer's
+            # branch-asymmetry point, which reproduced here: the UID path
+            # accepted a node without ever looking at `domain`/`location_id`,
+            # so the same malformed node was clean when torch supplied a UUID
+            # and degraded when it did not. Validation strength that depends on
+            # which branch the caller took is not validation -- it is a
+            # coincidence of routing, and it hides exactly the node that is
+            # least trustworthy.
+            #
+            # `unique_id` is validated even on the PCI path, where it is not
+            # read: a node asserting an impossible identity is not a node whose
+            # other fields are more believable.
+            #
+            # But the converse does not follow, and the first version of this
+            # block got it wrong by treating every malformed field as
+            # disqualifying. A node whose unique_id *is* the one we asked for
+            # has asserted the identity directly; an unreadable `domain` on
+            # that node is a field the match never rested on, and dropping the
+            # match over it is over-refusal. So the PCI fields disqualify a
+            # node only when the PCI address is what would identify it. The
+            # asymmetry @Reviewer objected to was a field being unchecked on
+            # one path; this is a field being *irrelevant* on one path, which
+            # is a different thing and has to be argued rather than assumed --
+            # a test asserting the opposite is what made me look.
+            node_uid = _field(props, "unique_id", bits=64) if "unique_id" in props else None
+            if "unique_id" in props and node_uid is None:
+                unparsed_nodes.append(f"{node}:unparseable_properties")
+                continue
             if want_uid is not None and node_uid is not None and node_uid != want_uid:
                 # This node states an identity, and it is not the one we asked
                 # for. That is positive evidence of a *different* device, not
@@ -375,8 +449,8 @@ def _last_level_cache_bytes(
                 continue
             if want_uid is not None and node_uid == want_uid:
                 by_uid.append(base)
-            elif "unique_id" in props and node_uid is None:
-                unparsed_nodes.append(f"{node}:unparseable_properties")
+                # The identity was asserted directly by this node, so the PCI
+                # fields are not what identifies it and cannot disqualify it.
                 continue
 
             if domain is not None and bus is not None and device is not None:
@@ -477,11 +551,15 @@ def _last_level_cache_bytes(
             if "level" not in cprops:
                 skipped.append(f"{cache}:missing_level")
                 continue
-            try:
-                level = int(cprops["level"])
-            except ValueError:
+            # Bounded above as well as below, and bounded by what a cache
+            # hierarchy can actually be rather than by the field's width. A
+            # `level` of 2**32 parsed cleanly and passed `level >= 2`, so the
+            # entry was consulted as if it were a last level.
+            level_value = _bounded(cprops, "level", MAX_CACHE_LEVEL)
+            if level_value is None:
                 skipped.append(f"{cache}:bad_level")
                 continue
+            level = level_value
             if level < 1:
                 # A cache cannot be below L1. `level < 2 -> skip` treated 0 and
                 # -1 as ordinary low-level entries and dropped them silently,
@@ -495,11 +573,17 @@ def _last_level_cache_bytes(
             if "size" not in cprops:
                 skipped.append(f"{cache}:missing_size_level{level}")
                 continue
-            try:
-                size_kb = int(cprops["size"])  # KFD reports KB
-            except ValueError:
+            # The upper bound matters more here than anywhere else in this
+            # function, because this value is not just an identity check -- it
+            # is returned and then used to size every rotation buffer the
+            # harness allocates. `size 4294967296` parsed, passed `> 0`, and
+            # came back as a clean 4 TiB `kfd_topology` read with no
+            # degradation recorded.
+            size_value = _bounded(cprops, "size", MAX_CACHE_SIZE_KB)
+            if size_value is None:
                 skipped.append(f"{cache}:bad_size_level{level}")
                 continue
+            size_kb = size_value  # KFD reports KB
             if size_kb <= 0:
                 skipped.append(f"{cache}:nonpositive_size_level{level}")
                 continue
