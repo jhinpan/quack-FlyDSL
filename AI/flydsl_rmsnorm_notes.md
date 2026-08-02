@@ -575,12 +575,12 @@ bit-identical to the public API before timing (sidecar
 
 | rung | what it adds | median host µs | Δ |
 | --- | --- | --- | --- |
-| L0 | `run_compiled` — FlyDSL dispatch alone | 6.55 | — |
-| L1 | + key tuple, cache lookup, dtype strings | 11.35 | 4.79 |
-| L2 | + the three output allocations | 15.12 | 3.77 |
-| L3 | + `autograd.Function.apply` | 19.17 | 4.05 |
-| L3b | + reshapes, `_packed_rows`, absent `empty(0)` | 24.67 | 5.50 |
-| L4 | + `_validate_inputs` — the public API | 28.22 | 3.55 |
+| L0 | `run_compiled` — FlyDSL dispatch alone | 6.00 | — |
+| L1 | + key tuple, cache lookup, dtype strings | 10.79 | 4.78 |
+| L2 | + the three output allocations | 14.59 | 3.80 |
+| L3 | + `autograd.Function.apply` | 18.67 | 4.08 |
+| L3b | + reshapes, `_packed_rows`, absent `empty(0)` | 24.38 | 5.72 |
+| L4 | + `_validate_inputs` — the public API | 27.91 | 3.53 |
 
 **This replaces an unbacked chain that did not add up.** The previous text read
 *"the cached launcher is 11.3, the four `torch.empty*` allocations bring it to
@@ -595,19 +595,35 @@ consistent.
 The measurement explains the gap: that last step was never one stage. It lumped
 `_validate_inputs` together with the reshapes and the absent-tensor
 `torch.empty(0)`s, which is why L3b is separated here. Split apart,
-**`_validate_inputs` alone is 3.55 µs**, and the wrapper's reshape/alloc work is
-**5.50 µs** — the part the old chain dropped from its own arithmetic.
+**`_validate_inputs` alone is ~3.5 µs**, and the wrapper's reshape/alloc work is
+**~5.6 µs** — the part the old chain dropped from its own arithmetic.
 
-I first wrote that 3.55 was *"consistent with both the old 2.9 and the ~3.3
-quoted further down"*, and that is the same eyeball-the-decimals move this
-section exists to correct. Scaled by the combined round-to-round stdev of the two
-rungs it differs (0.097 µs), 3.55 sits **6.7 stdevs** from 2.9 (+22%) and **2.6
-stdevs** from 3.3 (+7.5%). Neither is agreement. Both older figures came from an
-attribution that lumped validation with the wrapper work, so there is no reason
-to expect them to match a clean split, and dressing the mismatch as consistency
-would have hidden the one thing the split was built to show. **`b41ad16`'s
-successor `362e10a` carries the wrong version in its pushed commit message**,
-which cannot be amended.
+**Why those are quoted to one decimal, after two failed attempts at two.** I
+first wrote that the measured validation cost was *"consistent with the old 2.9
+and the ~3.3"*, corrected that to *"6.7 stdevs from 2.9, 2.6 stdevs from 3.3 —
+neither is agreement"*, and **both were wrong for the same reason: the stdev I
+divided by was the wrong one.** The per-rung figure in the artifact is *within*
+one process — 30 rounds × 200 reps — and it is tiny, 0.05–0.16 µs. It is not the
+uncertainty on the result. Re-running the probe in a fresh process moved **every
+rung by −0.24 to −0.56 µs, all the same direction**, which is **3.1 to 6.8× the
+within-run stdev of the rung that moved**. Across three runs `_validate_inputs`
+read 3.55, 3.33, 3.53; the "is it consistent with 3.3" verdict flips from +7.5%
+to +1.0% depending on which run answers.
+
+So the honest error bar here is **±0.5 µs between processes**, not ±0.1 within
+one, and a 0.2 µs difference cannot be adjudicated at all. Something
+process-scoped — allocator state, page placement, clocks — dominates, which is
+the same conclusion the allocation-factorial work reached for copy rates on this
+box, arrived at again from the opposite end. The artifact now carries this as
+`the_error_bar_that_matters_is_between_runs` so the next reader does not repeat
+the mistake from the same field I did.
+
+What survives all three runs and is not close to the noise: the split itself.
+Validation is ~3.5 and the wrapper reshape/alloc work is ~5.6, so the old chain's
+single "2.9" for the whole 6.7 µs step was wrong by more than a factor of two,
+and that gap is 10–20× the between-run spread. **`362e10a` carries the first
+wrong version in its pushed commit message and `ad76ed5` the second**; neither
+can be amended.
 
 **The "roughly 2x kernel advantage" was a ratio taken across a floor, and it is
 K-dependent.** The published figures were 2.11 us for FlyDSL against torch's
@@ -665,12 +681,14 @@ FlyDSL wrapper is behind, and that the harness reports only the first.
 **Most of that 26 us is not ours to remove, and the ceiling is worth knowing
 before anyone tries.** Calling the cached compiled function directly -- no
 validation, no allocation, no autograd, no key construction, stream hoisted --
-still costs **6.55 us** (backed: `AI/data/rmsnorm_stage_stubs.json`, rung L0,
+still costs **6.00 us** (backed: `AI/data/rmsnorm_stage_stubs.json`, rung L0,
 validated bit-identical to the public call before timing; the previously
-published **6.38** lands 2.6% low, which is **1.7 round-to-round stdevs** at this
-rung's 0.102 µs and therefore *consistent* with it — I first wrote that it sat
-"well outside" the scatter, quoting a stdev from an earlier run of the same probe
-and turning ordinary noise into a discrepancy),
+published **6.38** sits inside the between-run spread of this rung — L0 read
+6.60, 6.55, 6.09 and 6.00 across four runs — so 6.38 and 6.0 are **not
+distinguishable measurements** and no correction to that figure is claimed. I
+twice tried to adjudicate this with a *within-run* stdev, first calling 6.38
+"well outside" the scatter and then "1.7 stdevs, consistent"; both used an error
+bar roughly 4× too small. See the L4 discussion above),
 and that is FlyDSL's own dispatch: the profile at that
 level is all `<flydsl-dispatch>`, `ptr_fill` and `pack_into`, with no frame of
 ours in it. For scale, `torch.nn.functional.rms_norm` end-to-end is 6.27 us and

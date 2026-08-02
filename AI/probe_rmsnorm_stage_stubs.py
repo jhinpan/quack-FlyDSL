@@ -403,6 +403,21 @@ def main():
             ),
         },
         "comparison_to_published_unbacked": comparison,
+        "the_error_bar_that_matters_is_between_runs": (
+            "the per-rung stdev above is WITHIN one process: 30 rounds of 200 "
+            "reps, and it is small (0.07-0.16 us). It is not the uncertainty on "
+            "these figures. Re-running this probe in a fresh process moved every "
+            "rung by -0.24 to -0.56 us, all in the same direction, which is 3.1 "
+            "to 6.8 times the within-run stdev of the rung it moved. Something "
+            "that differs between processes -- allocator state, page placement, "
+            "clocks -- dominates, exactly as the allocation-factorial work found "
+            "for copy rates on this box. Quoting a within-run stdev as the error "
+            "bar understates the real spread by roughly 4x, and I did that twice "
+            "before measuring it. Treat any single-run figure here as +-0.5 us, "
+            "and do not adjudicate a 0.2 us difference with it: the verdict on "
+            "whether the measured _validate_inputs cost agrees with the old 3.3 "
+            "flips between runs (3.55 = +7.5%, then 3.33 = +1.0%)."
+        ),
         "the_published_ladder_did_not_sum": {
             "what_the_notes_say": (
                 "'the cached launcher is 11.3 us, the four torch.empty* allocations "
@@ -439,6 +454,17 @@ def main():
     out_path = REPO / "AI/data/rmsnorm_stage_stubs.json"
     out_path.write_text(json.dumps(payload, indent=2) + "\n")
     print(f"wrote {out_path}")
+
+    # Eight shared MI355X: hand the device back explicitly rather than leaving it
+    # to process exit. A finished probe still holding VRAM reads as contention to
+    # anyone sampling the box -- which is not hypothetical: 33,695 MiB of mine on
+    # GPU5 was counted as occupancy by a teammate one minute before I sampled the
+    # same card at its 284 MiB idle floor. The release is reported, not assumed.
+    del levels, reference, x, weight
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+    free_b, total_b = torch.cuda.mem_get_info()
+    print(f"released; device reports {(total_b - free_b) / 1024**2:.0f} MiB in use")
     for k, v in comparison.items():
         print(
             f"  {k}: published {v['published_unbacked_us']} -> measured {v['measured_median_us']:.2f}"
