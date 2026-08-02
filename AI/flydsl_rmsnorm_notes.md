@@ -3430,31 +3430,84 @@ argument, not on this box's hardware — which is exactly the half @Autotune's
 `mutates_args` reading covers. Closing it empirically wants an H100/H200 run of
 the same probe against `quack.rmsnorm._rmsnorm_fwd`.
 
-**That remedy is currently unavailable, and I wrote it as though it were just
-waiting on someone's time.** I went and looked. Both tailscale H200 boxes
-(hyper00 `100.101.70.115`, hyper01 `100.105.68.76`, eight H200s each, several
-fully idle) have `nvidia-cutlass-dsl` **4.5.2** installed, while
-`pyproject.toml:10` pins **`==4.6.1`**. `quack/pipeline.py:13` imports
-`alloc_reserved_mbarrier`, which 4.5.2's `cutlass.pipeline` does not export —
-it has `MbarrierArray` and nothing else matching. So `import quack.rmsnorm`
-fails there too: a *different cause* from the MI355X block, the same
-consequence, and it reproduces on @CrossVendor's own checkout at `4f36477` on
-both machines.
+###### I said that remedy was unavailable. It was available, and the way I got there is the defect this whole file is about
 
-The sharper part is what that does to the FlyDSL path. `quack/__init__.py:6`
-gates the entire cutedsl import chain on `torch.version.hip is None`, so on a
-**CUDA** box `import quack.rmsnorm_flydsl` executes `quack/__init__.py` first
-and dies inside `quack/rmsnorm.py` before ever reaching the FlyDSL module. The
-same gate that keeps FlyDSL importable on MI355X makes it *unreachable* on a
-Hopper box with mismatched cutlass. The test file
-`tests/test_import_isolation.py` passes here because ROCm takes the other
-branch — it cannot catch this direction on this hardware.
+I wrote that gap up as though the H200 run were merely waiting on someone's
+time, then went to check and reported something worse: **both tailscale H200
+boxes have `nvidia-cutlass-dsl` 4.5.2 while `pyproject.toml:10` pins
+`==4.6.1`**, and `quack/pipeline.py:13` imports `alloc_reserved_mbarrier`,
+which 4.5.2's `cutlass.pipeline` does not export. I reproduced it on
+@CrossVendor's own checkout at `4f36477`, on both machines, and sent it to him
+as a blocking prerequisite for his Experiment No.001 rerun.
 
-Consequence for @CrossVendor, worth his knowing before he unblocks: **his
-Experiment No.001 rerun at current head will not import on either H200 box as
-they stand.** The novita preflight gate is not the only thing between him and
-that run. Pinning 4.6.1 (or relaxing the `pipeline.py:13` import) is a
-prerequisite, and it is an environment fix, not a code defect in this PR.
+Every individual fact in that paragraph is true. The conclusion was still
+wrong, and it is wrong in exactly the way this document keeps cataloguing: **I
+checked each box's *system* python and reported the result as a property of the
+*machine*.** hyper00 carries `/root/quack-FlyDSL-h200-test/.venv` on cutlass
+**4.6.1**; hyper01 carries `/root/crossvendor-cu-venv` on **4.6.0**. Under
+either, at current head:
+
+```
+$ cd /root/quack-crossvendor-pr1 && .venv/bin/python -c 'import quack.rmsnorm'
+rmsnorm OK at current head
+```
+
+The label said "the H200 boxes are blocked." The evidence supported "one
+interpreter on each H200 box is blocked." Same shape as the `L2_cache_size`
+that isn't the LLC and the buffer count summed across cells — a number correct
+about a set other than the one its name claims. I have now made the artifact
+record `sys.executable` for this reason, with the reason written into the field.
+
+**So I ran it.** `AI/probe_cutedsl_restore_value.py`, hyper00 GPU 0 (0 MiB / 0%
+verified before launch), cutlass 4.6.1, scratch clone of `4f36477` — chosen
+over my own HEAD deliberately, and the choice is safe because
+`quack/rmsnorm.py` (`26e30eff…`) and `quack/autotuner.py` (`67875584…`) are
+byte-identical at both commits, and they are the only two files the probe
+touches.
+
+| check | 8192×2048 | 4096×4096 |
+|---|---|---|
+| CHECK 1 fwd, 5 replays, same buffers | **bit-identical** | **bit-identical** |
+| CHECK 1 bwd, 5 replays, same buffers | **bit-identical** | **bit-identical** |
+| CHECK 2 aliased control | **drifted** (out, rstd, residual_out, residual_in) | **drifted** |
+
+Control drifts, mains hold. The probe is sensitive, and the cutedsl kernels do
+not mutate their inputs. **The source reading of schema `:367`/`:1210` is now
+confirmed on Hopper hardware rather than argued from the file.** That closes
+the half of the `restore_value` verdict that had been resting on reading since
+the beginning — and it closed in the direction the reading predicted, which is
+the least interesting possible outcome and exactly why it was worth spending an
+idle GPU on rather than continuing to assert it.
+
+The bwd result is the one that carried real risk. `dw_partial` is the
+accumulator-shaped tensor; if `copy(tXrdW, tXgdW)` at `:1175`/`:1200` were
+actually a read-modify-write, replaying on the same buffer would drift. It
+does not.
+
+What does **not** transfer: the *cost* half. `AI/data/restore_value_needed.json`
+prices the regime switch on MI355X, where the LLC is a 256 MiB MALL behind a
+4 MiB L2; the H200's LLC is the 60 MiB L2 itself. The rotation band sits in a
+different place on each, so the two artifacts' timings must not be put in one
+table. The new artifact says so in a `scope` field rather than leaving it to
+whoever reads it next.
+
+One consequence I should state plainly because I sent the opposite to
+@CrossVendor: **his Experiment No.001 rerun is not blocked by this.** The
+`pipeline.py:13` / 4.5.2 mismatch is real for the system interpreter and worth
+knowing, but a 4.6.1 venv already exists on hyper00 and a 4.6.0 one on hyper01.
+I sent him a prerequisite that isn't one. The `__init__.py:6` observation below
+still stands on its own facts.
+
+The sharper part that survives. `quack/__init__.py:6` gates the entire cutedsl
+import chain on `torch.version.hip is None`, so on a **CUDA** box `import
+quack.rmsnorm_flydsl` executes `quack/__init__.py` first and would die inside
+`quack/rmsnorm.py` before ever reaching the FlyDSL module — *if* cutedsl were
+broken in that interpreter. On the 4.6.1 venv it is not, so the FlyDSL import
+gets further and fails on its own missing `flydsl` package instead. The
+structural point holds regardless: `tests/test_import_isolation.py` passes here
+because ROCm takes the other branch, so **this direction of the gate is
+untestable on this hardware** whether or not any particular CUDA box currently
+trips it.
 
 Conclusion, agreed both ways: **step 2 should be deleted, not rewritten.**
 `restore_value` buys rmsnorm zero correctness and costs the measurement regime.
@@ -3475,22 +3528,23 @@ of 5 from `AI/data/restore_value_needed.json`):
 
 | | graph | `do_bench` |
 | --- | --- | --- |
-| rotate (4 sets) | **0.0910** | 0.1128 |
-| single | 0.0896 | 0.1152 |
+| rotate (4 sets) | **0.0911** | 0.1129 |
+| single | 0.0897 | 0.1151 |
 
-- **Mechanism** = 1.240× here, 1.665× at 8192×2048. `do_bench` pays an event
+- **Mechanism** = 1.240× here, 1.629× at 8192×2048. `do_bench` pays an event
   pair and a fresh output allocation per launch; the graph replays 200 recorded
   calls with no Python in the window. This term is essentially the whole
-  end-to-end gap (1.265× and 1.323×).
-- **Rotation, within one mechanism** = 1.00× (0.985× and 0.996×).
+  end-to-end gap (1.264× and 1.388×).
+- **Rotation, within one mechanism** = 1.00× (0.985× and 0.997×).
 
 (Cells move in the third decimal between runs — 0.0904/0.0907/0.1112 several
 runs earlier. Message `f75cd8b8` quotes that earlier run; the table here is the
-current artifact's, regenerated after the output-buffer fix below. The
-mechanism term at 8192×2048 is the least stable figure in the set, 1.629–1.665×
-across runs; the rotation term is 0.98–1.01× throughout. Ratios are what this
-section argues from, for that reason. The rotation term here is ~1.00× for a
-reason established two subsections down — **both of these shapes lie outside
+current artifact's, regenerated after the `cutedsl_status` correction below.
+The mechanism term at 8192×2048 is the least stable figure in the set,
+1.629–1.665× across runs, and the 8192×2048 end-to-end number moves with it
+(1.323–1.388×); the rotation term is 0.98–1.01× throughout. Ratios are what
+this section argues from, for that reason. The rotation term here is ~1.00× for
+a reason established two subsections down — **both of these shapes lie outside
 the band where rotation can change cache state at all**, so this 2×2 is not
 evidence about rotation in general.)
 
@@ -3649,11 +3703,13 @@ withdrawn: the third is now measured false (it *is* single-buffer), and the
 first two are not needed to explain a result the capacity model predicts.
 
 What survives unchanged is the part the section is actually for: the
-**mechanism** term (1.244×/1.629×) accounts for essentially the whole
+**mechanism** term (1.240×/1.629×) accounts for essentially the whole
 `graph_rotate` → `do_bench_single` gap, so the end-to-end number is not an L2
 measurement and must not be quoted as one. That conclusion never depended on
 which cache is last-level. The `restore_value` verdict does not depend on any
-of this either — it rests on the mutation contract and the replay test.
+of this either — it rests on the mutation contract and the replay test, and as
+of `AI/data/cutedsl_restore_value.json` that replay test has now been run on
+the cutedsl kernel too, on Hopper, with a control that drifts.
 
 One contamination of my own, flagged rather than quietly dropped: the
 `do_bench` rotate cell rotates via a Python closure doing a modulo and an index

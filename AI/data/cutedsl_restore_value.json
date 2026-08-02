@@ -1,0 +1,160 @@
+{
+  "probe": "probe_cutedsl_restore_value.py",
+  "source_sha256_16": "53c108b56650a360",
+  "what_this_is": "The cutedsl half of the restore_value verdict, measured on Hopper hardware instead of argued from the schema. MI355X cannot import quack.rmsnorm at all (cuda.bindings.driver at :7).",
+  "env": {
+    "gpu": "NVIDIA H200",
+    "l2_cache_bytes_reported": 62914560,
+    "l2_is_the_llc_here": true,
+    "torch": "2.9.1+cu128",
+    "cutlass_dsl": "4.6.1",
+    "python": "/root/quack-FlyDSL-h200-test/.venv/bin/python",
+    "git_commit": "4f364777869349f8eeceb175637c84e434da6e72",
+    "why_python_is_recorded": "Because I got this wrong once. The interpreter, not the host, decides whether cutlass is 4.6.1 or 4.5.2 here: hyper00's /usr/bin/python3 has 4.5.2 and cannot import quack.rmsnorm, while /root/quack-FlyDSL-h200-test/.venv/bin/python has 4.6.1 and can. Reporting 'the H200 boxes are blocked' from the former was a claim about a set other than the one the label named. Any rerun must state which interpreter it used."
+  },
+  "scope": "Kernel mutation only. The COST half of the restore_value verdict -- the has_hooks gate at autotuner.py:199-204/:363 dropping scoring from _bench_cuda_graph_l2_rotate onto do_bench -- is a property of the autotuner and the harness, not of this kernel, and was measured on MI355X (AI/data/restore_value_needed.json). It is NOT re-measured here and the two artifacts' timings must not be compared: different device, different LLC (60 MiB L2 as true LLC on H200 vs 4 MiB L2 behind a 256 MiB MALL on gfx950), so the rotation band sits in a different place on each.",
+  "check1_idempotence_fwd": [
+    {
+      "kernel": "quack.rmsnorm.rmsnorm_fwd (cutedsl)",
+      "shape": [
+        8192,
+        2048
+      ],
+      "dtype": "bfloat16",
+      "feedback_aliased": false,
+      "replays": 5,
+      "all_replays_bit_identical": true,
+      "tensors_that_drifted": [],
+      "restore_value_would_be_a_noop": true,
+      "first_replay_fingerprints": {
+        "out": "2e5eaa89c25300a2",
+        "residual_out": "5a5fb48e1e3f5e3a",
+        "rstd": "e0f85908ac1fe3da",
+        "x": "d5e19685c071dc86",
+        "weight": "2c95cb637e26b178",
+        "residual_in": "d87ea3f0c52cada5"
+      }
+    },
+    {
+      "kernel": "quack.rmsnorm.rmsnorm_fwd (cutedsl)",
+      "shape": [
+        4096,
+        4096
+      ],
+      "dtype": "bfloat16",
+      "feedback_aliased": false,
+      "replays": 5,
+      "all_replays_bit_identical": true,
+      "tensors_that_drifted": [],
+      "restore_value_would_be_a_noop": true,
+      "first_replay_fingerprints": {
+        "out": "2c6c6bc8ce72b204",
+        "residual_out": "5a5fb48e1e3f5e3a",
+        "rstd": "b05fb7753015bf0d",
+        "x": "d5e19685c071dc86",
+        "weight": "41bfbf491c2e8f1a",
+        "residual_in": "d87ea3f0c52cada5"
+      }
+    }
+  ],
+  "check1_idempotence_bwd": [
+    {
+      "kernel": "quack.rmsnorm.rmsnorm_bwd (cutedsl)",
+      "shape": [
+        8192,
+        2048
+      ],
+      "dtype": "bfloat16",
+      "replays": 5,
+      "all_replays_bit_identical": true,
+      "tensors_that_drifted": [],
+      "restore_value_would_be_a_noop": true,
+      "first_replay_fingerprints": {
+        "dx": "708016e9c5317f58",
+        "dw": "247aadd5427a30f5",
+        "x": "d5e19685c071dc86",
+        "dout": "d87ea3f0c52cada5",
+        "rstd": "5052a9553d4d0094"
+      }
+    },
+    {
+      "kernel": "quack.rmsnorm.rmsnorm_bwd (cutedsl)",
+      "shape": [
+        4096,
+        4096
+      ],
+      "dtype": "bfloat16",
+      "replays": 5,
+      "all_replays_bit_identical": true,
+      "tensors_that_drifted": [],
+      "restore_value_would_be_a_noop": true,
+      "first_replay_fingerprints": {
+        "dx": "8c8984c257730ae5",
+        "dw": "55f9fe1fd0131ce6",
+        "x": "d5e19685c071dc86",
+        "dout": "d87ea3f0c52cada5",
+        "rstd": "7c44caf1077157d6"
+      }
+    }
+  ],
+  "check2_aliased_control_fwd": [
+    {
+      "kernel": "quack.rmsnorm.rmsnorm_fwd (cutedsl)",
+      "shape": [
+        8192,
+        2048
+      ],
+      "dtype": "bfloat16",
+      "feedback_aliased": true,
+      "replays": 5,
+      "all_replays_bit_identical": false,
+      "tensors_that_drifted": [
+        "out",
+        "residual_in",
+        "residual_out",
+        "rstd"
+      ],
+      "restore_value_would_be_a_noop": false,
+      "first_replay_fingerprints": {
+        "out": "2e5eaa89c25300a2",
+        "residual_out": "5a5fb48e1e3f5e3a",
+        "rstd": "e0f85908ac1fe3da",
+        "x": "d5e19685c071dc86",
+        "weight": "2c95cb637e26b178",
+        "residual_in": "5a5fb48e1e3f5e3a"
+      }
+    },
+    {
+      "kernel": "quack.rmsnorm.rmsnorm_fwd (cutedsl)",
+      "shape": [
+        4096,
+        4096
+      ],
+      "dtype": "bfloat16",
+      "feedback_aliased": true,
+      "replays": 5,
+      "all_replays_bit_identical": false,
+      "tensors_that_drifted": [
+        "out",
+        "residual_in",
+        "residual_out",
+        "rstd"
+      ],
+      "restore_value_would_be_a_noop": false,
+      "first_replay_fingerprints": {
+        "out": "2c6c6bc8ce72b204",
+        "residual_out": "5a5fb48e1e3f5e3a",
+        "rstd": "b05fb7753015bf0d",
+        "x": "d5e19685c071dc86",
+        "weight": "41bfbf491c2e8f1a",
+        "residual_in": "5a5fb48e1e3f5e3a"
+      }
+    }
+  ],
+  "verdict": {
+    "control_can_fail": true,
+    "kernels_are_idempotent": true,
+    "restore_value_needed_for_cutedsl_rmsnorm": false,
+    "interpretation": "check 1 stable AND check 2 drifting means the probe is sensitive and the cutedsl kernels still do not mutate their inputs -- the source reading of schema :367/:1210 is confirmed on hardware. check 2 stable would make check 1 vacuous and this result must then be discarded."
+  }
+}
