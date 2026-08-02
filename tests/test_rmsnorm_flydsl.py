@@ -1746,6 +1746,76 @@ def test_overlapping_rows_are_copied_and_do_not_poison_the_cache():
     assert torch.equal(rmsnorm(plain, weight), rmsnorm(plain.contiguous(), weight))
 
 
+@pytest.mark.parametrize("use_compile", [False, True])
+def test_a_contiguous_singleton_row_does_not_poison_the_cache(use_compile):
+    """The one layout ``.contiguous()`` cannot fix, so the guard must restride.
+
+    ``torch.randn((64, 1)).t()`` is shape ``(1, 64)`` stride ``(1, 1)``, and
+    torch reports it contiguous -- correctly, since with a single row there is
+    nothing to be discontiguous with. ``.contiguous()`` therefore returns the
+    same tensor and a copy-based guard is powerless. What goes wrong is the
+    leading-dimension search: FlyDSL takes the first unit-stride axis, which
+    here is axis 0 rather than the row, so the launcher is built against the
+    wrong dimension and -- ``_FWD_CACHE`` holding no layout term -- serves the
+    next ordinary call too. @Reviewer found this after the unfold fix.
+
+    Both orders are checked. The poisoning is order-dependent, so asserting
+    only "singleton first" would miss a fix that merely reordered the damage.
+
+    Only the ``use_compile=True`` case actually fails when the normalization is
+    removed -- measured, not assumed. In eager the singleton happens to survive
+    the wrong leading dimension. The eager case is kept anyway because the
+    ambiguity is identical and what saves it is incidental, but it should not
+    be counted as evidence: on its own it would pass against the defect.
+    """
+    torch.manual_seed(0)
+    n = 64
+    weight = torch.randn(n, device="cuda", dtype=torch.bfloat16)
+    singleton = torch.randn((n, 1), device="cuda", dtype=torch.bfloat16).t()
+    assert singleton.stride() == (1, 1) and singleton.is_contiguous()
+    assert singleton.contiguous().data_ptr() == singleton.data_ptr(), (
+        "premise of this test: .contiguous() is a no-op on this layout"
+    )
+    plain = torch.randn((4, n), device="cuda", dtype=torch.bfloat16)
+    function = torch.compile(rmsnorm, dynamic=True) if use_compile else rmsnorm
+
+    for first, second in ((singleton, plain), (plain, singleton)):
+        rmsnorm_flydsl_impl._FWD_CACHE.clear()
+        rmsnorm_flydsl_impl._BWD_CACHE.clear()
+        function(first, weight)
+        after = function(second, weight)
+        rmsnorm_flydsl_impl._FWD_CACHE.clear()
+        rmsnorm_flydsl_impl._BWD_CACHE.clear()
+        assert torch.equal(after, function(second, weight)), (
+            "a launcher built for one layout was reused for the other"
+        )
+        _assert_close(function(second, weight), _reference(second, weight, 1e-6))
+
+
+def test_restriding_a_size_one_axis_preserves_storage_and_values():
+    """The normalization must relabel, not copy, and must leave values alone.
+
+    A size-1 axis has no observable stride -- there is no second element to
+    step to -- so moving it out of the leading-dimension search is free. If
+    this ever started copying, the helper would silently pay for every
+    per-head and unsqueezed input.
+    """
+    torch.manual_seed(0)
+    for tensor in (
+        torch.randn((64, 1), device="cuda", dtype=torch.bfloat16).t(),
+        torch.randn((4, 64), device="cuda", dtype=torch.bfloat16).unsqueeze(1),
+        torch.randn((1, 1, 64), device="cuda", dtype=torch.bfloat16),
+    ):
+        relabelled = rmsnorm_flydsl_impl._unambiguous_layout(tensor)
+        assert relabelled.data_ptr() == tensor.data_ptr(), "must not copy"
+        assert relabelled.shape == tensor.shape
+        assert torch.equal(relabelled, tensor), "restriding changed the values"
+        unit_axes = [i for i, s in enumerate(relabelled.stride()) if s == 1]
+        assert unit_axes and unit_axes[0] == relabelled.dim() - 1, (
+            f"first unit-stride axis is {unit_axes} not the row axis; stride={relabelled.stride()}"
+        )
+
+
 def test_broadcast_and_reversed_views_are_copied():
     """Aliasing is not only row overlap; a zero stride repeats one row entirely."""
     torch.manual_seed(0)
