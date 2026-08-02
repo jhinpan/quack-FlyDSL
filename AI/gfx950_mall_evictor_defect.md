@@ -9,8 +9,8 @@ result: without an RMSNorm before/after nobody knows how far any individual
 cell moves. Those 37
 contain **no `m=32768` cell** — an earlier version of this line said they
 included one, which conflated two different sets (see the `32768x1024` note
-below: those cells sit just *past* the MALL and are inflated for a related but
-distinct reason, so they are not in the 37). (An earlier "11 of 18" here was computed from approximate
+below: those cells sit just *past* the MALL and are contract-invalid for a
+related but distinct reason, so they are not in the 37). (An earlier "11 of 18" here was computed from approximate
 bytes and ignored the `use_evictor` gate; withdrawn — see below.) A second code
 path, `_pick_l2_rotate_count` in `quack/bench/bench_utils.py`, shares the root
 cause but **has no live consumer on this box**: the FlyDSL autotune path uses
@@ -107,13 +107,20 @@ still asserted a sign.
 Two distinct reasons land a cell in that set, and they must not be merged into
 one rule:
 
-* **ten cells** are strictly `ws <= 256 MiB` and un-evicted — the `ws < l2_target`
-  gate leaves eviction off and the set fits the MALL;
+* in this mode **10 cells** are strictly `ws <= 256 MiB`; **2 of them** (the two
+  `M=1` rows) are small enough that the `ws < l2_target` gate still fires, so
+  **8** are both at-or-under capacity *and* un-evicted. An earlier version of
+  this line said "ten cells … and un-evicted", which welded a strict-capacity
+  count onto an un-evicted count and contradicted the table directly above it;
 * **`32768x1024` fwd** is `256.004 MiB` (16-bit weight) or `256.007812 MiB`
   (fp32 weight) — *past* capacity, so the `<=` rule excludes it. It qualifies
   only because the archived fine-boundary copy probe measured those exact
   working sets on the MALL-warm side. "`<= 256 MiB` leaves exactly 11" is not a
   valid derivation and is no longer used.
+
+So this mode contributes **8 + 1 = 9** contract-invalid cells, and the full
+matrix total is the independently computed **47 at-or-under capacity − 10
+evicted = 37**, not a per-mode count multiplied up.
 
 | shape | op | B/call | picked | working set | vs MALL | regime |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -171,9 +178,11 @@ harness working set of 268439552 bytes.
 > table in place alongside the new one gave the file two incompatible "current"
 > answers, which is @Reviewer's blocker 1.
 
-The verdict for the cell is unchanged — it sits on the inflated side, and being
-4 KiB over capacity does not evict it — but it rests on the corrected sweep,
-not on the withdrawn table above or on a threshold rule.
+The verdict for the cell is unchanged — a copy probe at its exact working set
+shows the cold-measurement contract does not hold there, and being 4 KiB over
+capacity does not by itself evict it — but it rests on the corrected sweep, not
+on the withdrawn table above or on a threshold rule. No RMSNorm measurement of
+this cell exists, so its direction and magnitude remain unknown.
 
 Worth recording that the boundary is **not a cliff**: throughput decays across
 roughly 256 → 288 MiB rather than stepping at one point. My earlier
@@ -510,7 +519,8 @@ this evidence cannot support.
 The `M=32768` row (100%/88%) contains no cell in the 37, but it is not clean.
 The four 16-bit `32768x1024` forward cells sit at 256.003906 MiB (16-bit
 weight) and 256.007812 MiB (fp32 weight) — a few KiB *past* MALL capacity, so
-the `ws <= MALL` test excludes them, yet they are still measured inflated. The
+the `ws <= MALL` test excludes them, yet a copy probe at those exact working
+sets still shows the contract failing. The
 fine-boundary block measures those exact working sets:
 
     268435456   256.000000 MiB   6391 GB/s
@@ -520,8 +530,11 @@ fine-boundary block measures those exact working sets:
     268500992   256.062500 MiB   5723
     301989888   288.000000 MiB   4880
 
-Against this run's 4961 GB/s HBM reference both variants sit on the inflated
-side (6129 and 6157 GB/s, i.e. 1.24x and 1.24x).
+Against this run's 4961 GB/s HBM reference the **copy probe** at both working
+sets reads high (6129 and 6157 GB/s, i.e. 1.24x and 1.24x). That is a statement
+about copy traffic at those sizes, and it establishes only that a set a few KiB
+past capacity is not self-evicting. It is **not** a measurement of the RMSNorm
+cells, whose direction and magnitude are unknown until they are re-collected.
 
 The ordering among the four points from 256.000 to 256.008 MiB is **not
 established**, and two successive attempts to say so were themselves wrong.
@@ -544,7 +557,8 @@ run-to-run variation exceeds within-run spread. That is a claim about
 reproducibility, not a statistical test, and it is the strongest one available
 here: back-to-back blocks cannot separate a working-set effect from drift.
 Interleaved repeats would be needed. The only claim these four points support is
-that all of them sit on the inflated side of the reference. The decay from 256 to 288 MiB is gradual, not a cliff, which is why a
+that copy traffic at all four of those working sets reads above the HBM
+reference, i.e. the cold-measurement contract is not established there. The decay from 256 to 288 MiB is gradual, not a cliff, which is why a
 threshold test misclassifies cells sitting a few KiB either side of it — and
 why these were measured rather than classified. Whether this shifts the
 published median depends on how many cells feed it, and should be recomputed

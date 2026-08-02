@@ -368,8 +368,14 @@ def environment():
         env["device_unique_id"] = bytes.fromhex(str(props.uuid).replace("-", "")).decode("ascii")
     except Exception:  # noqa: BLE001 - provenance only
         env["device_unique_id"] = None
-    # MALL_BYTES is a hardcoded assumption. Record what the machine reports so a
-    # reader can corroborate it -- this does NOT make it discovered.
+    # The constant and its provenance are recorded UNCONDITIONALLY: they are
+    # properties of this script, not of rocminfo. Writing them inside the try
+    # below meant a host without rocminfo -- exactly the host that cannot
+    # corroborate the value -- would silently omit the record of what the value
+    # even was. rocminfo supplies optional corroboration, nothing more.
+    env["mall_bytes"] = MALL_BYTES
+    env["mall_bytes_source"] = MALL_BYTES_SOURCE
+    env["mall_bytes_is_hardcoded"] = True
     try:
         out = subprocess.run(
             ["rocminfo"], capture_output=True, check=False, text=True, timeout=30
@@ -383,9 +389,6 @@ def environment():
         env["rocminfo_l3_agrees_with_assumed"] = bool(l3) and all(
             str(MALL_BYTES // 1024) in ln for ln in l3
         )
-        env["mall_bytes_is_hardcoded"] = True
-        env["mall_bytes"] = MALL_BYTES
-        env["mall_bytes_source"] = MALL_BYTES_SOURCE
     except Exception as exc:  # noqa: BLE001 - provenance only, never fatal
         env["rocminfo_l3_lines"] = f"unavailable: {exc}"
     # Map rocm-smi's GPU index to a BDF first. rocm-smi's ordering is NOT torch's
