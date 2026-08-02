@@ -564,10 +564,13 @@ matched m=4096 cells in the v1 pair:
   exceptions are all backward, weight_mode `same`: 4096x3000 fp16 1.242,
   4096x3000 bf16 1.236, 4096x4096 fp16 1.063.
 
-The `0.78–0.88x` figure that used to appear here was wrong as written: those are
-aggregated dtype-median ratios, not a per-cell range, and quoting them as if
-they bounded every cell hid the three counterexamples. The torch control is
-therefore *mostly* in the opposite direction, not uniformly.
+The `0.78–0.88x` figure that used to appear here was wrong as written. It is a
+real per-cell range, but only of the **12 `weight_dtype=float32` cells**
+(0.777923–0.883896); the paired Quack range 1.03–1.33 is the same subset
+(1.027449–1.327160). Presenting a single-weight-dtype subset as if it held for
+"every dtype" is what hid the three counterexamples, all of which are
+`weight_mode=same`. The torch control is therefore *mostly* in the opposite
+direction, not uniformly.
 
 **What this does and does not establish.** Quack's 20/20 one-directional result
 against a control that mostly runs the other way is a real asymmetry worth

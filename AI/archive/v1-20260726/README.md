@@ -53,7 +53,10 @@ exact bytes.
    mostly runs the other way but not uniformly: **17 of 20** faster on H200,
    range 0.778–1.242, with three backward `same` exceptions (4096x3000 fp16
    1.242, 4096x3000 bf16 1.236, 4096x4096 fp16 1.063). Do not quote
-   "0.78–0.88x" as a per-cell range — those are aggregated dtype medians.
+   "0.78–0.88x" as the range over all cells — it is the per-cell range of the 12
+   `weight_dtype=float32` cells only (0.777923–0.883896), and the paired Quack
+   1.03–1.33 is that same subset. All three counterexamples are
+   `weight_mode=same`, which that subset excludes.
 
    In No.001 the direction reverses: H200 faster in **58 of 60** matched cells,
    the two exceptions being torch backward at 4096x3000 (fp16 1.081, bf16
@@ -79,8 +82,21 @@ backward row, which was also briefly and wrongly retracted as unsourced:
 | H200 | `use_tma=True, smem_stages=3` | 0.8325 | 16.75% |
 
 At 32768x2048 bwd the H100 winner is `use_tma=True, smem_stages=2` (0.9657) and
-the H200 winner is the analytical config unchanged (1.0042), which independently
-supports the gain being confined to the widest row.
+the H200 winner is the analytical config unchanged (1.0042).
+
+**Two things these probes do not establish.**
+
+*Not knob isolation.* The winners change several knobs simultaneously — H100
+four (`reload_wdy`, `reload_x`, `use_tma`, `smem_stages`), H200 six (those plus
+`num_threads`, `threads_per_row`, `cluster_n`). Crediting the win to
+`use_tma`/`smem_stages` is a selection, not a measurement. A one-knob-at-a-time
+ablation would be needed.
+
+*Not a mechanism boundary.* The probe sampled only N=2048 and N=8192, so it
+cannot speak to N=4096. In the No.001 archive H200 `32768x4096` bwd bf16/same
+goes 241.44 -> 219.57 us, a 9.06% gain. The gain therefore falls off gradually
+(N=8192 +17.5%, N=4096 +9.1%, N=2048 -0.7%, N=1024 -0.9%) rather than being
+confined to the widest row.
 
 **These probes are a separate run from No.001 — do not equate them.** The
 published No.001 gains at the same cell are 9.155% (H100) and 17.479% (H200),
