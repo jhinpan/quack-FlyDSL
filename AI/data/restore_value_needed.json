@@ -1,0 +1,204 @@
+{
+  "probe": "probe_restore_value_needed.py",
+  "source_sha256_16": "a080c9274fe6f565",
+  "device": "AMD Instinct MI355X",
+  "hip_visible_devices": "5",
+  "question": "Does rmsnorm need autotuner.restore_value? If not, the L2-cold -> L2-hot regime switch it forces (via has_hooks at autotuner.py:199 and :363) is a cost paid for nothing.",
+  "idempotence": [
+    {
+      "kernel": "quack.rmsnorm_flydsl.rmsnorm",
+      "shape": [
+        32768,
+        4096
+      ],
+      "dtype": "bfloat16",
+      "feedback_aliased": false,
+      "replays": 8,
+      "all_replays_bit_identical": true,
+      "tensors_that_drifted": [],
+      "restore_value_would_be_a_noop": true,
+      "first_replay_fingerprints": {
+        "out": "9713fd83cd2b7227",
+        "x": "65fcef1c72051056",
+        "weight": "6b56d9258183afc4",
+        "residual_in": "3e495aea8897e5df"
+      }
+    },
+    {
+      "kernel": "quack.rmsnorm_flydsl.rmsnorm",
+      "shape": [
+        8192,
+        2048
+      ],
+      "dtype": "bfloat16",
+      "feedback_aliased": false,
+      "replays": 8,
+      "all_replays_bit_identical": true,
+      "tensors_that_drifted": [],
+      "restore_value_would_be_a_noop": true,
+      "first_replay_fingerprints": {
+        "out": "a66f38c618911e05",
+        "x": "16d71d1ccaa0bd87",
+        "weight": "426788ab9578ee87",
+        "residual_in": "1d697e8148c481c8"
+      }
+    }
+  ],
+  "aliased_control": [
+    {
+      "kernel": "quack.rmsnorm_flydsl.rmsnorm",
+      "shape": [
+        32768,
+        4096
+      ],
+      "dtype": "bfloat16",
+      "feedback_aliased": true,
+      "replays": 8,
+      "all_replays_bit_identical": false,
+      "tensors_that_drifted": [
+        "out",
+        "residual_in"
+      ],
+      "restore_value_would_be_a_noop": false,
+      "first_replay_fingerprints": {
+        "out": "9713fd83cd2b7227",
+        "x": "65fcef1c72051056",
+        "weight": "6b56d9258183afc4",
+        "residual_in": "9713fd83cd2b7227"
+      }
+    }
+  ],
+  "bench_path_gap": [
+    {
+      "shape": [
+        32768,
+        4096
+      ],
+      "dtype": "bfloat16",
+      "rotation_buffers": 4,
+      "l2_cache_size_bytes": 4194304,
+      "one_x_tensor_bytes": 268435456,
+      "cells_ms": {
+        "graph_rotate__what_autotune_uses_today": {
+          "median": 0.09058826446533202,
+          "runs": [
+            0.09058826446533202,
+            0.0910678768157959,
+            0.09016706466674805,
+            0.09113668441772461,
+            0.09028745651245117
+          ]
+        },
+        "graph_single__L2_hot_same_mechanism": {
+          "median": 0.09084088325500489,
+          "runs": [
+            0.09105427742004395,
+            0.0895556640625,
+            0.09084088325500489,
+            0.08957205772399902,
+            0.09090247154235839
+          ]
+        },
+        "do_bench_rotate__L2_cold_other_mechanism": {
+          "median": 0.11272100359201431,
+          "runs": [
+            0.11282100155949593,
+            0.11288099735975266,
+            0.11264099925756454,
+            0.11266100034117699,
+            0.11272100359201431
+          ]
+        },
+        "do_bench_single__what_restore_value_switches_to": {
+          "median": 0.11100099980831146,
+          "runs": [
+            0.11092100292444229,
+            0.11092100292444229,
+            0.11100099980831146,
+            0.11128100007772446,
+            0.11132099851965904
+          ]
+        }
+      },
+      "effects": {
+        "l2_effect_within_graph__single_over_rotate": 1.002788648078908,
+        "l2_effect_within_do_bench__single_over_rotate": 0.9847410533184368,
+        "mechanism_effect_at_rotate__do_bench_over_graph": 1.2443223662282707,
+        "end_to_end_switch__do_single_over_graph_rotate": 1.2253353175873167
+      },
+      "note": "The end-to-end ratio is NOT an L2 measurement and must not be quoted as one. do_bench_single is SLOWER than graph_rotate here, which looks backwards for an 'L2-hot is faster' story -- because the mechanism term dominates: do_bench pays one event pair and one fresh output allocation per launch, while the graph replays 200 recorded calls with no Python in the window. Also: bench_utils.py:98 is a claim about which CONFIG wins (relative ranking across layouts), not about the magnitude of any single config, so none of these ratios confirm or refute it -- that needs the whole config set scored under both regimes.",
+      "why_the_l2_term_is_~1.00_here": "MI355X reports L2_cache_size = 4 MiB. One 32768x4096 bf16 tensor is 256 MiB and one 8192x2048 is 32 MiB -- 64x and 8x the cache before any rotation. So the single-buffer cell is not actually L2-hot: the working set blows the cache on the FIRST pass, and rotating 4 clones cannot make it colder than already-cold. The ~1.00x within-graph ratio is therefore the EXPECTED result on this device, not evidence that rotation is useless in general -- on a card where the tensor fits (or on the small shapes where it would), the same code path would separate. It does mean the rotation machinery buys nothing for these two rmsnorm shapes on MI355X while still paying 4x the memory.",
+      "l2_within_do_bench_is_confounded": "The do_bench rotate cell is NOT a clean L2 contrast: rotation there is a Python closure doing a modulo and an index per call, inside the timed region, whereas do_bench_single calls straight through. Its 0.797x/0.984x is that overhead plus allocator behaviour, not a cache effect. Only the within-graph ratio is like-for-like, because there the rotation is baked into the recorded graph either way."
+    },
+    {
+      "shape": [
+        8192,
+        2048
+      ],
+      "dtype": "bfloat16",
+      "rotation_buffers": 4,
+      "l2_cache_size_bytes": 4194304,
+      "one_x_tensor_bytes": 33554432,
+      "cells_ms": {
+        "graph_rotate__what_autotune_uses_today": {
+          "median": 0.012519700527191162,
+          "runs": [
+            0.012533299922943116,
+            0.012502495050430298,
+            0.01247228980064392,
+            0.012581695318222046,
+            0.012519700527191162
+          ]
+        },
+        "graph_single__L2_hot_same_mechanism": {
+          "median": 0.012394294738769532,
+          "runs": [
+            0.012403290271759033,
+            0.012394294738769532,
+            0.012411890029907226,
+            0.012372289896011352,
+            0.012384095191955567
+          ]
+        },
+        "do_bench_rotate__L2_cold_other_mechanism": {
+          "median": 0.020400000736117363,
+          "runs": [
+            0.01986050046980381,
+            0.020360000431537628,
+            0.020560000091791153,
+            0.020560000091791153,
+            0.020400000736117363
+          ]
+        },
+        "do_bench_single__what_restore_value_switches_to": {
+          "median": 0.016519999131560326,
+          "runs": [
+            0.017559999600052834,
+            0.01664000004529953,
+            0.016519999131560326,
+            0.0163199994713068,
+            0.016519999131560326
+          ]
+        }
+      },
+      "effects": {
+        "l2_effect_within_graph__single_over_rotate": 0.9899833236306839,
+        "l2_effect_within_do_bench__single_over_rotate": 0.8098038497769436,
+        "mechanism_effect_at_rotate__do_bench_over_graph": 1.629432005327221,
+        "end_to_end_switch__do_single_over_graph_rotate": 1.319520310863749
+      },
+      "note": "The end-to-end ratio is NOT an L2 measurement and must not be quoted as one. do_bench_single is SLOWER than graph_rotate here, which looks backwards for an 'L2-hot is faster' story -- because the mechanism term dominates: do_bench pays one event pair and one fresh output allocation per launch, while the graph replays 200 recorded calls with no Python in the window. Also: bench_utils.py:98 is a claim about which CONFIG wins (relative ranking across layouts), not about the magnitude of any single config, so none of these ratios confirm or refute it -- that needs the whole config set scored under both regimes.",
+      "why_the_l2_term_is_~1.00_here": "MI355X reports L2_cache_size = 4 MiB. One 32768x4096 bf16 tensor is 256 MiB and one 8192x2048 is 32 MiB -- 64x and 8x the cache before any rotation. So the single-buffer cell is not actually L2-hot: the working set blows the cache on the FIRST pass, and rotating 4 clones cannot make it colder than already-cold. The ~1.00x within-graph ratio is therefore the EXPECTED result on this device, not evidence that rotation is useless in general -- on a card where the tensor fits (or on the small shapes where it would), the same code path would separate. It does mean the rotation machinery buys nothing for these two rmsnorm shapes on MI355X while still paying 4x the memory.",
+      "l2_within_do_bench_is_confounded": "The do_bench rotate cell is NOT a clean L2 contrast: rotation there is a Python closure doing a modulo and an index per call, inside the timed region, whereas do_bench_single calls straight through. Its 0.797x/0.984x is that overhead plus allocator behaviour, not a cache effect. Only the within-graph ratio is like-for-like, because there the rotation is baked into the recorded graph either way."
+    }
+  ],
+  "verdict": {
+    "kernel_measured": "quack.rmsnorm_flydsl.rmsnorm (ROCm)",
+    "flydsl_outputs_stable_under_replay": true,
+    "aliased_control_did_move": true,
+    "control_is_meaningful": true,
+    "restore_value_needed_for_flydsl_rmsnorm": false,
+    "cutedsl_status": "NOT MEASURED HERE. rmsnorm_fwd_tuned (rmsnorm.py:514) and rmsnorm_bwd_tuned (:1530) are the decorators restore_value would attach to, and quack/rmsnorm.py imports cuda.bindings.driver at module scope (:7), which does not exist on MI355X. The argument that they need no restore is source-level only: schema :367 and :1210 mutate output buffers exclusively, inputs carry no (a!) alias, dw_partial is stored via copy(tXrdW, tXgdW) at :1175/:1200 rather than accumulated, and every allocation is torch.empty. Confirming it on hardware needs an H100/H200 run of this probe against quack.rmsnorm._rmsnorm_fwd.",
+    "reading": "If outputs are stable AND the aliased control moved, the check is sensitive and the FlyDSL rmsnorm genuinely has nothing to restore. Combined with restore_value having zero callers tree-wide (inherited whole in b69bb67) and the identical pure-output mutation structure on the cutedsl side, that makes 'set restore_value on the rmsnorm decorators' a change that buys no correctness while costing the measurement regime. If the control did NOT move, this probe proves nothing -- the check would be vacuous and the stable result uninformative."
+  }
+}
