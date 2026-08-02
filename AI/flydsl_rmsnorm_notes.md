@@ -501,8 +501,13 @@ peak bandwidth on every large shape while ours reaches 76%.
 ## Where the backend stands against the CuTe kernel
 
 Same harness on all three machines, `benchmarks/benchmark_rmsnorm_flydsl.py`,
-which gates correctness per cell and evicts L2 between timed calls. Copy
-roofline: MI355X 5279 GB/s, H200 4148 GB/s, H100 2974 GB/s.
+which gates correctness per cell. "Evicts L2 between timed calls" is what this
+line used to say and it does not describe the code (@Reviewer, blocker 3): one
+hipEvent pair brackets a **whole rotation**, and the evictor runs **once per
+round, outside that window** — not between calls, and not inside the timed
+region. The per-call figure in the CSV is the round divided by
+`calls_per_round`. Copy roofline: MI355X 5279 GB/s, H200 4148 GB/s,
+H100 2974 GB/s.
 
 | regime | FlyDSL on MI355X | Quack on H200 | Quack on H100 |
 | --- | --- | --- | --- |

@@ -1162,8 +1162,11 @@ def _environment(torch: Any, args: argparse.Namespace, output_dir: Path) -> dict
         },
         "methodology": {
             "steady_state": (
-                "per-call torch.cuda device events after provider warmup; FlyDSL first-launch "
-                "JIT is synchronized, recorded separately, and excluded"
+                "one torch.cuda device-event pair per timed rotation, divided by the "
+                "number of calls in it -- NOT one pair per call, which carries barrier "
+                "semantics and read 178% high on a 6us kernel against rocprofv3 "
+                "hardware timestamps; after provider warmup, with FlyDSL first-launch "
+                "JIT synchronized, recorded separately, and excluded"
             ),
             "cache": (
                 "round-robin cloned tensor sets sized against rotation_target_bytes "
