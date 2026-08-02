@@ -37,6 +37,17 @@ def _run_python(
     ``PYTHONPATH``, ROOT goes onto ``sys.path`` from inside the child, which
     additionally pins these tests to *this* tree rather than to whichever
     ``quack`` the ambient environment resolves first.
+
+    What ``-I`` does not do, and what an earlier note here wrongly said it
+    did: it does not ignore ``sitecustomize``. It removes the inherited
+    ``PYTHONPATH`` -- which is where the demonstrated preload came from -- and
+    disables user site, but this interpreter still reports ``no_site=0``,
+    still processes global site packages and ``.pth`` files, and still loads
+    ``/usr/lib/python3.10/sitecustomize.py``. So ``-I`` narrows the preload
+    surface; it does not close it, and the children that care assert
+    ``"quack" not in sys.modules`` directly rather than relying on it. Nor is
+    it universal: the plugin subprocesses below build their own argv and do
+    not route through here.
     """
     env = os.environ.copy()
     result = subprocess.run(
@@ -531,13 +542,15 @@ CUTLASS_452_ENV = os.environ.get("QUACK_CUTLASS_452_ENV")
     strict=True,
     raises=CutedslGateStillCouplesFlydsl,
     reason=(
-        "Same desired behaviour as the simulated test above, with nothing "
-        "simulated: real quack.dsl, quack.rmsnorm and quack.pipeline all "
-        "execute and a real cutlass 4.5.2 raises the real ImportError. Skips "
-        "unless QUACK_CUTLASS_452_ENV points at such an install."
+        "The same *coupling* the simulated test above asserts, with real "
+        "quack.dsl, quack.rmsnorm and quack.pipeline executing against a real "
+        "cutlass 4.5.2 under a forced CUDA branch. Not the same assertion: "
+        "this one also requires the failure to precede the FlyDSL target. "
+        "Skips only when QUACK_CUTLASS_452_ENV is unset; a set-but-invalid "
+        "value fails."
     ),
 )
-def test_real_cutlass_452_flydsl_import_survives_the_missing_symbol():
+def test_real_cutlass_452_flydsl_import_fails_before_reaching_flydsl():
     """The simulated test's claim, checked with no meta_path fiction at all.
 
     @Reviewer's merge boundary, and he is right that the simulation could not
@@ -546,18 +559,35 @@ def test_real_cutlass_452_flydsl_import_survives_the_missing_symbol():
     hand-built ``path`` only fixes the shape of the metadata rather than
     letting the import machinery produce it.
 
-    Nothing here is stubbed. Real ``nvidia-cutlass-dsl==4.5.2`` genuinely does
-    not export ``alloc_reserved_mbarrier``, so the whole chain runs and Python
-    raises the error itself:
+    Nothing about the cutlass failure is stubbed. Real
+    ``nvidia-cutlass-dsl==4.5.2`` genuinely does not export
+    ``alloc_reserved_mbarrier``, so the whole chain runs and Python raises the
+    error itself:
 
         quack/__init__.py:22 -> quack/rmsnorm.py:24 -> quack/pipeline.py:13
         ImportError: cannot import name 'alloc_reserved_mbarrier'
                      from 'cutlass.pipeline'
         name='cutlass.pipeline'  path='.../cutlass/pipeline/__init__.py'
 
-    So this is the same assertion as its simulated sibling with every prop
-    removed, and a repair inside ``quack/pipeline.py`` or ``quack/rmsnorm.py``
-    is visible to it because that code actually executes.
+    A repair inside ``quack/pipeline.py`` or ``quack/rmsnorm.py`` is therefore
+    visible to it, because that code actually executes. Two things it is *not*,
+    both of which the previous wording claimed:
+
+    It is not "nothing simulated". ``torch.version.hip = None`` forces the CUDA
+    branch of ``quack/__init__.py:6`` on a ROCm host. Real wheel, real Quack
+    modules, forced branch.
+
+    It is not "the same assertion as its simulated sibling". @Reviewer built
+    the control that shows why: with the package bootstrap bypassed, making
+    ``quack/rmsnorm_flydsl.py`` itself raise ``ImportError(name=
+    "cutlass.target")`` still produced ``1 xfailed`` -- a defect *inside the
+    target* recorded as evidence that the target is unreachable. The simulated
+    sibling proves non-reach because it owns the loaders; this one has to
+    observe it. So the target is imported through a recording finder whose only
+    job is to append to ``REACHED`` and delegate to the real machinery, and a
+    failure at or after target entry is an ordinary failure, not this xfail.
+    The stub-free property that matters is preserved: the finder adds no
+    behaviour and substitutes no module.
 
     Recipe for the environment, verified against wheels whose sha256 matched
     @Reviewer's independently (``nvidia-cutlass-dsl==4.5.2``
@@ -566,34 +596,84 @@ def test_real_cutlass_452_flydsl_import_survives_the_missing_symbol():
     ``386e832427e3670479049a1560e4d8d2e565d8c0f37a6852c6d7043d046548f1``)::
 
         pip install --target $D --no-deps <those two> \\
-            cuda-python==12.9.7 cuda-bindings cuda-pathfinder
+            cuda-python==12.9.7 cuda-bindings==12.9.* cuda-pathfinder
         QUACK_CUTLASS_452_ENV=$D
+
+    ``cuda-bindings`` is pinned because ``--no-deps`` means nothing enforces
+    the ``~=12.9.7`` that ``cuda-python==12.9.7`` declares; @Reviewer's fresh
+    resolution of the unpinned recipe selected 13.3.1.
+
+    The repaired (rc=0) branch additionally needs the optional ``flydsl``
+    package, because with both diagnostic repairs applied the import proceeds
+    far enough to want it. It is a project extra and is deliberately *not*
+    installed into ``$D``: this test resolves ``quack`` from ROOT, so FlyDSL
+    comes from the ambient environment like it does for every other test in
+    this suite. Blocking it yields an ordinary failure with
+    ``exc.name='flydsl'``, which is the correct outcome -- a missing optional
+    dependency is not the cutedsl coupling. Recorded here because the earlier
+    version of this docstring described the two-repair XPASS as reproducible
+    from the recipe alone, and it is not.
 
     It needs no GPU and no NVIDIA hardware -- the failure is import-level, so
     it runs on the ROCm box. That is worth stating plainly because every
     earlier claim on this branch about 4.5.2 was inferred from reading source
     when it could have been observed here all along.
     """
-    if not CUTLASS_452_ENV:
+    if CUTLASS_452_ENV is None:
         pytest.skip("set QUACK_CUTLASS_452_ENV to a real cutlass 4.5.2 install")
+
+    # Fail closed from here on. An *unset* variable means "not asked for" and
+    # skips; a *set* variable is a request, and a request that cannot be
+    # honoured is a failure. @Reviewer pointed a configured-but-nonexistent
+    # path at this test and got a silent skip with exit 0 -- a gate that
+    # reports success for a gate that never ran.
     env_root = Path(CUTLASS_452_ENV)
     packages = env_root / "nvidia_cutlass_dsl" / "python_packages"
-    if not packages.is_dir():
-        pytest.skip(f"{packages} is not a cutlass install")
+    assert packages.is_dir(), (
+        f"QUACK_CUTLASS_452_ENV={CUTLASS_452_ENV} was set but {packages} is "
+        "not a directory. Set it to a real install or unset it."
+    )
 
     result = _run_python(
         f"""
         import json
         import sys
 
+        # Before anything else: the child must not have inherited a quack.
+        # The simulated sibling has asserted this all along; this one did not,
+        # and @Reviewer showed what that costs -- import unmodified quack while
+        # torch.version.hip is still the real ROCm value, then set it to None,
+        # and the cached package bypasses quack/__init__.py:6 entirely and the
+        # test reports strict XPASS with no repair anywhere. -I removes the
+        # inherited PYTHONPATH, which is where his first preload came from, but
+        # this interpreter still runs global site, .pth files and
+        # /usr/lib/python3.10/sitecustomize.py, so -I is not the assertion.
+        assert "quack" not in sys.modules, "quack was preloaded; the child is not hermetic"
+
         sys.path.insert(0, {str(packages)!r})
         sys.path.insert(0, {str(env_root)!r})
 
         import cutlass.pipeline
 
-        # Precondition, not an assumption: this environment must actually be
-        # the broken one. If a future cutlass here grows the symbol, this test
-        # has nothing to say and must say so rather than pass vacuously.
+        # Authenticate the environment rather than trusting its name. Three
+        # separate claims, each of which was assumed before:
+        #   1. it really is 4.5.2 (a real 4.5.3 was accepted as 4.5.2),
+        #   2. the cutlass that got imported is the one under $D and not some
+        #      ambient install that happened to win sys.path,
+        #   3. it really lacks the symbol -- if a future wheel here grows it,
+        #      this test has nothing to say and must say so, not pass vacuously.
+        import importlib.metadata as md
+
+        version = md.version("nvidia-cutlass-dsl")
+        assert version == "4.5.2", (
+            "QUACK_CUTLASS_452_ENV resolves nvidia-cutlass-dsl==" + version
+            + ", not 4.5.2; this test's whole claim is about 4.5.2"
+        )
+        origin = getattr(cutlass.pipeline, "__file__", "") or ""
+        assert origin.startswith({str(env_root)!r}), (
+            "imported cutlass.pipeline from " + origin + ", which is outside "
+            "the requested environment"
+        )
         assert not hasattr(cutlass.pipeline, "alloc_reserved_mbarrier"), (
             "this cutlass exports alloc_reserved_mbarrier; it is not 4.5.2-like"
         )
@@ -602,7 +682,23 @@ def test_real_cutlass_452_flydsl_import_survives_the_missing_symbol():
 
         torch.version.hip = None
 
-        outcome = {{"branch": None, "exc_name": None, "chain": None}}
+        # Passive reach recorder. It substitutes nothing and supplies no
+        # behaviour: find_spec returns None for every name, so the real import
+        # machinery resolves the target exactly as it would have. Its only
+        # effect is the append. That is what lets this test tell "died in the
+        # inherited cutedsl bootstrap" (the claim) apart from "died inside
+        # FlyDSL itself" (a defect this test must not absorb).
+        REACHED = []
+
+        class TargetEntryRecorder:
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "quack.rmsnorm_flydsl":
+                    REACHED.append(fullname)
+                return None
+
+        sys.meta_path.insert(0, TargetEntryRecorder())
+
+        outcome = {{"branch": None, "exc_name": None, "chain": None, "reached": None}}
         try:
             import quack.rmsnorm_flydsl
         except ImportError as exc:
@@ -613,11 +709,13 @@ def test_real_cutlass_452_flydsl_import_survives_the_missing_symbol():
             outcome["exc_name"] = exc.name
             outcome["chain"] = [f.filename.split("/")[-1] + ":" + str(f.lineno)
                                 for f in frames[-3:]]
+            outcome["reached"] = REACHED
             print("SENTINEL " + json.dumps(outcome))
             raise SystemExit(3)
 
         assert callable(quack.rmsnorm_flydsl.rmsnorm)
         outcome["branch"] = "flydsl_import_survived"
+        outcome["reached"] = REACHED
         print("SENTINEL " + json.dumps(outcome))
         """,
         check=False,
@@ -635,6 +733,21 @@ def test_real_cutlass_452_flydsl_import_survives_the_missing_symbol():
         assert outcome["branch"] == "cutedsl_gate_still_couples_flydsl", (
             f"exit 3 from an unexpected branch {outcome['branch']!r}"
         )
+        # The claim is that FlyDSL dies in a cutedsl bootstrap it never asked
+        # for -- which means the target was never entered. If it was entered,
+        # whatever went wrong is a defect in or under the target and belongs in
+        # the failure column, not in this xfail. @Reviewer's control: with the
+        # package bootstrap bypassed and quack/rmsnorm_flydsl.py itself raising
+        # ImportError(name="cutlass.target"), the old assertion pair reported
+        # 1 xfailed and exit 0. Fixing the lexical predicate to
+        # ``name == "cutlass" or name.startswith("cutlass.")`` would not have
+        # caught it either; the name was never the distinguishing fact.
+        assert not outcome["reached"], (
+            "the import reached quack.rmsnorm_flydsl and failed at or after "
+            f"target entry ({outcome['exc_name']} via {outcome['chain']}). "
+            "That is a target-local defect, not the inherited cutedsl "
+            "bootstrap coupling this test is about."
+        )
         # Any cutlass-attributed failure counts, not just the first one.
         #
         # Deliberately wider than ``== "cutlass.pipeline"``, which is what this
@@ -642,7 +755,8 @@ def test_real_cutlass_452_flydsl_import_survives_the_missing_symbol():
         # repair inside quack/pipeline.py:13 moved the failure to
         # quack/rounding.py:25 -> ``cutlass._mlir_helpers.arith``, which 4.5.2
         # also does not have (it ships ``cutlass/_mlir``). So the 4.5.2 gap is
-        # at least two independent symbols, and pinning the first one would
+        # at least two independent import edges -- a missing symbol and then a
+        # missing module, not two missing symbols -- and pinning the first would
         # make an inner repair look like an unrelated breakage rather than
         # progress. What this test is about is the coupling -- a FlyDSL import
         # dying anywhere inside a cutedsl bootstrap it does not use -- so the
@@ -659,6 +773,12 @@ def test_real_cutlass_452_flydsl_import_survives_the_missing_symbol():
 
     assert outcome["branch"] == "flydsl_import_survived", (
         f"exit 0 from an unexpected branch {outcome['branch']!r}"
+    )
+    # Symmetric to the failure branch, and for the same reason: a repaired
+    # boundary means the target was imported, not that nothing raised.
+    assert "quack.rmsnorm_flydsl" in (outcome["reached"] or []), (
+        "the import reported success without ever reaching the target module: "
+        f"reached {outcome['reached']!r}"
     )
 
 

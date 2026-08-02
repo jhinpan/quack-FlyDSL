@@ -423,7 +423,7 @@ on its existing deterministic heuristic and is not tuned in this stage.
 
 ## Measuring this backend
 
-The suite figure quoted in every handoff on this branch -- **737 passed, 2
+The suite figure quoted in every handoff on this branch -- **737 passed, 3
 skipped, 1 xfailed** -- is this invocation, and it is written down here
 because I quoted it repeatedly without recording it and then could not
 reproduce my own number. The xfail is the import-boundary test below and
@@ -436,7 +436,13 @@ HIP_VISIBLE_DEVICES=<idle> python -m pytest \
     tests/test_benchmark_rmsnorm_flydsl.py tests/test_import_isolation.py -q
 ```
 
-The two skips are the two- and eight-device tests. `python -m pytest tests/`
+The three skips are the two- and eight-device tests plus the real-wheel
+`QUACK_CUTLASS_452_ENV` gate; with that env var set and valid the figure is
+`737 passed, 2 skipped, 2 xfailed`. This section carried `2 skipped` for
+several commits after `f00d7c0` added the third, which is recorded at the end
+of this file rather than quietly overwritten -- but the correction belongs
+*here*, in the section every handoff is told to quote, not only in a trailing
+erratum a reader reaches after already copying the wrong number. `python -m pytest tests/`
 does *not* work on this host: 37 modules fail collection with
 `ModuleNotFoundError: No module named 'cuda'`, because the cutedsl tests import
 `cuda.bindings`, which does not exist on ROCm. That is also why the cutedsl
@@ -3922,7 +3928,11 @@ names another (raises of that class).** The invariant is right; the
 enforcement point is source text, and source text is not where raising
 happens.
 
-Moving the check to runtime fixes it. In `pytest_runtest_makereport`, when the
+Moving the check to runtime does not fix it either, and the rest of this
+section is preserved as written because being wrong twice in the same shape is
+the finding. Read it with the retraction two subsections down.
+
+In `pytest_runtest_makereport`, when the
 `xfail(raises=E)` marker matches, walk to the innermost traceback frame and
 ask whether that code object was compiled inside the test. Alias, `getattr`
 and cross-module all fail that question identically, because it asks who
@@ -3940,11 +3950,63 @@ Fourth time this session I have produced this defect class while in the middle
 of writing about it, which is the argument for the runtime check being
 mechanical rather than a rule anyone has to remember.
 
-Guard checked in at `AI/proposed_xfail_absorption_guard.py`, unwired (it does
-nothing where it sits), no dependencies;
+Guard was checked in at `AI/proposed_xfail_absorption_guard.py`, unwired (it
+did nothing where it sat) and since deleted -- see the retraction below;
 whether it lands in `tests/conftest.py` is @Autotune's call, since it is his
 file. Reported as `695fb4f0`. All runs in a throwaway clone of `730b7775`,
 since deleted.
+
+### The runtime guard has the defect too, and it is not repairable
+
+Both reviewers took it apart independently, from opposite ends, and I
+reproduced all four results in `/tmp/absorb-verify` before touching anything.
+
+@Autotune, arguing from the invariant:
+
+- **False positive on legitimate delegation.** A test whose entire job is to
+  call the code that holds the documented defect goes red -- `XFAIL
+  ABSORPTION: raised in _sole_artifact, not in test_legit_delegation`. That is
+  not a corner case, it is the ordinary shape of an xfail. The guard demands
+  the test *simulate* the defect rather than *invoke* it.
+- **Miss when the call moves into a fixture.** Put the broken helper behind
+  `@pytest.fixture` and the raise happens at `call.when == "setup"`, the
+  branch never runs, and a genuinely absorbed defect reports `1 xfailed`.
+
+@Reviewer, arguing from the artifact:
+
+- **Reports failure, exits 0.** Wiring it as its own header instructs and
+  triggering the guarded case prints `1 failed` and the pytest process exits
+  **0**, because setting `report.outcome` leaves xfail bookkeeping intact. I
+  measured this myself and it is the worst of the four: a guard that says
+  "failed" to a human and "pass" to CI is not a weak guard, it is a green
+  light with a warning label.
+- **Legal tuple form crashes pytest.** `raises=(ExpectedDefect, ValueError)`
+  hits `expected.__name__` on a tuple; INTERNALERROR, exit 3.
+
+The decisive one is @Autotune's, and it is not on that list. He asked whether
+the signal can distinguish the two cases at all:
+
+```
+helper works, reports the real documented defect -> innermost code object = sole_artifact
+helper is itself broken                          -> innermost code object = sole_artifact
+                                                    same code object: True
+```
+
+I re-ran it. It is true. The guard observes **where the raise was born**; the
+label claims **whether the exception is the expected defect**. Those are
+different sets and the observable cannot separate them, so there is no version
+of this file that works -- fixing the tuple crash and the exit code would
+leave a check that is still correct about a set other than the one its name
+means. Which is, for the fifth time in this file, the defect it was written to
+catch. It went AST -> closure -> runtime, and carried the flaw through all
+three, each time while I was writing the paragraph explaining the flaw.
+
+So it is **deleted**, not repaired. If the door is worth closing it has to be
+closed on the exception's *identity* -- a sentinel injected by the test and
+checked by the parent -- which is the same shape as @Reviewer's demand that
+`rc=3` be authenticated rather than merely observed. That is @Autotune's file
+and his call, and it should land with the real cache-context fix rather than
+here; nothing in the import-isolation branch needs it.
 
 ## Four ways that test was still wrong, none of which I found
 
@@ -3999,11 +4061,21 @@ independence ("`_run_python` spawns a subprocess, so each test gets a fresh
 interpreter") was true and answered a smaller question than the one that
 mattered.
 
-Every child now runs under `-I`, which ignores `PYTHONPATH`, `sitecustomize`
-and the user site directory; ROOT is injected into `sys.path` inside the
+Every child spawned through `_run_python` now runs under `-I`, which drops
+`PYTHONPATH` and the user site directory; ROOT is injected into `sys.path` inside the
 child instead, which also pins the tests to *this* tree rather than whichever
 `quack` the ambient environment resolves first. Under the same preload the
 whole file now reads `4 passed, 1 xfailed`, identical to clean.
+
+Two things I overstated in that sentence, both caught later by @Reviewer.
+`-I` does **not** ignore `sitecustomize`: this interpreter still reports
+`no_site=0` and still loads `/usr/lib/python3.10/sitecustomize.py` along with
+global site and `.pth` files. It closed the inherited-`PYTHONPATH` route,
+which is the one that was demonstrated, and left the others open. And
+"every child" was wrong -- the two plugin subprocesses build their own argv
+and never route through `_run_python`. So `-I` narrows the preload surface
+rather than closing it, and the children that depend on hermeticity assert
+`"quack" not in sys.modules` outright.
 
 He also found the success path depended on this host having the optional
 FlyDSL package installed — with `flydsl` blocked, the repaired boundary
@@ -4180,6 +4252,9 @@ Gate with the env var set: `4 passed, 2 xfailed`; without it,
 Whole-suite gate moves with it: **`737 passed, 3 skipped, 1 xfailed`**. The
 new skip is this test's own env gate, so the `737 passed, 2 skipped, 1 xfailed`
 recorded three times above is correct for the commits that state it and stale
-from this commit onward. Worth saying because a gate figure carried forward
+from this commit onward. The canonical "Measuring this backend" section has
+since been corrected in place; leaving the fix only down here meant a reader
+following the file's own instruction to quote that section still copied the
+stale number, which @Reviewer flagged. Worth saying because a gate figure carried forward
 without re-measuring is the same defect this whole file is about: a number
 that is right about a set other than the one it now labels.
