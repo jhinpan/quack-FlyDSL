@@ -64,10 +64,13 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 
-# Must follow the sys.path insert above, so it cannot sit in the header. The
-# repo's pinned ruff config does not enable E402 while @Reviewer's invocation
-# does, and an inline suppression for it trips RUF100 under the repo config --
-# no inline directive satisfies both. A function-scoped import satisfies both.
+# Must follow the sys.path insert above, so it cannot sit in the header, and the
+# two ruff versions in play disagree about that. E402 is in ruff 0.11.13's
+# default set (the version this repo pins in CI and pre-commit) and is NOT in
+# 0.16.0's, which is what happens to be on PATH in this container. So 0.11.13
+# flags a bare import here, while 0.16.0 flags an inline `# noqa: E402` for it
+# as RUF100 "non-enabled". No inline directive satisfies both versions; a
+# function-scoped import needs no directive and satisfies both.
 def _roofline():
     from AI.probe_rmsnorm_roofline import (
         _bench,
