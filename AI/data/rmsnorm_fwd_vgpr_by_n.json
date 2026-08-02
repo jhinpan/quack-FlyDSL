@@ -1,0 +1,115 @@
+{
+  "note": "gfx950 MI355X, bf16 fwd, has_weight only. vgpr/sgpr/spill read from the amdhsa kernel metadata in flydsl's jit cache pickle. Reproduced bit-identical in two fresh processes with FLYDSL_RUNTIME_CACHE_DIR pointed at empty dirs. MAX_N was raised in-process for the probe only; the shipped cap is unchanged.",
+  "vgprs_per_simd": 512,
+  "alloc_granularity_wave64": 8,
+  "rows": [
+    {
+      "n": 1024,
+      "m": 16384,
+      "sgpr_count": 20,
+      "sgpr_spill_count": 0,
+      "vgpr_count": 20,
+      "vgpr_spill_count": 0,
+      "group_segment_fixed_size": 8,
+      "private_segment_fixed_size": 0,
+      "max_flat_workgroup_size": 256,
+      "waves_per_simd": 21
+    },
+    {
+      "n": 2048,
+      "m": 8192,
+      "sgpr_count": 20,
+      "sgpr_spill_count": 0,
+      "vgpr_count": 20,
+      "vgpr_spill_count": 0,
+      "group_segment_fixed_size": 16,
+      "private_segment_fixed_size": 0,
+      "max_flat_workgroup_size": 256,
+      "waves_per_simd": 21
+    },
+    {
+      "n": 4096,
+      "m": 4096,
+      "sgpr_count": 22,
+      "sgpr_spill_count": 0,
+      "vgpr_count": 36,
+      "vgpr_spill_count": 0,
+      "group_segment_fixed_size": 16,
+      "private_segment_fixed_size": 0,
+      "max_flat_workgroup_size": 256,
+      "waves_per_simd": 12
+    },
+    {
+      "n": 8192,
+      "m": 2048,
+      "sgpr_count": 22,
+      "sgpr_spill_count": 0,
+      "vgpr_count": 60,
+      "vgpr_spill_count": 0,
+      "group_segment_fixed_size": 16,
+      "private_segment_fixed_size": 0,
+      "max_flat_workgroup_size": 256,
+      "waves_per_simd": 8
+    },
+    {
+      "n": 16384,
+      "m": 1024,
+      "sgpr_count": 22,
+      "sgpr_spill_count": 0,
+      "vgpr_count": 94,
+      "vgpr_spill_count": 0,
+      "group_segment_fixed_size": 16,
+      "private_segment_fixed_size": 0,
+      "max_flat_workgroup_size": 256,
+      "waves_per_simd": 5
+    },
+    {
+      "n": 32768,
+      "m": 512,
+      "sgpr_count": 21,
+      "sgpr_spill_count": 0,
+      "vgpr_count": 156,
+      "vgpr_spill_count": 0,
+      "group_segment_fixed_size": 16,
+      "private_segment_fixed_size": 0,
+      "max_flat_workgroup_size": 256,
+      "waves_per_simd": 3
+    },
+    {
+      "n": 49152,
+      "m": 341,
+      "sgpr_count": 23,
+      "sgpr_spill_count": 0,
+      "vgpr_count": 230,
+      "vgpr_spill_count": 0,
+      "group_segment_fixed_size": 16,
+      "private_segment_fixed_size": 0,
+      "max_flat_workgroup_size": 256,
+      "waves_per_simd": 2
+    },
+    {
+      "n": 57344,
+      "m": 292,
+      "sgpr_count": 20,
+      "sgpr_spill_count": 0,
+      "vgpr_count": 264,
+      "vgpr_spill_count": 0,
+      "group_segment_fixed_size": 16,
+      "private_segment_fixed_size": 0,
+      "max_flat_workgroup_size": 256,
+      "waves_per_simd": 1
+    },
+    {
+      "n": 65536,
+      "m": 256,
+      "sgpr_count": 21,
+      "sgpr_spill_count": 0,
+      "vgpr_count": 300,
+      "vgpr_spill_count": 0,
+      "group_segment_fixed_size": 16,
+      "private_segment_fixed_size": 0,
+      "max_flat_workgroup_size": 256,
+      "waves_per_simd": 1
+    }
+  ]
+}

@@ -982,3 +982,61 @@ choice is worth 0.6%, well inside the run-to-run spread. It does mean any
 small-shape speedup quoted from this harness needs the level stated with it,
 and the honest fix is to time both providers at their public entry point, or
 both at their launcher, rather than one of each.
+
+## The register-budget mechanism, now measured rather than assumed
+
+The section above stopped at "occupancy collapse from per-thread live state is
+*probably* right, but no register count has been read out of the compiled
+kernel, so `MAX_N` is not raised on the strength of it." That number is
+readable, and here it is.
+
+FlyDSL's jit cache pickles carry the amdhsa kernel metadata verbatim --
+`vgpr_count`, `sgpr_count`, both spill counts, LDS and scratch. The cache is
+keyed on disk and survives the process, so forcing a fresh compile means
+pointing `FLYDSL_RUNTIME_CACHE_DIR` at an empty directory; without that every
+row reads "cache hit" and the probe silently measures nothing. bf16 forward,
+weight only:
+
+| N | vgpr | alloc (gran 8) | waves/SIMD | vgpr spill | sgpr spill | scratch |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1024 | 20 | 24 | 21 | 0 | 0 | 0 |
+| 2048 | 20 | 24 | 21 | 0 | 0 | 0 |
+| 4096 | 36 | 40 | 12 | 0 | 0 | 0 |
+| 8192 | 60 | 64 | 8 | 0 | 0 | 0 |
+| 16384 | 94 | 96 | 5 | 0 | 0 | 0 |
+| 32768 | 156 | 160 | 3 | 0 | 0 | 0 |
+| 49152 | 230 | 232 | **2** | 0 | 0 | 0 |
+| 57344 | 264 | 264 | **1** | 0 | 0 | 0 |
+| 65536 | 300 | 304 | 1 | 0 | 0 | 0 |
+
+Bit-identical across two fresh processes.
+Raw at `AI/data/rmsnorm_fwd_vgpr_by_n.json`.
+
+**The occupancy step falls exactly on the measured cliff.** Bandwidth halves
+between 49152 and 57344; VGPR allocation crosses 256 of the 512 per-SIMD budget
+between those same two points, taking waves/SIMD from 2 to 1. A halving of
+occupancy against a halving of achieved bandwidth, at the same boundary, in a
+kernel that is latency-hiding-bound -- that is the mechanism, and it is no
+longer a story.
+
+Two things it also settles. **Nothing spills, anywhere** -- not at 65536, not
+at 8192. So "register budget" was the right family and "spill cliff" would have
+been the wrong name for it; the cost is lost latency hiding, not scratch
+traffic. And the growth is smooth and roughly linear in N, about 4.6 VGPRs per
+1024 columns, with no discontinuity at 8192 -- which is the second, independent
+confirmation that **`MAX_N = 8192` is not where the hardware objects**. At 8192
+the kernel is at 60 VGPRs and 8 waves/SIMD, nowhere near any limit.
+
+The comment on `MAX_N` claims the constant *is* "the register budget expressed
+as a row length." It is now fair to say that is wrong twice over: the register
+budget expressed as a row length is about 49152, and 8192 is 6x below it.
+
+**I am still not raising it in this commit**, for a reason that is now specific
+rather than precautionary. Everything above is the forward kernel with weight
+only. The backward is a different kernel with more live state per thread, the
+per-head and bias variants add more, and the cap is shared by all of them. The
+right change is a per-variant cap derived from the measured VGPR curve, and the
+measurement to justify it is the same probe run across the backward and the
+operand combinations -- which is a bounded piece of work, not a guess. What
+this commit buys is that the mechanism is confirmed and the method for setting
+the constant honestly is in hand.
