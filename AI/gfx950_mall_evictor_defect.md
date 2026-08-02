@@ -13,7 +13,7 @@ L2 evictor from `torch.cuda.get_device_properties().L2_cache_size`. On gfx950
 that property reports **4 MiB**, which is the *per-XCD* L2. It does not report
 the device-wide **256 MiB MALL / Infinity Cache** that sits behind it. Two
 independent consequences follow. They were originally written up as compounding;
-the controlled measurement (below) attributes the observed 1.32x to **defect 1**
+the controlled measurement (below) attributes the observed 1.30x to **defect 1**
 — the evictor never runs — and does *not* show defect 2's undersizing costing
 anything measurable on this access pattern. Defect 2 is still a real
 mis-derivation and should be fixed, but it should not be credited with the
@@ -25,7 +25,7 @@ Everything quantitative in this note comes from a **`torch.Tensor.copy_`
 bandwidth probe**. No RMSNorm kernel has been run before and after a fix, and
 no MI355X 90-cell matrix has been re-collected. The consequences:
 
-- The **1.32x is a property of the copy probe at one working set**. It is not a
+- The **1.30x is a property of the copy probe at one working set**. It is not a
   per-cell correction factor and must not be applied to the 37 exposed cells,
   to the six regime values in `flydsl_rmsnorm_notes.md`, or to any roofline
   percentage. Doing that would report an inferred number as a measured one.
@@ -58,8 +58,8 @@ eviction happens, and 128 MiB fits comfortably in the 256 MiB MALL.
 The evictor is also only 12 MiB, which on the face of it cannot flush a 256 MiB
 cache even when it does run. That reasoning turns out not to survive
 measurement: forcing a 12 MiB evictor to run at the boundary recovers almost
-all of the gap — 4891 GB/s against a 4964 GB/s HBM reference, 1.47% below it,
-and in fact 3.49% *above* the 4726 GB/s that a 256 MiB evictor reaches. A
+all of the gap — 4866 GB/s against a 4999 GB/s HBM reference, 2.66% below it,
+and in fact 1.74% *above* the 4783 GB/s that a 256 MiB evictor reaches. A
 copy-based evictor evidently disturbs MALL
 residency out of proportion to its own footprint. The binding problem is the
 gate, not the size.
@@ -137,7 +137,7 @@ threshold rule.
 Worth recording that the boundary is **not a cliff**: throughput decays across
 roughly 256 → 288 MiB rather than stepping at one point. My earlier
 "exactly 256.0 MiB, precisely the boundary" framing implied a sharpness the data
-does not show, and the adjacent-rotation step figure (1.32x) is a chord across
+does not show, and the adjacent-rotation step figure (1.30x) is a chord across
 that decay, not the height of a discontinuity.
 
 Two earlier claims are withdrawn outright: "only `m<=4096` is affected" /
@@ -172,33 +172,43 @@ practical fix**. But the reason is the size of the requirement, not an
 (`copy_` between rotating buffer pairs); only the number of rotation buffers
 varies, so any systematic difference is cache residency and not kernel
 selection. Every figure below is emitted by that script, which also writes
-`AI/probe_gfx950_mall_rotation.json` with per-repeat raw samples and the
+`AI/probe_gfx950_mall_rotation.json` with every individual round latency and the
 environment (including `rocminfo`'s `L3: 262144 KB`, i.e. the MALL is
 discoverable rather than assumed). Timing follows `_time_rotating_calls`: the
 window covers one whole rotation and the evictor runs *outside* it.
 
     ### buffer = 64 MiB
      buffers    working set   vs MALL      GB/s
-           1         128 MiB     0.50x      6090
-           2         256 MiB     1.00x      6453
-           3         384 MiB     1.50x      4896     <- step here
-           4         512 MiB     2.00x      4942
-           8        1024 MiB     4.00x      4960
-          32        4096 MiB    16.00x      5030
+           1         128 MiB     0.50x      6079
+           2         256 MiB     1.00x      6478
+           3         384 MiB     1.50x      4894     <- step here
+           4         512 MiB     2.00x      4940
+           8        1024 MiB     4.00x      4959
+          32        4096 MiB    16.00x      5001
 
 The honest figure is the **boundary step between adjacent rotation counts**:
-2 buffers (256 MiB) = 6453 GB/s vs 3 buffers (384 MiB) = 4896 GB/s, one
-rotation apart, same kernel — **1.32x inflation**.
+2 buffers (256 MiB) = 6478 GB/s vs 3 buffers (384 MiB) = 4894 GB/s, one
+rotation apart, same kernel — **1.324x inflation**.
 
-The 16 MiB sweep crosses at the same working set (8 bufs = 256 MiB, 5309 GB/s
-→ 12 bufs = 384 MiB, 4008 GB/s, also 1.32x), but **8 → 12 is four rotations
-apart, not one**, so that pair does not meet the adjacency standard the 64 MiB
-figure is quoted under. Worse, the script never computed it: `bench_rotation`
-looks for `lo + 1 = 9`, which was not in `ROTATIONS`, so the 16 MiB sweep
-contributed nothing to the printed verdict and the 1.32x above it was computed
-by hand. `ROTATIONS` now samples 9, and the script says so explicitly when no
-adjacent pair spans the boundary instead of silently omitting the line. The
-16 MiB confirmation should be treated as pending that re-run.
+The 16 MiB sweep crosses the boundary at 8 → 9 buffers, but the script never
+computed that step: `bench_rotation` looks for `lo + 1 = 9` and `ROTATIONS`
+jumped 8 → 12, so the 16 MiB sweep contributed nothing to the printed verdict
+while this note quoted a hand-computed 1.32x from the 8 → 12 pair — four
+rotations apart, which does not meet the adjacency standard the 64 MiB figure
+is held to. `ROTATIONS` now samples 9, and the script prints an explicit
+`NOT COMPUTED` line rather than silently omitting the step.
+
+Re-run with 9 sampled, the true adjacent step at 16 MiB is **1.298x**:
+
+     buffers    working set   vs MALL      GB/s
+           8         256 MiB     1.00x      5330
+           9         288 MiB     1.12x      4108     <- step here
+          12         384 MiB     1.50x      3972
+
+So the two sweeps give **1.324x and 1.298x**. The earlier claim of "1.32x at
+two buffer sizes, independently" was one measured value plus one artefact of
+comparing a non-adjacent pair; the agreement was tighter than the evidence
+supported.
 
 **Corroborating diagnostic from @Autotune** — not an independent confirmation
 until a script, raw samples and environment are committed alongside it, which
@@ -222,22 +232,22 @@ probe on a shared box, not a PR-grade number.
 
 A correctly-sized evictor recovers the HBM number:
 
-    64 MiB x2 bufs (WS=256 MiB), evictor=0 MiB      6403 GB/s   <- current behaviour
-    64 MiB x2 bufs (WS=256 MiB), evictor=12 MiB     4891 GB/s   <- current evictor size
-    64 MiB x2 bufs (WS=256 MiB), evictor=256 MiB    4726 GB/s
-    64 MiB x2 bufs (WS=256 MiB), evictor=512 MiB    4797 GB/s
-    64 MiB x2 bufs (WS=256 MiB), evictor=1024 MiB   4335 GB/s
-    64 MiB x8 bufs (WS=1024 MiB), no evictor        4964 GB/s   <- HBM reference
+    64 MiB x2 bufs (WS=256 MiB), evictor=0 MiB      6447 GB/s   <- current behaviour
+    64 MiB x2 bufs (WS=256 MiB), evictor=12 MiB     4866 GB/s   <- current evictor size
+    64 MiB x2 bufs (WS=256 MiB), evictor=256 MiB    4783 GB/s
+    64 MiB x2 bufs (WS=256 MiB), evictor=512 MiB    4749 GB/s
+    64 MiB x2 bufs (WS=256 MiB), evictor=1024 MiB   4746 GB/s
+    64 MiB x8 bufs (WS=1024 MiB), no evictor        4999 GB/s   <- HBM reference
 
 Evicting at all is what matters here: with no evictor the boundary cell reads
-6403 GB/s against a 4964 GB/s HBM reference, and *any* of the evictor sizes
-brings it to 4335–4891 GB/s. The worst of those, the 1024 MiB evictor, is
-12.67% below the reference; the best, the 12 MiB one, is 1.47% below it. The
+6447 GB/s against a 4999 GB/s HBM reference (1.29x), and *any* of the evictor
+sizes brings it to 4746–4866 GB/s. The worst of those, the 1024 MiB evictor, is
+5.06% below the reference; the best, the 12 MiB one, is 2.66% below it. The
 12 MiB evictor is not obviously worse than the 256–1024 MiB ones on this
 access pattern, so the measured defect is **defect 1** — the `ws < 12 MiB`
 gate means no evictor runs on these shapes at all. Defect 2 (the evictor being
 sized off the per-XCD L2) is a real mis-derivation but is not, on this
-evidence, what costs the 1.32x. An earlier version of this block reported
+evidence, what costs the 1.30x. An earlier version of this block reported
 280–1070 GB/s at the larger evictor sizes; that was my own bug — the evictor
 was being run inside the timed window, so those numbers measured the evictor
 itself, not the copy.
@@ -329,8 +339,8 @@ agent, and it parses cleanly:
    The gate is the part the measurement actually indicts. `use_evictor =
    ws < l2_target_bytes` switches eviction off precisely where it is needed, and
    the evictor-control block shows that *running an evictor at all* is what
-   recovers the HBM number — the 12 MiB evictor lands 3.49% above the 256 MiB
-   one and 1.47% below the HBM reference.
+   recovers the HBM number — the 12 MiB evictor lands 1.74% above the 256 MiB
+   one and 2.66% below the HBM reference.
    So the gate should be driven by whether the working set fits the effective
    LLC, not by whether it is smaller than a multiple of the per-XCD L2.
 
@@ -338,7 +348,7 @@ agent, and it parses cleanly:
    and should ship with it — the current derivation is wrong on its own terms,
    and it degenerates to today's behaviour on NVIDIA where no L3 is reported —
    but it should be presented as correcting a mis-derivation, not as the thing
-   that buys back the 1.32x. On this access pattern it does not.
+   that buys back the 1.30x. On this access pattern it does not.
 
 2. **Force the rotation working set past the MALL.** Still rejected for the
    *harness*, where the evictor solves the problem directly — but my original
