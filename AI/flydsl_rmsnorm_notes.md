@@ -1013,8 +1013,41 @@ None of this restores `4.89` — its provenance is still absent, which is
 committed copy value at 512 MiB can neither confirm nor exclude any historical
 copy figure, because a between-cell term of 12–19% sits under a 0.2% band.
 
-The asymmetry is the useful part. `two_read_one_write` gets *stronger* under the
-same sweep — four committed values within 0.55%. Copy is unreconstructable not
+The asymmetry is the useful part, but ~~`two_read_one_write` gets *stronger*
+under the same sweep — four committed values within 0.55%~~ was the wrong way to
+say it, on both halves. **Corrected (@Autotune, my own sentence.)** The sweep it
+points at is `copy_512MiB_draws_dev5.json`, which contains no
+`two_read_one_write` at all — it is 25 `c.copy_()` draws and nothing else. So
+"under the same sweep" named a sweep in which the probe was never measured, and
+the four values had to come from elsewhere: they are one-shot ceilings from four
+unrelated sidecars, which span **2.83%**, not 0.55%. The token 0.55 appears
+nowhere in the repository's history outside this sentence, and no four-subset of
+the fourteen committed `two_read_one_write` values rounds to it — though 450 of
+the 1001 possible four-subsets do fall under 0.55%, which is the deeper problem:
+"four committed values within X" does not identify a set, so it is unfalsifiable
+as written.
+
+The direction is also backwards. Run the placement sweep *on the probe* —
+`copy_axes_dev5.json`, 80 draws per size, the same design — and
+`two_read_one_write` gets **weaker**, not stronger: 0.08% across six
+generator-fixed processes becomes **2.46%** at 512 MiB and 1.25% at 2 GiB, a 31×
+degradation. A matched-n resample confirms that is placement and not the range
+statistic growing with n (at n=6 the sweep still gives 1.49% against the
+committed 0.08%).
+
+What is actually true, and is the claim worth keeping, is a *ratio*:
+
+| condition | copy | `two_read_one_write` | ratio |
+|---|---|---|---|
+| six processes, generator fixed, placement not sampled | 0.63% | 0.08% | 7.9× |
+| placement sampled, 512 MiB, n=80 | 18.90% | 2.46% | 7.7× |
+| placement sampled, 2 GiB, n=80 | 5.37% | 1.25% | 4.3× |
+
+Both probes degrade by ~30× when placement is sampled; the *ratio between them*
+is what holds, at 7.9× and 7.7× under conditions that differ by 30× in absolute
+terms. That is a stronger statement than the one I made and it needed no
+invented figure — the sentence reached for a spuriously tight number when the
+committed data already carried a better argument. Copy is unreconstructable not
 because the committed values are far from the band, but because copy at that
 size is not a repeatable quantity.
 
