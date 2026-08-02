@@ -1,0 +1,7 @@
+# sha256 of the exact bytes executed for each artifact directory
+# reproduce: see README 'Executed source'
+
+44be22781186479323732c1135c0dba30d12478fcab80159bd33a342fae4746f  _bench_pre_gate_tmp.py
+473cd47ef042a921b0a2cbb0950ad921fa095e729743857468aaa1f9fb7e894e  _v_gateonly.py
+380c82f7bb65f6e1a837fcccef6eaa3370c9543fb6be5ff7ce99d98054b839a3  _v_targetonly.py
+6ce25f002592664f6d1c45921834a77d417229b30abfe4afe16303043f05cd92  _v_nomargin.py

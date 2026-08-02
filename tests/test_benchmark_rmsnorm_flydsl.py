@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -252,3 +253,30 @@ def test_non_hip_build_uses_the_torch_value_without_touching_sysfs():
     value, provenance = benchmark._last_level_cache_bytes(torch, _properties(), "/nonexistent")
     assert value == 4 * 1024**2
     assert provenance["reason"] == "not_a_hip_build"
+
+
+def test_artifact_identifies_the_file_that_ran_not_just_the_commit(tmp_path):
+    # The gate_llc_before_after isolate runs recorded git_commit=d167701 while
+    # actually executing four deleted one-line-edited scratch copies. HEAD was
+    # identical across all of them, so the artifact could not distinguish the
+    # arms of its own experiment. A hash of the executed file can.
+    source = benchmark._executed_source()
+    on_disk = hashlib.sha256(Path(benchmark.__file__).read_bytes()).hexdigest()
+    assert source["script_sha256"] == on_disk
+    assert source["script_path"] == Path(benchmark.__file__).name
+
+    # And it must discriminate: a copy differing by one line hashes differently
+    # even though git_commit would be byte-identical for both.
+    variant = tmp_path / "_v_scratch.py"
+    variant.write_bytes(Path(benchmark.__file__).read_bytes() + b"\n# one edit\n")
+    assert hashlib.sha256(variant.read_bytes()).hexdigest() != on_disk
+
+
+def test_dirty_tree_is_recorded_so_a_commit_hash_is_not_read_as_provenance():
+    dirty = benchmark._git_dirty()
+    assert set(dirty) == {"git_dirty", "git_dirty_paths"}
+    # None means "could not tell" and is distinct from False, which is a claim.
+    assert dirty["git_dirty"] in (True, False, None)
+    if dirty["git_dirty"]:
+        assert dirty["git_dirty_paths"]
+    assert len(dirty["git_dirty_paths"]) <= 20

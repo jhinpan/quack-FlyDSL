@@ -29,27 +29,63 @@ before/after pairs also carry the `float32` weight rows.
 * `isolate_targetonly` -- current harness with the gate reverted to
   `rotation_working_set_bytes < l2_target_bytes`. New 768 MiB target, old gate.
 
-Each run's `environment.json` records its own `command`, so which binary
-produced which directory is checkable from the artifact and not only from this
-file. Three of those commands name scratch copies that were deleted after the
-run, and cannot be re-read from the artifact -- reproduce them like this:
+### Executed source
 
-* `benchmarks/_bench_pre_gate_tmp.py` (the before runs) is
-  `git show 94d3f8c:benchmarks/benchmark_rmsnorm_flydsl.py` byte for byte.
-* `benchmarks/_v_gateonly.py` is the current file with
-  `l2_target_bytes = llc_bytes * args.l2_target_ratio` replaced by
-  `properties.L2_cache_size * args.l2_target_ratio`.
-* `benchmarks/_v_targetonly.py` is the current file with
-  `use_evictor = rotation_working_set_bytes <= 2 * llc_bytes` replaced by
-  `rotation_working_set_bytes < l2_target_bytes`.
-* `benchmarks/_v_nomargin.py` (the `isolate_nomargin` run) is the same line
-  replaced by `rotation_working_set_bytes <= llc_bytes` -- margin dropped from
-  2 to 1, everything else current.
+Each run's `environment.json` records its own `command`. Those commands name
+four scratch copies which were **deleted after the runs and not committed** --
+so for a week this artifact asked you to take on trust that the deleted files
+were what the prose said they were. @Reviewer refused, correctly. The exact
+bytes are now vendored in `sources/`, with `sources/SHA256SUMS`:
+
+| file | sha256 | used by |
+| --- | --- | --- |
+| `_bench_pre_gate_tmp.py` | `44be2278...` | `before_{A,B,C,D}` |
+| `_v_gateonly.py` | `473cd47e...` | `isolate_gateonly` |
+| `_v_targetonly.py` | `380c82f7...` | `isolate_targetonly` |
+| `_v_nomargin.py` | `6ce25f00...` | `isolate_nomargin` |
+
+Each is regenerable, and the recipe is the audit:
+
+```
+git show 94d3f8c:benchmarks/benchmark_rmsnorm_flydsl.py           # _bench_pre_gate_tmp.py
+git show d167701:benchmarks/benchmark_rmsnorm_flydsl.py           # base for the three isolates
+```
+
+then in that base substitute exactly one line (each anchor occurs exactly once,
+which is what makes the substitution unambiguous):
+
+* `_v_gateonly.py` — `l2_target_bytes = llc_bytes * args.l2_target_ratio`
+  → `l2_target_bytes = properties.L2_cache_size * args.l2_target_ratio`
+* `_v_targetonly.py` — `use_evictor = rotation_working_set_bytes <= 2 * llc_bytes`
+  → `use_evictor = rotation_working_set_bytes < l2_target_bytes`
+* `_v_nomargin.py` — same anchor
+  → `use_evictor = rotation_working_set_bytes <= llc_bytes`
+
+**What this does and does not establish.** The vendored files reproduce
+byte-exactly from immutable commits, and their hashes match the ones @Reviewer
+derived independently. That authenticates the *intended* source. It does **not**
+authenticate the *executed* source: the generator did not record a hash of the
+file it ran, so nothing in these twelve artifacts rules out an additional
+uncommitted edit in the deleted originals. **That gap is not closable
+retroactively** — treat every isolate here as reproducible-in-intent, not as
+certified, and re-run them if the attribution ever needs to be load-bearing.
+
+It is closed going forward. The harness now records `script_sha256` (a hash of
+the file actually executing, so a scratch copy is distinguishable from the
+committed harness), `git_dirty` and `git_dirty_paths` in every
+`environment.json`. Recording only `git_commit` was the root cause: HEAD was
+`d167701` for the before run, both isolates and all four after runs, so the
+artifact's own provenance field was constant across the arms of the experiment
+it was supposed to identify. Any future run of this comparison will be
+checkable in a way these are not.
+
+The `before` runs are the one exception: `94d3f8c` is a commit, `git show` is
+byte-exact, and `before_{A,B,C,D}`'s numbers are reproducible by anyone.
 
 These snapshots predate `fad422c`, which renamed `l2_target_bytes` to
 `rotation_target_bytes`, added `evictor_threshold_bytes`, and bumped the schema
-to 3. Reproducing them means reverting the named line in the version at
-`d167701`, not in current head.
+to 3. The isolate recipes are against `d167701`, not current head; running them
+against head will not apply, because the anchor lines have been renamed.
 
 `before_{A,B}` and `after_{A,B}` carry the `float32` weight rows as well as
 `same`; `before_{C,D}`, `after_{C,D}`, `after_v3_schema` and the three isolate runs are
@@ -110,8 +146,15 @@ are not in either 37.
 Two rows need further care.
 
 `512x4096` is not a clean +24.7%. Its before-side range is 17.7% (860 / 961 /
-812 / 823) and the individual before runs have p90/p10 spreads of 26% and 95%,
-against 3% after. At 8-10 us per call this cell is close to launch overhead and
+812 / 823) and the four before runs have p90-p10 spreads of **24.8 / 92.2 /
+21.5 / 28.2%** of their own medians, against **2.6 / 3.1 / 6.6 / 2.2%** after.
+(An earlier version of this line said "26% and 95%, against 3%", quoting two of
+the four and rounding; @Reviewer recomputed all eight. The full set is worse
+for the before side, not better, but quoting a subset was the error either
+way.) The after medians are 8.000 / 8.000 / 8.000 / 8.005 us -- three of them
+identical to the microsecond, which is the hipEvent quantum at this duration,
+not four independent agreeing measurements. Read the after side as "at the
+event-timer floor", not as "stable at 1050 GB/s". At 8-10 us per call this cell is close to launch overhead and
 the before configuration is simply unstable; the honest statement is that the
 after side is stable at 1050 and the before side was not measuring anything
 repeatable. It should not be quoted as a speedup.
@@ -126,7 +169,40 @@ and @Reviewer caught it against the code.
 
 ## Which half of the change did it
 
-Single runs, `--weight-modes same`. Cell format: GB/s (evictor, rotation ws).
+**Withdrawn as a causal decomposition, 2026-08-02.** This section used to be
+titled as above and read the four columns as a 2x2 factorial. It is not one.
+@Reviewer called the attribution unsupported; checking the artifact, the
+isolates are confounded in two ways, and the second one I had not noticed
+either.
+
+**Confound 1: `isolate_targetonly` also flips the gate.** It keeps the *old*
+predicate `ws < l2_target_bytes` but feeds it the *new* 768 MiB target. The old
+predicate against a 768 MiB target is true for every shape here except
+`32768x2048`. So the arm labelled "target only" turns the evictor on at three
+of four shapes. It never isolated the target.
+
+**Confound 2: the two arms do not run the same evictor.** `_L2Evictor` is
+allocated at `rotation_target_bytes`, so `isolate_gateonly` (12 MiB target)
+performs a 12 MiB copy between rotations while `after` performs a 768 MiB one.
+"Evictor on" is not one treatment across the columns; it is two different
+kernels moving 64x different bytes.
+
+What the runs actually sample is the physical configuration `(rotation working
+set, evictor on/off)`, and the four arms do not cover its corners:
+
+| shape | corners covered | duplicated arms |
+| --- | --- | --- |
+| `512x4096` | 3 of 4 | target-only and after are the same config |
+| `4096x4096` | 4 of 4 (with `isolate_nomargin`) | target-only ~ after |
+| `32768x1024` | 4 of 4 | none |
+| `32768x2048` | 2 of 4 | gate-only ~ before; target-only ~ after |
+
+At `32768x2048` neither "isolate" changed the evictor at all, so its three
+columns are three samples of two configurations and the +2.9% is run-to-run
+variation, not an effect of either half.
+
+The numbers themselves are unchanged and remain in the artifact; only the
+attribution is withdrawn:
 
 | shape | before | gate only | target only | after |
 | --- | --- | --- | --- | --- |
@@ -135,24 +211,30 @@ Single runs, `--weight-modes same`. Cell format: GB/s (evictor, rotation ws).
 | `32768x1024` | 3118 (F, 256.004 MiB) | 2635 (T, 256.004 MiB) | 2673 (T, 512.008 MiB) | 2703 (F, 512.008 MiB) |
 | `32768x2048` | 3082 (F, 512.008 MiB) | 3172 (F, 512.008 MiB) | 3190 (F, 768.012 MiB) | 3273 (F, 768.012 MiB) |
 
-The two halves are not separable into "one matters and one does not", and they
-do not act in the same direction everywhere:
+**"`32768x1024` is all gate" is retracted.** It appears in this file and in
+`1486fda`'s commit body and it is not supported. Reading the row as a factorial:
+gate-only is -482.9 GB/s, target-only is -444.3, and if those were independent
+effects the after cell would read 2190. It reads 2703. The interaction term is
+**+512.8 GB/s** — larger than either main effect — which is the signature of two
+arms reaching the same outcome by different routes, not of one dominant factor.
+And the shipped configuration has the evictor **off** at this cell. A claim that
+the gate is doing the work is refuted by the shipped run's own metadata.
 
-* At `32768x1024` eviction is the whole story -- but note what delivers it. Hold
-  the rotation at 256.004 MiB and only switch the evictor on: 3118 -> 2635. So
-  the drop is a cache effect, not a rotation-size effect. In the shipped
-  configuration, though, the evictor is *off* at this cell (512.008 MiB is over
-  the threshold) and the same ~2679 is reached by the rotation being large
-  enough to self-evict. Two different mechanisms, nearly the same number.
-* At `4096x4096` the gate alone *raises* the number, 3316 -> 3498, and the
-  target is what costs: 128 MiB of rotation is comfortably MALL-resident, and
-  the 3498 figure is the evictor running while the operands stay cached, which
-  is worse than either endpoint. Only doubling the rotation to 256.031 MiB
-  brings it down to ~3010. This is the case that would have been missed by
-  changing the gate alone.
-* At `32768x2048` neither half flips the evictor and the cell moves +2.9%,
-  inside twice its own run-to-run range. Cells already far past the MALL are
-  approximately unaffected, as expected.
+Every arm is also a **single run**, against before-side run-to-run ranges of
+1.9-17.7% on these same cells. Even were the design clean, one run per corner
+would not support attribution.
+
+What the artifact does support, stated without a causal claim: at all four
+shapes the before configuration and the after configuration differ, the
+directions are not uniform (`512x4096` and `32768x2048` up, `4096x4096` and
+`32768x1024` down), and at `4096x4096` an intermediate configuration
+(128 MiB resident + evictor on) reads *higher* than either endpoint, which is
+enough to show the two changes cannot be reasoned about one at a time. That
+last point was the useful content of this section and it survives.
+
+A real decomposition needs the rotation count and the evictor forced
+independently by flags rather than by editing predicates, the evictor
+allocation held fixed across arms, and repeats per corner. That is not done.
 
 ## What the 2x margin actually decides
 
@@ -176,11 +258,21 @@ does not make `2` a measured constant. The 256->288 MiB decay is gradual, so any
 threshold in that region is a choice; what is measured is that a bare `1x` is
 too low at 256.03 MiB.
 
+Note what this comparison is and is not. Both arms hold the rotation at
+256.031 MiB and differ only in whether the evictor runs, so unlike the four-arm
+table above it is a genuine one-variable contrast -- but `isolate_nomargin` is
+a **single run** against a four-run median, and the evictor allocation is
+768 MiB in both, so it says nothing about the 12 MiB evictor. It is one clean
+point, not a characterisation of the band.
+
 The other boundary, for completeness: `32768x1024` after the change sits at
 512.0078 MiB and clears the 512 MiB threshold by 8 KiB, so the evictor is off.
 The `isolate_targetonly` run has the identical working set with the evictor on
 and reads 2673 GB/s against a four-run after-median of 2679 (range 1.9%). The
-knife-edge is worth 0.2% there, i.e. nothing measurable.
+knife-edge is worth 0.2% there, i.e. nothing measurable. @Reviewer's reading of
+this pair is the right one and stronger than mine: it means **this single point
+did not detect a gate cost**, which is not the same as bounding one. It does
+not generalise to the 2x threshold and does not validate the margin.
 
 ## Not covered
 

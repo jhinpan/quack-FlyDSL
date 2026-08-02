@@ -8,7 +8,6 @@ import argparse
 import csv
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import hashlib
 import importlib
 import importlib.metadata
 import json
@@ -41,9 +40,6 @@ DTYPE_WEIGHT_MODES = (
     ("bfloat16", "float32"),
     ("float32", "same"),
 )
-# Multiple of the last-level cache a rotation must exceed before the evictor is
-# considered unnecessary. See the gate comment in _run() for why 2 and not 1.
-EVICTOR_LLC_MARGIN = 2
 OPERATIONS = ("fwd", "bwd")
 PROVIDERS = ("flydsl", "quack", "torch")
 RESULT_FIELDS = (
@@ -68,8 +64,7 @@ RESULT_FIELDS = (
     "peak_bw_pct",
     "rotation_buffers",
     "rotation_working_set_bytes",
-    "rotation_target_bytes",
-    "evictor_threshold_bytes",
+    "l2_target_bytes",
     "l2_eviction_between_calls",
     "timed_samples",
 )
@@ -191,86 +186,39 @@ def _rotation_count(
     return max(1, min(max_buffers, by_memory, desired))
 
 
-def _torch_unique_id(properties: Any) -> int | None:
-    """KFD's ``unique_id`` for this device, from torch's misnamed ``uuid``.
-
-    The field is not a UUID. Its sixteen bytes are the ASCII text of a hex
-    string -- ``b"a60c2956cd9dd4c5"`` -- which parses to exactly the
-    ``unique_id`` KFD publishes for the same card (verified 8/8 on this host).
-    Note this is NOT the value ``rocm-smi --showuniqueid`` prints, which is a
-    third number agreeing with neither.
-
-    Returns ``None`` rather than guessing if the field is missing or does not
-    look like the hex text this decoding assumes.
-    """
-    raw = getattr(properties, "uuid", None)
-    data = getattr(raw, "bytes", None)
-    if data is None:
-        return None
-    try:
-        text = bytes(data).decode("ascii").strip()
-    except (UnicodeDecodeError, TypeError, ValueError):
-        return None
-    try:
-        return int(text, 16)
-    except ValueError:
-        return None
-
-
-def evictor_is_needed(rotation_working_set_bytes: int, llc_bytes: int) -> bool:
-    """Whether a rotation of this size still needs the cache evicted for it.
-
-    A function rather than an inline expression so a test can call the real
-    predicate. A test that re-implements the comparison only proves the test
-    agrees with itself -- which is how the false claim about `32768x1024` fwd
-    survived review in the first place.
-
-    See the call site in ``_run`` for why the margin is 2 and what it does not
-    do.
-    """
-    return rotation_working_set_bytes <= EVICTOR_LLC_MARGIN * llc_bytes
-
-
-KFD_NODE_ROOT = "/sys/class/kfd/kfd/topology/nodes"
-
-
-def _last_level_cache_bytes(
-    torch: Any, properties: Any, node_root: str = KFD_NODE_ROOT
-) -> tuple[int, dict[str, Any]]:
+def _last_level_cache_bytes(torch: Any, properties: Any) -> int:
     """Bytes that must be turned over to actually miss the last-level cache.
 
-    Returns ``(bytes, provenance)``. The provenance dict is not decoration: the
-    fallback here returns a number that is *known wrong* on gfx950, so a caller
-    that only sees the number cannot tell a real reading from a silent
-    degradation. It is recorded in the artifact and, on gfx950, treated as
-    fatal -- see ``_resolve_llc``.
-
-    ``properties.L2_cache_size`` is not the last-level cache on a part with a
+    ``properties.L2_cache_size`` is not that number on a part with a
     memory-side cache behind L2. On gfx950 torch reports the 4 MiB per-XCD L2
     while a 256 MiB MALL sits behind it, so a rotation sized against 4 MiB stays
     resident and the benchmark measures cache-warm while reporting cache-cold.
 
-    Nodes are matched by identity, not by index: ``HIP_VISIBLE_DEVICES``
-    renumbers torch's ordinals but not KFD's nodes, so index matching reads
-    another card's topology under any masking. On this host the two orders
-    disagree already (torch 0 is rocm-smi GPU 3).
+    Read from the KFD topology by PCI address rather than by node index:
+    ``HIP_VISIBLE_DEVICES`` renumbers torch's ordinals but not KFD's nodes, so
+    index matching reads another card's topology under any masking. On this host
+    the two orders disagree already (torch 0 is rocm-smi GPU 3).
 
-    ``unique_id`` is tried first and PCI ``domain:bus:device`` second. The PCI
-    key is not unique under CPX, where the eight logical devices of one card
-    share one address; ``unique_id`` distinguishes them. Ambiguity on either key
-    is refused, not resolved by ``os.listdir`` order.
+    Ambiguity is refused, not guessed. All matching nodes are collected and a
+    size is returned only when exactly one matches; ``os.listdir`` order is
+    arbitrary, so returning the first of several would make the result depend on
+    directory iteration order. This matters under CPX, where the eight logical
+    devices of one card share a single PCI address.
+
+    Falls back to ``L2_cache_size`` -- the value this harness used before -- on
+    any non-HIP build, missing topology, or ambiguous match.
     """
-    fallback = properties.L2_cache_size
     if not getattr(torch.version, "hip", None):
-        return fallback, {"source": "torch_l2_fallback", "reason": "not_a_hip_build"}
-    want_uid = _torch_unique_id(properties)
+        return properties.L2_cache_size
     domain = getattr(properties, "pci_domain_id", 0)
     bus = getattr(properties, "pci_bus_id", None)
     device = getattr(properties, "pci_device_id", None)
-    by_uid: list[str] = []
-    by_bdf: list[str] = []
+    if bus is None or device is None:
+        return properties.L2_cache_size
+    matches = []
     try:
-        for node in sorted(os.listdir(node_root)):
+        node_root = "/sys/class/kfd/kfd/topology/nodes"
+        for node in os.listdir(node_root):
             base = os.path.join(node_root, node)
             try:
                 with open(os.path.join(base, "properties")) as handle:
@@ -280,46 +228,30 @@ def _last_level_cache_bytes(
             # Skip a node whose numeric fields do not parse, rather than letting
             # the exception escape. Scanning the whole tree means an unrelated
             # malformed node -- one that is not even a candidate match -- would
-            # otherwise abort the benchmark instead of falling back.
+            # otherwise abort the benchmark instead of falling back. @Reviewer
+            # raised this against the autotuner's copy of this parser; it is
+            # equally true here, and here the blast radius is a crashed run.
             try:
                 if int(props.get("gfx_target_version", 0)) == 0:
                     continue  # CPU node
+                location = int(props.get("location_id", 0))
                 if (
-                    want_uid is not None
-                    and "unique_id" in props
-                    and int(props["unique_id"]) == want_uid
+                    int(props.get("domain", 0)) != domain
+                    or ((location >> 8) & 0xFF) != bus
+                    or ((location >> 3) & 0x1F) != device
                 ):
-                    by_uid.append(base)
-                if bus is not None and device is not None:
-                    location = int(props.get("location_id", 0))
-                    if (
-                        int(props.get("domain", 0)) == domain
-                        and ((location >> 8) & 0xFF) == bus
-                        and ((location >> 3) & 0x1F) == device
-                    ):
-                        by_bdf.append(base)
+                    continue
             except ValueError:
                 continue
+            matches.append(base)
     except OSError:
-        return fallback, {"source": "torch_l2_fallback", "reason": "no_kfd_topology"}
-
-    if len(by_uid) == 1:
-        matched, key = by_uid[0], "unique_id"
-    elif len(by_uid) > 1:
-        return fallback, {"source": "torch_l2_fallback", "reason": "ambiguous_unique_id"}
-    elif len(by_bdf) == 1:
-        matched, key = by_bdf[0], "pci_domain_bus_device"
-    elif len(by_bdf) > 1:
-        # Reachable under CPX. unique_id would have separated these; getting
-        # here means it was unavailable or matched nothing.
-        return fallback, {"source": "torch_l2_fallback", "reason": "ambiguous_pci_address"}
-    else:
-        return fallback, {"source": "torch_l2_fallback", "reason": "no_matching_node"}
-
+        return properties.L2_cache_size
+    if len(matches) != 1:
+        return properties.L2_cache_size
     best = 0
     try:
-        cache_root = os.path.join(matched, "caches")
-        for cache in sorted(os.listdir(cache_root)):
+        cache_root = os.path.join(matches[0], "caches")
+        for cache in os.listdir(cache_root):
             try:
                 with open(os.path.join(cache_root, cache, "properties")) as handle:
                     cprops = dict(line.split()[:2] for line in handle if len(line.split()) >= 2)
@@ -331,42 +263,8 @@ def _last_level_cache_bytes(
             except ValueError:
                 continue  # unparseable cache entry: skip it, do not abort the run
     except OSError:
-        return fallback, {"source": "torch_l2_fallback", "reason": "no_caches_directory"}
-    if best <= 0:
-        return fallback, {"source": "torch_l2_fallback", "reason": "no_level2_plus_cache"}
-    return max(best, fallback), {
-        "source": "kfd_topology",
-        "matched_by": key,
-        "matched_node": matched,
-    }
-
-
-def _resolve_llc(torch: Any, properties: Any, args: argparse.Namespace) -> tuple[int, dict]:
-    """Fail closed on gfx950 rather than silently reporting cache-warm numbers.
-
-    Falling back to ``L2_cache_size`` on gfx950 reinstates the exact defect this
-    helper exists to fix: the run completes, every row looks normal, and the
-    numbers are measured against a resident MALL. That is worse than a crash,
-    because a crash is noticed. On any other architecture the fallback is just a
-    conservative guess and is allowed through with the reason recorded.
-
-    ``--llc-bytes`` is the escape hatch for a gfx950 host whose topology this
-    helper cannot read.
-    """
-    if args.llc_bytes is not None:
-        return args.llc_bytes, {"source": "explicit_override", "flag": "--llc-bytes"}
-    llc_bytes, provenance = _last_level_cache_bytes(torch, properties)
-    if provenance["source"] != "torch_l2_fallback":
-        return llc_bytes, provenance
-    if _device_arch(torch) == "gfx950":
-        raise RuntimeError(
-            "cannot determine the last-level cache from the KFD topology "
-            f"({provenance['reason']}); on gfx950 the fallback value "
-            f"({llc_bytes} B, torch's per-XCD L2) is known wrong -- the MALL is "
-            "256 MiB -- and using it would silently measure cache-warm. Pass "
-            "--llc-bytes to override explicitly."
-        )
-    return llc_bytes, provenance
+        return properties.L2_cache_size
+    return max(best, properties.L2_cache_size)
 
 
 class _L2Evictor:
@@ -905,42 +803,6 @@ def _git_commit() -> str | None:
         return None
 
 
-def _git_dirty() -> dict[str, Any]:
-    """Whether the tree differs from the recorded commit, and where.
-
-    ``git_commit`` alone is ambient: it names HEAD, which says nothing about
-    what was actually executed if the tree is dirty or if the file being run is
-    a scratch copy. Recording HEAD as if it identified the code is how the
-    ``AI/gate_llc_before_after/`` isolate runs ended up unverifiable.
-    """
-    try:
-        porcelain = subprocess.run(
-            ["git", "status", "--porcelain"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
-    except (OSError, subprocess.CalledProcessError):
-        return {"git_dirty": None, "git_dirty_paths": []}
-    paths = [line[3:] for line in porcelain.splitlines() if line]
-    return {"git_dirty": bool(paths), "git_dirty_paths": paths[:20]}
-
-
-def _executed_source() -> dict[str, Any]:
-    """Hash of the file actually being run, not of the commit it resembles.
-
-    This is the field that distinguishes ``benchmark_rmsnorm_flydsl.py`` from a
-    one-line-edited scratch copy of it. Without it an artifact can only assert
-    its provenance; with it a reader can check it.
-    """
-    try:
-        source = Path(__file__).resolve()
-        digest = hashlib.sha256(source.read_bytes()).hexdigest()
-    except OSError:
-        return {"script_path": None, "script_sha256": None}
-    return {"script_path": source.name, "script_sha256": digest}
-
-
 def _device_arch(torch: Any) -> str:
     """Architecture string for the visible device, on either vendor.
 
@@ -956,7 +818,7 @@ def _device_arch(torch: Any) -> str:
 def _environment(torch: Any, args: argparse.Namespace, output_dir: Path) -> dict[str, Any]:
     properties = torch.cuda.get_device_properties(0)
     return {
-        "schema_version": 3,
+        "schema_version": 2,
         "status": "running",
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         # Every provider is checked against the fp32 reference before it is
@@ -972,8 +834,6 @@ def _environment(torch: Any, args: argparse.Namespace, output_dir: Path) -> dict
         "command": [sys.executable, *sys.argv],
         "working_directory": str(Path.cwd()),
         "git_commit": _git_commit(),
-        **_git_dirty(),
-        **_executed_source(),
         "artifact_directory": str(output_dir.resolve()),
         "versions": {
             "python": platform.python_version(),
@@ -1016,19 +876,8 @@ def _environment(torch: Any, args: argparse.Namespace, output_dir: Path) -> dict
                 "JIT is synchronized, recorded separately, and excluded"
             ),
             "cache": (
-                "round-robin cloned tensor sets sized against rotation_target_bytes "
-                "(= --l2-target-ratio x the last-level cache, which on gfx950 is the "
-                "256 MiB MALL and not the 4 MiB per-XCD L2 torch reports); when a "
-                "set's working set is at most evictor_threshold_bytes "
-                "(= EVICTOR_LLC_MARGIN x LLC) a device copy evicts the cache once "
-                "per timed rotation, before the event window opens, not between "
-                "individual calls"
-            ),
-            "last_level_cache": (
-                "read from the KFD topology, matched by unique_id and then by PCI "
-                "domain:bus:device; see last_level_cache_provenance for which key "
-                "matched. A gfx950 host that cannot be matched aborts rather than "
-                "falling back to torch's L2, which would silently measure cache-warm"
+                "round-robin cloned tensor sets; when their logical working set is below "
+                "the L2 target, a device copy evicts cache between individually timed calls"
             ),
             "logical_bytes": {
                 "fwd": "read x + weight; write y",
@@ -1087,16 +936,6 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-rotation-buffers", type=int, default=2)
     parser.add_argument("--max-rotation-buffers", type=int, default=4)
     parser.add_argument("--l2-target-ratio", type=int, default=3)
-    parser.add_argument(
-        "--llc-bytes",
-        type=int,
-        default=None,
-        help=(
-            "Override the last-level cache size in bytes. Only needed on a host "
-            "whose KFD topology cannot be matched to the visible device; on "
-            "gfx950 that case aborts rather than guessing."
-        ),
-    )
     parser.add_argument("--expected-arch", default="gfx950")
     parser.add_argument("--output-dir", type=Path, default=None)
     return parser
@@ -1129,8 +968,6 @@ def _validate_runtime(torch: Any, args: argparse.Namespace) -> None:
         "--max-rotation-buffers": args.max_rotation_buffers,
         "--l2-target-ratio": args.l2_target_ratio,
     }
-    if args.llc_bytes is not None and args.llc_bytes < 1:
-        raise ValueError("--llc-bytes must be positive")
     for name, value in positive_values.items():
         if value < 1:
             raise ValueError(f"{name} must be positive")
@@ -1148,17 +985,10 @@ def _run(
     environment: dict[str, Any],
 ) -> list[dict[str, Any]]:
     properties = torch.cuda.get_device_properties(0)
-    llc_bytes, llc_provenance = _resolve_llc(torch, properties, args)
+    llc_bytes = _last_level_cache_bytes(torch, properties)
     environment["last_level_cache_bytes"] = llc_bytes
-    environment["last_level_cache_provenance"] = llc_provenance
     environment["torch_l2_cache_size"] = properties.L2_cache_size
-    rotation_target_bytes = llc_bytes * args.l2_target_ratio
-    environment["rotation_target_bytes"] = rotation_target_bytes
-    environment["evictor_gate"] = {
-        "predicate": "rotation_working_set_bytes <= margin * last_level_cache_bytes",
-        "margin": EVICTOR_LLC_MARGIN,
-        "threshold_bytes": EVICTOR_LLC_MARGIN * llc_bytes,
-    }
+    l2_target_bytes = llc_bytes * args.l2_target_ratio
     peak_bw = _measure_achievable_bandwidth(
         torch,
         probe_bytes=args.copy_mib * 1024**2,
@@ -1167,7 +997,7 @@ def _run(
     )
     environment["achievable_bandwidth"] = peak_bw
     torch.cuda.empty_cache()
-    evictor = _L2Evictor(torch, rotation_target_bytes)
+    evictor = _L2Evictor(torch, l2_target_bytes)
 
     providers = {}
     for name in args.providers:
@@ -1198,7 +1028,7 @@ def _run(
             free_bytes, _ = torch.cuda.mem_get_info()
             rotation_buffers = _rotation_count(
                 byte_count,
-                rotation_target_bytes,
+                l2_target_bytes,
                 free_bytes,
                 min_buffers=args.min_rotation_buffers,
                 max_buffers=args.max_rotation_buffers,
@@ -1211,35 +1041,29 @@ def _run(
                 rotation_buffers=rotation_buffers,
             )
             rotation_working_set_bytes = rotation_buffers * byte_count
-            # Evict unless the rotation alone already clears the last-level
-            # cache by a margin. The comparison is against the LLC itself, not
-            # against rotation_target_bytes (= ratio * LLC): a set larger than the
-            # cache is self-evicting, and nothing between LLC and ratio*LLC
-            # needs the evictor switched off. Comparing against the target left
-            # the evictor off for every set in that band.
+            # Evict unless the rotation alone already exceeds the last-level
+            # cache. The comparison is against the LLC itself, not against
+            # l2_target_bytes (= ratio * LLC): a set larger than the cache is
+            # self-evicting, and nothing between LLC and ratio*LLC needs the
+            # evictor to be switched off. Comparing against the target left the
+            # evictor off for every set in that band.
             #
-            # The margin is a margin, not a measured threshold. The archived
-            # fine-boundary sweep walks 256.000-256.008 MiB and every point
-            # still reads above the HBM reference, so an exact-fit or
-            # few-KiB-over set measures MALL-warm and a bare `> llc_bytes` test
-            # would trust it. The 256->288 MiB decay is gradual rather than a
-            # cliff, so no single crossing point is defensible; 2x is chosen to
-            # sit clear of the soft region. Erring high costs time, erring low
-            # costs correctness.
+            # The margin is not decoration. A set that merely *equals* or
+            # slightly exceeds capacity is not reliably self-evicting: the
+            # archived fine-boundary sweep in AI/ walks 256.000-256.008 MiB and
+            # every point still reads above the HBM reference, so an exact-fit
+            # or few-KiB-over set measures MALL-warm. A bare `> llc_bytes` test
+            # would leave the evictor off for exactly those cells -- including
+            # 32768x1024 forward at 256.004 MiB, which is the cell this whole
+            # investigation started from. Requiring a clear multiple keeps the
+            # decision away from the boundary the probe showed to be soft.
             #
-            # What the margin does NOT do -- an earlier version of this comment
-            # claimed it did, and @Reviewer showed the claim is false against
-            # the code: it does not turn the evictor on for `32768x1024` fwd.
-            # That cell's rotation grows 2->4 under the MALL-sized target, so
-            # its working set is 512.008 MiB, which *exceeds* 2x256 MiB and
-            # leaves the evictor OFF. It is rescued by the larger rotation, not
-            # by this gate. Across the 90-cell matrix the target change moves 53
-            # rotation counts while this gate flips 37 cells false->true, and
-            # the two sets are not the same cells. Do not describe a cell as
-            # "now evicted" without checking which of the two changes reached
-            # it. The 13 cells where 2x differs from a bare 1x are the 4096-row
-            # shapes between 256.03 and 384.19 MiB.
-            use_evictor = evictor_is_needed(rotation_working_set_bytes, llc_bytes)
+            # The decay from 256 to 288 MiB is gradual rather than a cliff, so
+            # no single crossing point is defensible; 2x is a margin, not a
+            # measured threshold, and is deliberately conservative -- turning
+            # the evictor on when it was not needed costs time, leaving it off
+            # when it was needed costs correctness.
+            use_evictor = rotation_working_set_bytes <= llc_bytes
             samples_us = _time_rotating_calls(
                 torch,
                 prepared,
@@ -1251,7 +1075,7 @@ def _run(
             logical_gbps = byte_count / stats["median_us"] / 1000.0
             peak_bw_pct = logical_gbps / peak_bw["median_gbps"] * 100.0
             row = {
-                "schema_version": 3,
+                "schema_version": 2,
                 "provider": provider_name,
                 "provider_detail": prepared.provider_detail,
                 "operation": cell.operation,
@@ -1272,8 +1096,7 @@ def _run(
                 "peak_bw_pct": _round(peak_bw_pct),
                 "rotation_buffers": rotation_buffers,
                 "rotation_working_set_bytes": rotation_working_set_bytes,
-                "rotation_target_bytes": rotation_target_bytes,
-                "evictor_threshold_bytes": EVICTOR_LLC_MARGIN * llc_bytes,
+                "l2_target_bytes": l2_target_bytes,
                 "l2_eviction_between_calls": use_evictor,
                 "timed_samples": len(samples_us),
             }
