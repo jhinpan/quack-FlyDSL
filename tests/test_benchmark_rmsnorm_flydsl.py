@@ -817,7 +817,7 @@ def test_gfx950_refuses_a_mall_sized_number_the_topology_never_reported(tmp_path
     root = tmp_path / "nodes"
     root.mkdir()
     _node(root, 2, GPU_AT_BDF, ((2, 4096),))
-    with pytest.raises(RuntimeError, match="reports no cache at or above the MALL size"):
+    with pytest.raises(RuntimeError, match="the two sources contradict each other"):
         benchmark._resolve_llc(
             _gfx950_torch(),
             _properties(l2=256 * 1024**2),
@@ -826,13 +826,53 @@ def test_gfx950_refuses_a_mall_sized_number_the_topology_never_reported(tmp_path
         )
 
 
-def test_off_gfx950_the_larger_torch_value_is_still_available_to_the_caller(tmp_path):
-    # Over-refusal control. Not merging the two numbers must not silently make
-    # every non-gfx950 host size its rotation against a smaller cache than
-    # before; off gfx950 the LLC is a sizing hint and the conservative choice
-    # is still the larger figure. What changed is that the choice is now made
-    # where it can be labelled, instead of inside the parser where it erased
-    # the distinction.
+def test_gfx950_refuses_a_conflict_even_when_the_topology_value_is_right(tmp_path):
+    # The hole @Autotune's correction led me to, in my own 50db350. The three
+    # accept conditions all held -- source kfd_topology, no degradation, value
+    # at the MALL -- so the early return fired before the conflict reason was
+    # ever built, and a topology contradicted by torch was accepted because it
+    # happened to be the right size. Recording `torch_l2_exceeds_topology` and
+    # then not gating on it is the recording-without-acting half of the defect.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    _node(root, 2, GPU_AT_BDF, ((3, 262144),))  # topology reports exactly the MALL
+    with pytest.raises(RuntimeError, match="the two sources contradict each other"):
+        benchmark._resolve_llc(
+            _gfx950_torch(),
+            _properties(l2=512 * 1024**2),  # torch claims twice it
+            argparse.Namespace(llc_bytes=None),
+            str(root),
+        )
+
+
+def test_gfx950_still_accepts_the_topology_when_nothing_contradicts_it(tmp_path):
+    # Over-refusal control for the gate above, and the case the live host is
+    # in: KFD reports 256 MiB, torch reports its 4 MiB L2, `fallback > best` is
+    # false, no conflict flag, accepted. Verified 8/8 on real hardware.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    _node(root, 2, GPU_AT_BDF, ((2, 4096), (3, 262144)))
+    value, provenance = benchmark._resolve_llc(
+        _gfx950_torch(),
+        _properties(l2=4 * 1024**2),
+        argparse.Namespace(llc_bytes=None),
+        str(root),
+    )
+    assert value == 256 * 1024**2
+    assert provenance["source"] == "kfd_topology"
+    assert "torch_l2_exceeds_topology" not in provenance
+
+
+def test_off_gfx950_the_larger_torch_value_carries_torch_as_its_source(tmp_path):
+    # Over-refusal control, and @Reviewer's blocker against 50db350 in one
+    # test. Not merging the two numbers must not silently make every
+    # non-gfx950 host size its rotation against a smaller cache than before;
+    # off gfx950 the LLC is a sizing hint and the conservative choice is still
+    # the larger figure. But when this branch takes torch's number it must say
+    # so in `source` -- returning 268435456 under `source: kfd_topology` from a
+    # node that reported 4 MiB is the laundering of 53c1d4d done one level up,
+    # in the caller I moved the choice into. A side field is not a substitute
+    # for the field a consumer actually reads.
     root = tmp_path / "nodes"
     root.mkdir()
     _node(root, 2, GPU_AT_BDF, ((2, 4096),))
@@ -843,6 +883,8 @@ def test_off_gfx950_the_larger_torch_value_is_still_available_to_the_caller(tmp_
         str(root),
     )
     assert value == 256 * 1024**2
+    assert provenance["source"] == "torch_l2_over_topology"
+    assert provenance["topology_bytes"] == 4 * 1024**2
     assert provenance["torch_l2_exceeds_topology"]["topology_bytes"] == 4 * 1024**2
 
 

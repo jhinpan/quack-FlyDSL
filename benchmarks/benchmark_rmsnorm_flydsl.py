@@ -529,11 +529,20 @@ def _last_level_cache_bytes(
     # different situations -- observed and assumed -- collapsing into one
     # indistinguishable number.
     if fallback > best:
-        # Not an error on its own: on a part with no memory-side cache torch's
-        # L2 and KFD's last level are the same line, and a *larger* torch
-        # figure just means we could not see what torch saw. It is recorded
-        # because the caller may want the larger number, and must be able to
-        # tell that choosing it means leaving the topology's evidence.
+        # This is evidence *conflict*, not evidence absence, and the two are
+        # not the same defect. `torch_l2_fallback` means the topology could not
+        # be read; this means it was read cleanly and disagrees with torch. Only
+        # the second one says some component is wrong.
+        #
+        # An earlier version of this comment called it benign -- "on a part with
+        # no memory-side cache torch's L2 and KFD's last level are the same
+        # line, so a larger torch figure just means we could not see what torch
+        # saw". Measured on the live topology instead of assumed: all eight
+        # gfx950 nodes publish a level-2 entry of 4194304 and torch reports
+        # L2_cache_size 4194304 for the same card. An L2-only part is the case
+        # where the two sources are *equal*. `fallback > best` is not that part;
+        # it is a source contradicting the driver, and there is no reading of it
+        # under which both numbers are right.
         provenance["torch_l2_exceeds_topology"] = {
             "topology_bytes": best,
             "torch_l2_bytes": fallback,
@@ -558,7 +567,7 @@ def _resolve_llc(
     because a crash is noticed. On any other architecture the fallback is just a
     conservative guess and is allowed through with the reason recorded.
 
-    Four ways to end up with a wrong number, not one. The first version of this
+    Five ways to end up with a wrong number, not one. The first version of this
     function only caught the first:
 
     1. the whole topology read fails and we fall back;
@@ -568,12 +577,16 @@ def _resolve_llc(
        per-XCD L2;
     4. the read succeeds and returns a plausible 256 MiB -- from the wrong node,
        because the node that was this card failed to parse and the fallback PCI
-       key is not unique under CPX.
+       key is not unique under CPX;
+    5. the read succeeds completely and *contradicts* torch, which reports a
+       larger ``L2_cache_size`` for the same card. Nothing is missing here and
+       nothing is undersized -- two sources describe one device incompatibly,
+       and at most one of them is right.
 
-    On gfx950 all four are fatal, and the acceptance test is a conjunction of
-    three independent things -- a trustworthy *source*, no recorded
-    degradation, and a value at or above the MALL -- none of which subsumes
-    the others.
+    On gfx950 all five are fatal, and the acceptance test is a conjunction of
+    four independent things -- a trustworthy *source*, no recorded degradation,
+    no recorded conflict, and a value at or above the MALL -- none of which
+    subsumes the others.
 
     An earlier version of this paragraph said "for (2) and (3) the test is the
     value itself", and that was the wrong lesson to draw from a true
@@ -596,6 +609,13 @@ def _resolve_llc(
     reason to check the source first is that a number which is right by
     coincidence is not evidence.
 
+    (5) is the same lesson a third time and it caught this function again. The
+    conflict was recorded in the provenance and the accept branch did not read
+    it, so a topology reporting exactly 256 MiB against a torch claim of 512 MiB
+    was accepted -- source clean, no degradation, value right. Recording
+    evidence and not gating on it leaves the artifact honest and the decision
+    unchanged, which is the failure mode this whole helper exists to prevent.
+
     ``--llc-bytes`` is the escape hatch for a gfx950 host whose topology this
     helper cannot read.
     """
@@ -607,12 +627,23 @@ def _resolve_llc(
         # the conservative choice is the larger of the two -- a rotation sized
         # against too *large* a cache is merely wasteful, while one sized too
         # small is silently cache-warm. The parser no longer merges them (that
-        # is what laundered the source on gfx950), so the choice is made here,
-        # where it can be labelled: `torch_l2_exceeds_topology` in the
-        # provenance says the returned number is torch's, not the topology's.
+        # is what laundered the source on gfx950), so the choice is made here.
+        #
+        # And it has to be *relabelled* here, not merely annotated. @Reviewer's
+        # counterexample against 50db350, reproduced before this edit: this
+        # branch returned torch's 268435456 with the provenance still reading
+        # `source: kfd_topology` from a node that reported 4 MiB. Adding
+        # `torch_l2_exceeds_topology` beside an unchanged `source` is the same
+        # laundering one level up -- I fixed the parser and then re-did it in
+        # the caller, which is why a side field is not a substitute for the
+        # field that is actually named `source`. A consumer reads `source`.
         larger = provenance.get("torch_l2_exceeds_topology")
         if larger is not None:
-            return larger["torch_l2_bytes"], provenance
+            return larger["torch_l2_bytes"], {
+                **provenance,
+                "source": "torch_l2_over_topology",
+                "topology_bytes": larger["topology_bytes"],
+            }
         return llc_bytes, provenance
     # Three independent conditions, and the value is only one of them. An
     # earlier version accepted any figure at or above the MALL size with no
@@ -622,9 +653,22 @@ def _resolve_llc(
     # constructed it: absent topology plus `L2_cache_size = 256 MiB` returned
     # `source: torch_l2_fallback` and was accepted. A number that is right by
     # coincidence is not evidence, so the source has to be checked first.
+    # A recorded conflict is unresolved evidence, so it belongs in the accept
+    # test and not merely in the artifact. Found while acting on @Autotune's
+    # correction: a topology reporting exactly the MALL against a torch
+    # `L2_cache_size` of 512 MiB passed all three conditions and returned
+    # 268435456, because the early return fired before the conflict reason was
+    # ever built. Writing `torch_l2_exceeds_topology` into the provenance and
+    # then not gating on it is the recording-without-acting half of the same
+    # defect -- the evidence was captured and the decision ignored it.
+    #
+    # Not over-refusal on this host: all eight live nodes report 262144 KB
+    # against torch's 4194304 B, so `fallback > best` is false and the flag is
+    # absent (verified 8/8 before and after this change).
     if (
         provenance["source"] == "kfd_topology"
         and "degraded" not in provenance
+        and "torch_l2_exceeds_topology" not in provenance
         and llc_bytes >= GFX950_MALL_BYTES
     ):
         return llc_bytes, provenance
@@ -650,6 +694,18 @@ def _resolve_llc(
             "the KFD topology was read but "
             f"{len(entries)} cache entr{'y was' if len(entries) == 1 else 'ies were'} "
             f"unusable ({', '.join(entries)}), so the MALL entry may be among them"
+        )
+    conflict = provenance.get("torch_l2_exceeds_topology")
+    if conflict is not None:
+        # Name the disagreement rather than only its consequence. "Reports no
+        # cache at or above the MALL size" is true here and sends the reader to
+        # look for a missing level-3 entry, when what actually happened is that
+        # two sources described the same card incompatibly -- and which one is
+        # wrong is the question worth printing.
+        reasons.append(
+            f"the KFD topology reports {conflict['topology_bytes']} B as this card's "
+            f"last level while torch reports L2_cache_size {conflict['torch_l2_bytes']} B; "
+            "the two sources contradict each other, so neither can be used"
         )
     if not reasons:
         reasons.append(
