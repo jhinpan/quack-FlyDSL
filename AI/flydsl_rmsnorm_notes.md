@@ -2525,15 +2525,15 @@ bf16, `m*N` held at 2^24, against an fp32 reference, with `MAX_N` patched to
 `AI/probe_flydsl_cap_lift_accuracy.py`, artifact
 `AI/data/flydsl_cap_lift_accuracy.json`:
 
-| N | over cap | fwd | mean rel err | bwd | dw outside suite tol |
+| N | over cap | fwd | mean rel err | bwd | elements outside suite tol (out/dx/dw) |
 | --- | --- | --- | --- | --- | --- |
-| 4096 | no | ok | 1.9e-8 | ok | 0 |
-| 8192 | no | ok | 2.2e-8 | ok | 0 |
-| 16384 | yes | ok | 2.5e-8 | ok | 0 |
-| 32768 | yes | ok | 2.7e-8 | ok | 0 |
-| 65536 | yes | ok | 1.0e-8 | ok | 0 |
-| 131072 | yes | ok | 2.8e-8 | ok | 0 |
-| 262144 | yes | ok | 7.5e-8 | ok | 0 |
+| 4096 | no | ok | 1.9e-8 | ok | 0 / 0 / 0 |
+| 8192 | no | ok | 2.2e-8 | ok | 0 / 0 / 0 |
+| 16384 | yes | ok | 2.5e-8 | ok | 0 / 0 / 0 |
+| 32768 | yes | ok | 2.7e-8 | ok | 0 / 0 / 0 |
+| 65536 | yes | ok | 1.0e-8 | ok | 0 / 0 / 0 |
+| 131072 | yes | ok | 2.8e-8 | ok | 0 / 0 / 0 |
+| 262144 | yes | ok | 7.5e-8 | ok | 0 / 0 / 0 |
 
 Flat across a 64x range with no discontinuity at the cap, forward and
 backward. So the FlyDSL half of the policy-cap claim is now measured rather
@@ -2571,6 +2571,33 @@ still recorded in the artifact; only `within_suite_tolerance` is the claim.
 Which is the same defect twice more in one measurement -- a number correct
 about a set other than the one its label names -- caught only because the
 first version's verdict disagreed with the second version's.
+
+**And then a third time, in the field added to fix the second.** @CrossVendor
+read the committed bytes and found `within_suite_tolerance` was named for the
+whole comparison but computed from `dx` and `dw` alone: the forward branch
+recorded max/mean error and never applied the criterion at all, and the single
+outside-count covered only `dw`. So "zero elements outside tolerance, forward
+and backward" -- which I had written to him -- was a claim about a set the
+field never examined. Forward now gets the same criterion, all three tensors
+carry their own outside-count, and the boolean is their conjunction with an
+explicit `within_suite_tolerance_covers` list naming exactly what it ranges
+over.
+
+He also rejected `samples` as raw data, correctly: it was the first eight
+forward outputs with no paired reference, index, difference or threshold, so
+nothing in the artifact could be recomputed from it -- representative values
+wearing the name "raw samples", and being the *first* eight, the elements
+least likely to carry the answer. Replaced by paired worst-case records for
+out, dx and dw, under two orderings, since the element nearest to failing and
+the element with the largest raw difference are different elements backing
+different reported numbers. Every retained sample now recomputes its own
+threshold and verdict, and each `max_abs_err*` headline is backed by a sample
+in the file, so the artifact can be checked without rerunning it.
+
+Four instances of one defect class inside a single 200-line probe, each found
+by someone else or by disagreement between two versions of my own arithmetic.
+That is the argument for the artifact carrying its own recomputable evidence
+rather than a verdict anyone has to trust.
 
 So the honest statement of row 10, after five wrong ones:
 
