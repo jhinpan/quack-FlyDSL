@@ -1345,9 +1345,22 @@ headline, and never depended on df at all.
 
 ##### The anchored run refutes the bytes headline — and confirms both predictions
 
-Six cells in one shuffle, 24 processes, GPU5. The assembler was committed with
-the data deliberately left untracked, so its absence at that commit is checkable
-the way @Autotune checked the four-cell chronology.
+Six cells in one shuffle, 24 processes, GPU5. The P1/P2 rules and the six-cell
+grid were pushed to origin at `da64f32` and `613a2e6`, **before the run was
+launched** — that much is witnessed by Git and by the push.
+
+**What that check does *not* establish (@Reviewer, `53f9258b`).** I also wrote
+that the assembler was committed with the data "deliberately left untracked, so
+its absence at that commit is checkable." It is checkable, and it proves less
+than I claimed. `0b44767`'s own commit body says the sweep had finished and the
+file was on disk. So `git ls-tree` returning nothing proves the file was **not
+staged** — and staging is an author's choice. It does not prove the numbers were
+unread when the Welch and permutation rules were fixed; that rests on *"none of
+its numbers have been read"*, a statement about conduct no tree can witness.
+Worth stating as a general limit rather than patching per instance: **a
+tree-absence check establishes "not staged at commit time", and where the run has
+already completed, that is compatible with full knowledge of the result.** The
+pre-push of `da64f32`/`613a2e6` is the part that carries weight here.
 
 **Both pre-registered predictions held, exactly.**
 
@@ -1365,9 +1378,22 @@ against count=0. That was the anchor's declared purpose and it succeeded.
 
 **P2 — the argmin.** Every cell unanimous across all four processes; count=0
 gives slot 4, shared with no count>0 cell; the two 24 GiB routes still disagree
-(3 vs 1). Permutation p = 0.0 on 20 000 draws. And all four original cells
-reproduced their *exact* argmin from the previous session (2/3/1/0). A nominal
-outcome with five values, predicted in advance, correct in every cell.
+(3 vs 1). And all four original cells reproduced their *exact* argmin from the
+previous session (2/3/1/0). A nominal outcome with five values, predicted in
+advance, correct in every cell.
+
+The permutation p was published as **0.0 on 20 000 draws**, and that was wrong in
+kind, not degree (@Reviewer, `53f9258b`). The run scored *zero hits*, so
+`round(0/20000, 5)` printed `0.0` — which reads as an exact probability when a
+finite-draw run can only bound one from above, here ≤ 1/20 001. This null admits
+a closed form, so no bound is needed: the sample space is the multiset
+permutations of the observed argmins over 24 processes, 24!/(4!·8!·4!·4!·4!) =
+46 381 007 673 000, and matching the observed score requires all six cells
+unanimous — which forces the eight copies of slot 1 into exactly two cells and
+each other value into one, giving 6!/2! = 360 favourable. **Exact p = 360 /
+46 381 007 673 000 = 1/128 836 132 425 ≈ 7.76 × 10⁻¹².** That reproduces
+@Reviewer's independently derived figure to the digit — and my first closed form
+did not, returning 720; see the correction note below.
 
 **But P1's own contrasts refute the headline P1 was meant to support.** Two
 deltas have opposite signs, and that is fatal to a monotone bytes response:
@@ -1379,6 +1405,19 @@ non-monotone curve and reported it as the curve.
 
 The `lo_lo < zero` reversal holds on **all four aggregation bases**. This is not
 the basis-dependence problem again; it is a fact about the data.
+
+**A count I got wrong, in a commit message rather than here (@Reviewer,
+`53f9258b`).** I reported *four sign changes* along the bytes axis. Two cells
+reach 24 GiB by different routes, so the x axis has a **tie**, and their relative
+order in the sequence is insertion order from `CELLS` — arbitrary. Counting sign
+changes across a tie charges it one. Swapping the tied pair gives 2; collapsing
+the tie to its mean, the only order-invariant treatment of two points at one x,
+also gives 2. The artifact now reports `sign_changes_TIE_AWARE` (2) alongside the
+stored-order count, with the tie-collapsed sequence beside it. **Non-monotonicity
+is invariant to all three orderings**, so the refutation is untouched and only the
+number was wrong — but the number was published, and an arbitrary
+insertion-order artifact is exactly the kind of thing that should not be load
+bearing.
 
 Two things worth separating. The earlier **data** is sound — the four cells
 replicated to within 0.0035 TB/s across independent sessions with different
@@ -1402,6 +1441,27 @@ collapse merely picked one estimand among several; here it *destroys the
 structure that is the actual finding*. Why a placement is faster remains
 unexplained — `count=13` was chosen because it is the first staircase step, and
 nothing predicted this.
+
+**@Reviewer also found this separation is *stronger* than I stated**: all 28
+`step` slot-0 rounds are faster than every round outside that cell. I had
+reported the margin against the best per-slot *rate*; the round-level statement
+is the one his `23a6f662` test actually asks for, and it is cleaner.
+
+###### A closed form is not self-checking
+
+Replacing the `0.0` above with an exact p, I wrote `6!/max(doubled,1)!` off an
+ad-hoc count of values appearing twice per cell. It returned **720**, not 360 —
+it detected the one doubled value and then divided by `1!`. The formula ran
+green, produced a plausible probability, and was wrong by exactly 2×.
+
+It surfaced only because @Reviewer had derived `1/128 836 132 425`
+independently and my regeneration printed `1/64 418 066 212`. Nothing in my own
+tooling could have caught it: there is no artifact to diff against, because the
+formula *is* the source. The fix is written per-value —
+`ncells! / Π(count_v/reps)!` — so there is no special case left to get wrong,
+and it now reproduces his figure to the digit. **Two independent derivations of
+the same closed form is the only check that exists for one**, which is an
+argument for the reviewer seat doing arithmetic rather than only reading mine.
 
 ###### The obvious mechanism is wrong: the layout is byte-identical across cells that disagree
 

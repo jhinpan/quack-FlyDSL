@@ -1,6 +1,7 @@
 {
   "what": "the pre-registered anchored six-cell run: count=0 and count=13 added to the original four in one shuffle, 24 processes.",
-  "preregistration": "this assembler was written and committed before alloc_factorial_anchored.json existed. The two questions it answers were declared in the FOUR-cell artifact, in anchor_limitation.declared_followup and in slot_structure.declared_followup_for_the_anchor_run, before that run either.",
+  "preregistration": "the two questions this answers were declared in the FOUR-cell artifact -- anchor_limitation.declared_followup and slot_structure.declared_followup_for_the_anchor_run -- in commits pushed before the anchored run existed at all. That part is witnessed by Git and by the push, since the declaring commits predate the raw file's mtime.",
+  "what_git_can_and_cannot_witness_here": "this field used to say the assembler was 'written and committed before alloc_factorial_anchored.json existed', and that is FALSE (@Reviewer, 53f9258b). 0b44767's own commit body says the sweep had finished and the file was on disk but untracked. So `git ls-tree 0b44767 | grep anchored` returning nothing proves the file was NOT STAGED -- and staging is an author's choice. It does not prove the numbers were unread when the Welch and permutation rules were fixed. That rests on 'none of its numbers have been read', which is a statement about conduct that no tree can witness. The general limit, worth stating once rather than per-instance: a tree-absence check establishes 'not staged at commit time', and where the run has already completed that is compatible with full knowledge of the result. What IS witnessed here: the P1/P2 rules and the six-cell grid were pushed to origin at da64f32 and 613a2e6, before the run was launched.",
   "device_name": "AMD Instinct MI355X",
   "shuffle_seed": 20260805,
   "anchored": true,
@@ -202,7 +203,11 @@
       ],
       "routes_still_disagree": true
     },
-    "permutation_p_for_cellwise_argmin_structure": 0.0,
+    "permutation_p_EXACT": "360/46381007673000 = 1/128836132425",
+    "permutation_p_exact_float": 7.761797728460491e-12,
+    "permutation_p_monte_carlo_hits": 0,
+    "permutation_p_monte_carlo_bound": "<= 1/20001",
+    "why_the_exact_p_and_not_0.0": "the Monte Carlo run scored zero hits in 20000 draws, and the field used to report round(0/20000, 5) = 0.0, which reads as an exact probability and is not one (@Reviewer, 53f9258b). A finite-draw run can only bound p from above, here <= 1/20001. This null happens to admit a closed form -- the multiset permutations of the observed argmins over the processes -- so the exact value is reported instead of any bound. The Monte Carlo hit count is kept so the two are checkable against each other.",
     "what_the_permutation_shuffles": "cell LABELS across processes, holding the observed multiset of argmin values fixed. A null that instead drew argmins uniformly would let a skewed marginal -- if slot 0 is simply slowest most of the time -- manufacture apparent cell structure. This one cannot: it asks only whether the argmins line up with the cells better than chance relabelling, which is the actual claim.",
     "why_this_is_the_sharper_test": "it is a prediction about a nominal outcome with five values, fixed in a pushed commit before the data existed. The four-cell grid could not test it: any rule mapping four cells to four distinct argmins fits perfectly, so no positive rule was identified there.",
     "a_correction_to_how_that_was_stated": "this said 'saturated, zero residual df, six cells give df back', and it is wrong twice (@Reviewer, 0bcf2057 and 034ffd44). It discarded the process rows -- a cell model on 16 of them has 12 within-cell df, and SSE is zero because the argmin agrees perfectly WITHIN each cell, not because there are four cells. And the anchors gave no df back: for the total-only lookup the grid went from 4 cells over 3 distinct totals to 6 over 5, one lack-of-fit contrast either way, with no restricted model declared. The anchors' value is a prediction fixed in advance plus two cells outside the sampled range, which is what refuted the headline and never depended on df."
@@ -248,7 +253,32 @@
       ]
     ],
     "is_monotone_increasing": false,
-    "sign_changes": 4,
+    "sign_changes_TIE_AWARE": 2,
+    "sign_changes_in_stored_order": 4,
+    "why_two_counts": "the two 24 GiB cells are TIED on the x axis, so their order in the stored sequence is insertion order from CELLS -- arbitrary. Counting sign changes across a tie charges it one, which is how the published figure became 4 (@Reviewer, 53f9258b). Swapping the tied pair gives 2; collapsing the tie to its mean, the only order-invariant treatment of two points at one x, also gives 2. TIE_AWARE is the reportable one. Non-monotonicity itself is invariant to all three, which is why the refutation stands and only the count was wrong.",
+    "rate_by_total_prior_GiB_tie_collapsed": [
+      [
+        0.0,
+        4.91798
+      ],
+      [
+        6.5,
+        4.97662
+      ],
+      [
+        12.0,
+        4.90501
+      ],
+      [
+        24.0,
+        4.95333
+      ],
+      [
+        48.0,
+        4.97352
+      ]
+    ],
+    "is_monotone_increasing_tie_collapsed": false,
     "the_refutation": "the four-cell run reported total prior bytes explaining 94.53% of the variance, on a grid whose smallest prefix was 12 GiB. Adding 0 and 6.5 GiB breaks it: the 12 GiB cell is SLOWER than allocating nothing at all, and 6.5 GiB is faster than 12, 24 and 48. A monotone bytes response cannot produce either. The 94.53% was measuring the rising segment of a non-monotone curve and reporting it as the curve.",
     "what_survives": "the prefix does move the rate -- P1 is emphatic and that was the anchor's declared purpose. What does not survive is 'total prior bytes' as the variable it moves with. The four cells themselves replicated closely across sessions, so the earlier DATA is sound; the interpretation placed on it was not, and no amount of within-grid rigour could have caught that. Only a point outside the grid could.",
     "and_the_anchors_cannot_be_read_as_bytes_either": "both anchors sit below the measurement's own 12.0 GiB live set, so their process peak is pinned by the measurement rather than the prefix. That is precisely why they refute a bytes story rather than extend one: they show the rate changing while the quantity the story is about does not."
@@ -393,18 +423,16 @@
       "bytes": 13558
     },
     "AI/assemble_alloc_anchored.py": {
-      "sha256": "c0bd98b73a05ff1860dc71e2a4808cf78232338092b92333b45f6131428ca11d",
-      "bytes": 25704
+      "sha256": "1abd350e6be43af8f42e0a6a0935e7fd97694ecd00bdabf74479a172e219e58b",
+      "bytes": 31565
     }
   },
   "git": {
-    "commit": "2d6248d",
+    "commit": "9ab5b56",
     "worktree_dirty": true,
     "worktree_dirty_paths": [
-      "AI/assemble_alloc_anchored.py",
-      "AI/assemble_alloc_factorial.py",
       "AI/flydsl_rmsnorm_notes.md",
-      "I/artifacts/alloc_factorial_assembled.json"
+      "I/assemble_alloc_anchored.py"
     ]
   }
 }

@@ -68,7 +68,8 @@ import math
 import random
 import statistics
 import subprocess
-from collections import defaultdict
+from collections import Counter, defaultdict
+from fractions import Fraction
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -253,11 +254,57 @@ def _p2_argmin(rows):
         s = _score(perm)
         if s >= obs:
             ge += 1
+
+    # The Monte Carlo p is EXACTLY zero hits, and `round(0/20000, 5)` prints
+    # 0.0 -- a value that reads as an exact probability when it is a bound.
+    # @Reviewer (53f9258b) is right that this needed fixing. Here the exact
+    # figure is available in closed form, so no bound is necessary.
+    #
+    # Under the label-shuffle null the argmin multiset is fixed, so the sample
+    # space is the multiset permutations of the observed values over the 24
+    # processes: 24! / prod(count_v!).
+    #
+    # Matching the observed score requires all six cells unanimous. A value
+    # appearing count_v times must then fill exactly count_v/reps whole cells,
+    # so a favourable arrangement is an assignment of values to cells, and
+    # arrangements differing only by permuting the cells that share one value
+    # are the same assignment: ncells! / prod((count_v/reps)!). Note `distinct`
+    # is entailed by unanimity here rather than free.
+    #
+    # The first version of this computed `6!/max(doubled,1)!` off an ad-hoc
+    # count of values appearing exactly twice per cell. It returned 720 instead
+    # of 360 -- it detected the one doubled value and then divided by 1! -- and
+    # only surfaced because the result disagreed with @Reviewer's independently
+    # derived 1/128,836,132,425. A closed form is not self-checking; this one is
+    # written per-value so there is no special case to get wrong.
+    counts = Counter(vals)
+    reps = len(vals) // len(per_cell)
+    denom = math.factorial(len(vals))
+    for k in counts.values():
+        denom //= math.factorial(k)
+    favourable = math.factorial(len(per_cell))
+    for k in counts.values():
+        favourable //= math.factorial(k // reps)
+    exact = Fraction(favourable, denom)
+
     return {
         "per_cell": per_cell,
         "prediction_A_zero_differs_from_every_count_gt_0": pred_a,
         "prediction_B_routes_to_24GiB_still_disagree": pred_b,
-        "permutation_p_for_cellwise_argmin_structure": round(ge / PERM_DRAWS, 5),
+        "permutation_p_EXACT": f"{favourable}/{denom} = 1/{denom // favourable}",
+        "permutation_p_exact_float": float(exact),
+        "permutation_p_monte_carlo_hits": ge,
+        "permutation_p_monte_carlo_bound": f"<= 1/{PERM_DRAWS + 1}",
+        "why_the_exact_p_and_not_0.0": (
+            "the Monte Carlo run scored zero hits in "
+            f"{PERM_DRAWS} draws, and the field used to report round(0/{PERM_DRAWS}, 5) "
+            "= 0.0, which reads as an exact probability and is not one "
+            "(@Reviewer, 53f9258b). A finite-draw run can only bound p from above, "
+            f"here <= 1/{PERM_DRAWS + 1}. This null happens to admit a closed form -- "
+            "the multiset permutations of the observed argmins over the processes -- "
+            "so the exact value is reported instead of any bound. The Monte Carlo hit "
+            "count is kept so the two are checkable against each other."
+        ),
         "what_the_permutation_shuffles": (
             "cell LABELS across processes, holding the observed multiset of argmin "
             "values fixed. A null that instead drew argmins uniformly would let a "
@@ -311,10 +358,42 @@ def _monotonicity(rows):
     ordered = sorted(mu, key=lambda c: tot[c])
     seq = [(c, round(tot[c], 2), round(mu[c], 5)) for c in ordered]
     rises = [b[2] > a[2] for a, b in itertools.pairwise(seq)]
+
+    # Two cells reach 24 GiB by different routes, so the x axis has a TIE and
+    # their relative order in `seq` is insertion order -- an arbitrary artifact
+    # of how CELLS is written, not a property of the data. Counting sign changes
+    # on that ordering charges the tie one, and @Reviewer (53f9258b) is right
+    # that the published 4 was inflated by exactly that. The tie-aware count
+    # collapses the tied total to its mean, which is the only order-invariant
+    # thing to do with two points at one x. Both are reported: the refutation
+    # does not depend on which is used -- non-monotone holds on the stored
+    # order, on the swapped order, and on the collapse -- but the NUMBER does,
+    # and the number was published.
+    collapsed = []
+    by_total = {}
+    for c, g, r in seq:
+        by_total.setdefault(g, []).append(r)
+    for g in sorted(by_total):
+        collapsed.append((g, statistics.fmean(by_total[g])))
+    crises = [b[1] > a[1] for a, b in itertools.pairwise(collapsed)]
+
     return {
         "rate_by_total_prior_GiB": seq,
         "is_monotone_increasing": all(rises),
-        "sign_changes": sum(1 for a, b in itertools.pairwise(rises) if a != b),
+        "sign_changes_TIE_AWARE": sum(1 for a, b in itertools.pairwise(crises) if a != b),
+        "sign_changes_in_stored_order": sum(1 for a, b in itertools.pairwise(rises) if a != b),
+        "why_two_counts": (
+            "the two 24 GiB cells are TIED on the x axis, so their order in the stored "
+            "sequence is insertion order from CELLS -- arbitrary. Counting sign changes "
+            "across a tie charges it one, which is how the published figure became 4 "
+            "(@Reviewer, 53f9258b). Swapping the tied pair gives 2; collapsing the tie "
+            "to its mean, the only order-invariant treatment of two points at one x, "
+            "also gives 2. TIE_AWARE is the reportable one. Non-monotonicity itself is "
+            "invariant to all three, which is why the refutation stands and only the "
+            "count was wrong."
+        ),
+        "rate_by_total_prior_GiB_tie_collapsed": [(g, round(r, 5)) for g, r in collapsed],
+        "is_monotone_increasing_tie_collapsed": all(crises),
         "the_refutation": (
             "the four-cell run reported total prior bytes explaining 94.53% of the "
             "variance, on a grid whose smallest prefix was 12 GiB. Adding 0 and 6.5 GiB "
@@ -540,10 +619,26 @@ def main():
             "original four in one shuffle, 24 processes."
         ),
         "preregistration": (
-            "this assembler was written and committed before alloc_factorial_anchored.json "
-            "existed. The two questions it answers were declared in the FOUR-cell "
-            "artifact, in anchor_limitation.declared_followup and in "
-            "slot_structure.declared_followup_for_the_anchor_run, before that run either."
+            "the two questions this answers were declared in the FOUR-cell artifact -- "
+            "anchor_limitation.declared_followup and "
+            "slot_structure.declared_followup_for_the_anchor_run -- in commits pushed "
+            "before the anchored run existed at all. That part is witnessed by Git and "
+            "by the push, since the declaring commits predate the raw file's mtime."
+        ),
+        "what_git_can_and_cannot_witness_here": (
+            "this field used to say the assembler was 'written and committed before "
+            "alloc_factorial_anchored.json existed', and that is FALSE (@Reviewer, "
+            "53f9258b). 0b44767's own commit body says the sweep had finished and the "
+            "file was on disk but untracked. So `git ls-tree 0b44767 | grep anchored` "
+            "returning nothing proves the file was NOT STAGED -- and staging is an "
+            "author's choice. It does not prove the numbers were unread when the Welch "
+            "and permutation rules were fixed. That rests on 'none of its numbers have "
+            "been read', which is a statement about conduct that no tree can witness. "
+            "The general limit, worth stating once rather than per-instance: a "
+            "tree-absence check establishes 'not staged at commit time', and where the "
+            "run has already completed that is compatible with full knowledge of the "
+            "result. What IS witnessed here: the P1/P2 rules and the six-cell grid were "
+            "pushed to origin at da64f32 and 613a2e6, before the run was launched."
         ),
         "device_name": raw.get("device_name"),
         "shuffle_seed": raw.get("shuffle_seed"),
