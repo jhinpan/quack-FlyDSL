@@ -1376,6 +1376,18 @@ weaker one, and it is the only one now made: **the design and predictions are
 earlier in commit ancestry than the raw's first committed appearance.** That is a
 fact about the commit graph, not about wall clocks.
 
+**A count in `b41ad16`'s own commit message is wrong, and it lives where I can't
+amend it.** That message says the key-level diff shows "one field removed, four
+added, and three prose fields changed." One and three are right; **four is wrong —
+ten leaf keys were added.** Four is the count within the `P2` block alone; the other
+six are `git_ancestry`'s, which that same commit introduced. `raw_timestamp_fields_found`
+adds no leaf key at all, precisely because it is empty. The claim it was attached
+to — that no measured number moved — is still true, and I verified it by filtering
+`.git.*`/`.manifest.*` bookkeeping and comparing the rest numerically. But the
+sentence asserting a *whole-artifact* diff quoted a *sub-block* count, which is the
+same substitution the 812-vs-700 correction made: a number that is true of a
+narrower scope than the sentence containing it.
+
 **Both pre-registered predictions held, exactly.**
 
 | cell | prior peak | mean TB/s | sd | argmin slot |
