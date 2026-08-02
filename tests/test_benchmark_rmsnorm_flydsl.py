@@ -298,6 +298,38 @@ def test_level_one_entries_are_dropped_without_being_called_degraded(tmp_path):
     assert "degraded" not in provenance
 
 
+def test_provenance_reaches_the_artifact_and_survives_json(tmp_path):
+    # @Autotune's handover: source/reason have to be *in* environment.json, not
+    # merely computed. A provenance dict that never leaves the process cannot
+    # tell a later reader which of the four LLC paths a run took, and that
+    # reader is the whole audience for this field.
+    #
+    # It also has to survive json.dumps. `degraded` became a list and
+    # `skipped_cache_entries` holds strings for exactly that reason -- a set,
+    # or a tuple keyed by node object, would raise or silently reshape at write
+    # time, i.e. at the one moment nobody is watching.
+    root = _gfx950_node(tmp_path, ["level 2\nsize 4096\n", "level 3\nsize 262144\n"])
+    _, provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), root)
+    environment = {"last_level_cache_provenance": provenance}
+    _, path = benchmark.write_artifacts(tmp_path, [], environment)
+
+    written = json.loads(path.read_text(encoding="utf-8"))["last_level_cache_provenance"]
+    assert written == {
+        "source": "kfd_topology",
+        "matched_by": "unique_id",
+        "matched_node": provenance["matched_node"],
+    }
+
+    # And the degraded shape, which is the one a reader acts on.
+    bad_root = tmp_path / "bad"
+    bad_root.mkdir()
+    bad = _gfx950_node(bad_root, ["level 2\nsize 4096\n", "level 3\nsize 0\n"])
+    _, degraded = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), bad)
+    round_tripped = json.loads(json.dumps(degraded))
+    assert round_tripped["degraded"] == ["unparseable_cache_entries"]
+    assert round_tripped["skipped_cache_entries"] == ["1:nonpositive_size_level3"]
+
+
 def test_gfx950_refuses_a_clean_read_that_reports_no_mall(tmp_path):
     # Distinct from the case above: nothing failed to parse, KFD simply reports
     # only a 4 MiB L2. Enumerating failure reasons would let this through,
