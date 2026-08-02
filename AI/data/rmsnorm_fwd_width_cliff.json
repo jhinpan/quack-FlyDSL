@@ -3,20 +3,20 @@
   "generator": "AI/probe_rmsnorm_width_cliff.py",
   "dtype": "bfloat16",
   "device": "AMD Instinct MI355X",
-  "device_uuid": "66636163-3034-3537-3439-313935646234",
+  "device_uuid": "66353633-3535-3138-3838-643861663866",
   "compute_units": 256,
-  "HIP_VISIBLE_DEVICES": "6",
+  "HIP_VISIBLE_DEVICES": "5",
   "torch": "2.9.1+rocm7.2.0.git7e1940d4",
   "hip": "7.2.26015-fc0010cf6a",
   "python": "3.10.12",
   "host": "mia1-p02-g23",
-  "commit": "fa211e29cd7d76b4558d816fa775930b95c4eee4",
+  "commit": "76128991d5bf833a1369420a79e1f5b48c26866d",
   "worktree_dirty": true,
   "shipped_max_n": 8192,
   "source_sha256_16": {
     "quack/rmsnorm_flydsl.py": "0c44997dc710d8e5",
     "quack/flydsl/rmsnorm_config.py": "0f0d3adb593bc518",
-    "AI/probe_rmsnorm_width_cliff.py": "1a0a5f7962577c76"
+    "AI/probe_rmsnorm_width_cliff.py": "d2ed24357f7051fa"
   },
   "protocol": {
     "reps_per_round": 20,
@@ -31,35 +31,35 @@
     "bytes_moved": "2 * m * n * 2 (x in, out out); the bf16 weight is omitted, worth at most 0.0024% at the narrowest shape here",
     "exclusivity": "single visible device; rocm-smi utilisation at start recorded below"
   },
-  "exclusivity_check": "\n\n============================ ROCm System Management Interface ============================\n=================================== % time GPU is busy ===================================\nGPU[0]\t\t: GPU use (%): 0\nGPU[0]\t\t: GFX Activity: 834515766\nGPU[1]\t\t: GPU use (%): 0\nGPU[1]\t\t: GFX Activity: 908801960\nGPU[2]\t\t: GPU use (%): 0\nGPU[2]\t\t: GFX Activity: 830586660\nGPU[3]\t\t: GPU use (%): 0\nGPU[3]\t\t: GFX Activity: 2228480558\nGPU[4]\t\t: GPU use (%): 0\nGPU[4]\t\t: GFX Activity: 898555671\nGPU[5]\t\t: GPU use (%): 0\nGPU[5]\t\t: GFX Activity: 872877544\nGPU[6]\t\t: GPU use (%): 0\nGPU[6]\t\t: GFX Activity: 852263825\nGPU[7]\t\t: GPU use (%): 0\nGPU[7]\t\t: GFX Activity: 865682824\n==========================================================================================\n================================== End of ROCm SMI Log ===================================\n",
+  "exclusivity_check": "\n\n============================ ROCm System Management Interface ============================\n=================================== % time GPU is busy ===================================\nGPU[0]\t\t: GPU use (%): 0\nGPU[0]\t\t: GFX Activity: 835406421\nGPU[1]\t\t: GPU use (%): 0\nGPU[1]\t\t: GFX Activity: 909673539\nGPU[2]\t\t: GPU use (%): 0\nGPU[2]\t\t: GFX Activity: 831451276\nGPU[3]\t\t: GPU use (%): 0\nGPU[3]\t\t: GFX Activity: 2229522491\nGPU[4]\t\t: GPU use (%): 0\nGPU[4]\t\t: GFX Activity: 901510826\nGPU[5]\t\t: GPU use (%): 0\nGPU[5]\t\t: GFX Activity: 873720514\nGPU[6]\t\t: GPU use (%): 0\nGPU[6]\t\t: GFX Activity: 853787201\nGPU[7]\t\t: GPU use (%): 0\nGPU[7]\t\t: GFX Activity: 866783236\n==========================================================================================\n================================== End of ROCm SMI Log ===================================\n",
   "ceiling_probe": {
     "name": "two_read_one_write",
-    "why_not_copy": "copy is allocator-state dependent (4.718 / 5.363 / 4.833 TB/s for the same buffer size depending only on residency) and cannot be a denominator; see copy_probe_caveat in the roofline sidecar. two_read_one_write reproduces across processes to better than 1%.",
+    "why_not_copy": "copy cannot be a denominator: measured on device 5, five identically-sized and identically-filled buffers read by one destination spread ~16% at 512 MiB and ~5% at 2 GiB, collapsing to <1% at 64 MiB where they fit the MALL working set. Every ceiling this sweep uses lives in the past-MALL regime, so copy would contribute that spread directly to share_of_ceiling_pct. Live figures: copy_variability in the roofline sidecar. This field previously read 'allocator-state dependent (4.718 / 5.363 / 4.833 TB/s ... depending only on residency)' and asserted that two_read_one_write 'reproduces across processes to better than 1%'. Both were hand-typed and both are wrong: allocation history moves copy by ~0.5%, and two_read_one_write spans 1.37% over three processes against write's 0.50%. The ordering against copy's 13.35% is what justifies the choice, and it holds by an order of magnitude.",
     "measured_before_sweep_allocations": true,
     "samples_us": [
-      265.1400566101074,
-      265.41404724121094,
-      265.548038482666,
-      267.18225479125977,
-      265.2782440185547
+      265.677547454834,
+      264.76550102233887,
+      264.68350887298584,
+      265.1254892349243,
+      265.47560691833496
     ],
-    "min_us": 265.1400566101074,
-    "median_us": 265.41404724121094,
-    "max_us": 267.18225479125977,
-    "spread_pct_of_min": 0.7702337425971919,
+    "min_us": 264.68350887298584,
+    "median_us": 265.1254892349243,
+    "max_us": 265.677547454834,
+    "spread_pct_of_min": 0.3755574293542994,
     "bytes_moved": 1610612736,
-    "TBps_at_min": 6.074573403174727
+    "TBps_at_min": 6.08505132358997
   },
   "dispatch_floor": {
     "per_call_us_by_calls_per_graph": {
-      "K=1": 9.474074840545654,
-      "K=4": 3.5390499979257584,
-      "K=16": 2.091249916702509,
-      "K=64": 1.6053281724452972,
-      "K=256": 1.4890761813148856
+      "K=1": 9.520074725151062,
+      "K=4": 3.5710249096155167,
+      "K=16": 2.0850312430411577,
+      "K=64": 1.6018906608223915,
+      "K=256": 1.479464815929532
     },
-    "amortised_floor_us": 1.4890761813148856,
-    "single_call_graph_floor_us": 9.474074840545654,
+    "amortised_floor_us": 1.479464815929532,
+    "single_call_graph_floor_us": 9.520074725151062,
     "what": "a 64-element add_ inside a graph; 512 bytes moved, so this is dispatch cost, not work. The K=1 value is what a naive one-call-per-graph harness pays; the K=256 value is the irreducible per-kernel floor."
   },
   "ceiling_caveat": "share_of_ceiling_pct is a share of THIS measured probe on THIS device, not of a hardware constant. achieved_TBps is computed from bytes and time alone and is the figure to quote if the denominator is in doubt. Note also that the ceiling probe's 512 MiB working set is past the MALL while some swept rows are not: for those rows the ratio compares a cache-resident numerator against a DRAM-resident denominator and is not a meaningful efficiency.",
@@ -80,31 +80,31 @@
         "elems_per_thread": 32,
         "working_set_bytes": 134217728,
         "fits_in_mall": true,
-        "eager_min_us": 31.81230127811432,
-        "eager_achieved_TBps": 4.219051203703292,
-        "eager_share_of_ceiling_pct": 69.45427972766463,
-        "host_only_us": 30.101000447757542,
+        "eager_min_us": 31.06819987297058,
+        "eager_achieved_TBps": 4.3200999268956615,
+        "eager_share_of_ceiling_pct": 70.9952915293893,
+        "host_only_us": 29.96895054820925,
         "host_bound": true,
         "graph_calls_captured": 15,
-        "graph_per_call_us": 21.301533778508503,
+        "graph_per_call_us": 21.74149950345357,
         "graph_samples_us": [
-          21.941532691319782,
-          21.68286641438802,
-          21.681533257166546,
-          21.5201993783315,
-          21.301533778508503
+          22.057499488194782,
+          21.958800156911213,
+          22.061467170715332,
+          21.74149950345357,
+          21.756166219711304
         ],
-        "graph_achieved_TBps": 6.300848070171109,
-        "graph_share_of_ceiling_pct": 103.72494744862453,
-        "dispatch_floor_pct_of_graph_time": 6.99046461535667,
+        "graph_achieved_TBps": 6.173342734648083,
+        "graph_share_of_ceiling_pct": 101.45095589770679,
+        "dispatch_floor_pct_of_graph_time": 6.804796585877269,
         "eager_rounds_us": [
-          32.55029916763306,
-          33.29029977321625,
-          32.32429921627045,
-          32.568299770355225,
-          31.81230127811432
+          33.13019871711731,
+          31.99020028114319,
+          32.554250955581665,
+          31.49619996547699,
+          31.06819987297058
         ],
-        "eager_spread_pct_of_min": 4.645996786528413
+        "eager_spread_pct_of_min": 6.637007784737066
       },
       {
         "m": 4096,
@@ -119,31 +119,31 @@
         "elems_per_thread": 128,
         "working_set_bytes": 536870912,
         "fits_in_mall": false,
-        "eager_min_us": 107.15899467468262,
-        "eager_achieved_TBps": 5.010040581566235,
-        "eager_share_of_ceiling_pct": 82.47559538827632,
-        "host_only_us": 30.34094988834113,
+        "eager_min_us": 107.86080360412598,
+        "eager_achieved_TBps": 4.977442166761896,
+        "eager_share_of_ceiling_pct": 81.79786664190988,
+        "host_only_us": 29.888952849432826,
         "host_bound": false,
         "graph_calls_captured": 3,
-        "graph_per_call_us": 106.33535874195587,
+        "graph_per_call_us": 104.39971777108998,
         "graph_samples_us": [
-          107.54766219701521,
-          107.0420314104129,
-          107.4225352360652,
-          107.115843357184,
-          106.33535874195587
+          106.73305315849109,
+          105.49305646847456,
+          105.7874361673991,
+          104.78435418544672,
+          104.39971777108998
         ],
-        "graph_achieved_TBps": 5.048846577015133,
-        "graph_share_of_ceiling_pct": 83.11442206586024,
-        "dispatch_floor_pct_of_graph_time": 1.4003584498439774,
+        "graph_achieved_TBps": 5.142455587640185,
+        "graph_share_of_ceiling_pct": 84.50965019316081,
+        "dispatch_floor_pct_of_graph_time": 1.4171157236013339,
         "eager_rounds_us": [
-          109.96700525283813,
-          110.14300584793091,
-          109.76904630661011,
-          108.77104997634888,
-          107.15899467468262
+          109.9228024482727,
+          109.4307541847229,
+          108.65675210952759,
+          109.00880098342896,
+          107.86080360412598
         ],
-        "eager_spread_pct_of_min": 2.7846576783472696
+        "eager_spread_pct_of_min": 1.9117221226301446
       },
       {
         "m": 4096,
@@ -158,31 +158,31 @@
         "elems_per_thread": 192,
         "working_set_bytes": 805306368,
         "fits_in_mall": false,
-        "eager_min_us": 173.1495976448059,
-        "eager_achieved_TBps": 4.650928324141892,
-        "eager_share_of_ceiling_pct": 76.56386737727456,
-        "host_only_us": 30.15550028067082,
+        "eager_min_us": 172.55125045776367,
+        "eager_achieved_TBps": 4.667056111523917,
+        "eager_share_of_ceiling_pct": 76.69707062997317,
+        "host_only_us": 29.84495076816529,
         "host_bound": false,
         "graph_calls_captured": 2,
-        "graph_per_call_us": 171.11762762069702,
+        "graph_per_call_us": 169.54114437103271,
         "graph_samples_us": [
-          172.0576286315918,
-          171.81962728500366,
-          171.58859968185425,
-          172.24363088607788,
-          171.11762762069702
+          171.78317308425903,
+          170.82817554473877,
+          169.98217105865479,
+          170.03517150878906,
+          169.54114437103271
         ],
-        "graph_achieved_TBps": 4.706156689976203,
-        "graph_share_of_ceiling_pct": 77.47304012355247,
-        "dispatch_floor_pct_of_graph_time": 0.8702061862472776,
+        "graph_achieved_TBps": 4.749917024493037,
+        "graph_share_of_ceiling_pct": 78.05878326907438,
+        "dispatch_floor_pct_of_graph_time": 0.8726287777625199,
         "eager_rounds_us": [
-          177.02569961547852,
-          176.4836549758911,
-          173.95164966583252,
-          173.30565452575684,
-          173.1495976448059
+          176.40329599380493,
+          177.22530364990234,
+          174.52324628829956,
+          173.63524436950684,
+          172.55125045776367
         ],
-        "eager_spread_pct_of_min": 2.2385856065481198
+        "eager_spread_pct_of_min": 2.7087912604161426
       },
       {
         "m": 4096,
@@ -197,27 +197,27 @@
         "elems_per_thread": 224,
         "working_set_bytes": 939524096,
         "fits_in_mall": false,
-        "eager_min_us": 405.7298183441162,
-        "eager_achieved_TBps": 2.3156397521740706,
-        "eager_share_of_ceiling_pct": 38.12020365024905,
-        "host_only_us": 30.36900016013533,
+        "eager_min_us": 396.20275497436523,
+        "eager_achieved_TBps": 2.3713214615602265,
+        "eager_share_of_ceiling_pct": 38.96962137964728,
+        "host_only_us": 29.72744987346232,
         "host_bound": false,
         "graph_calls_captured": 1,
-        "graph_per_call_us": 409.5358371734619,
+        "graph_per_call_us": 398.55079650878906,
         "graph_samples_us": [
-          409.5358371734619
+          398.55079650878906
         ],
-        "graph_achieved_TBps": 2.2941193681227405,
-        "graph_share_of_ceiling_pct": 37.76593376785562,
-        "dispatch_floor_pct_of_graph_time": 0.3636009467674929,
+        "graph_achieved_TBps": 2.3573509430416637,
+        "graph_share_of_ceiling_pct": 38.74003385810242,
+        "dispatch_floor_pct_of_graph_time": 0.37121110505594135,
         "eager_rounds_us": [
-          405.7298183441162,
-          406.099796295166,
-          406.49380683898926,
-          406.3918113708496,
-          406.3878059387207
+          396.20275497436523,
+          396.98073863983154,
+          397.14674949645996,
+          396.38874530792236,
+          396.72675132751465
         ],
-        "eager_spread_pct_of_min": 0.1882998143915261
+        "eager_spread_pct_of_min": 0.23826046392731523
       },
       {
         "m": 4096,
@@ -232,27 +232,27 @@
         "elems_per_thread": 256,
         "working_set_bytes": 1073741824,
         "fits_in_mall": false,
-        "eager_min_us": 450.44822692871094,
-        "eager_achieved_TBps": 2.3837186158353623,
-        "eager_share_of_ceiling_pct": 39.24092208005207,
-        "host_only_us": 29.783498030155897,
+        "eager_min_us": 443.6531066894531,
+        "eager_achieved_TBps": 2.420228344645842,
+        "eager_share_of_ceiling_pct": 39.77334316414592,
+        "host_only_us": 29.428399284370244,
         "host_bound": false,
         "graph_calls_captured": 1,
-        "graph_per_call_us": 446.49620056152344,
+        "graph_per_call_us": 446.2712287902832,
         "graph_samples_us": [
-          446.49620056152344
+          446.2712287902832
         ],
-        "graph_achieved_TBps": 2.404817381759663,
-        "graph_share_of_ceiling_pct": 39.58825125897473,
-        "dispatch_floor_pct_of_graph_time": 0.3335025425618831,
+        "graph_achieved_TBps": 2.4060296849308758,
+        "graph_share_of_ceiling_pct": 39.54000643517007,
+        "dispatch_floor_pct_of_graph_time": 0.3315169610955984,
         "eager_rounds_us": [
-          450.4622459411621,
-          450.72827339172363,
-          451.2502670288086,
-          450.52223205566406,
-          450.44822692871094
+          443.6531066894531,
+          444.8371410369873,
+          444.2411422729492,
+          444.23909187316895,
+          444.417142868042
         ],
-        "eager_spread_pct_of_min": 0.1780537811340057
+        "eager_spread_pct_of_min": 0.26688291588206464
       },
       {
         "m": 4096,
@@ -267,27 +267,27 @@
         "elems_per_thread": 384,
         "working_set_bytes": 1610612736,
         "fits_in_mall": false,
-        "eager_min_us": 672.6203441619873,
-        "eager_achieved_TBps": 2.394534673206548,
-        "eager_share_of_ceiling_pct": 39.41897667999374,
-        "host_only_us": 29.82600126415491,
+        "eager_min_us": 672.6907730102539,
+        "eager_achieved_TBps": 2.394283972102958,
+        "eager_share_of_ceiling_pct": 39.346980736563665,
+        "host_only_us": 28.907449450343847,
         "host_bound": false,
         "graph_calls_captured": 1,
-        "graph_per_call_us": 676.0223865509033,
+        "graph_per_call_us": 673.1968402862549,
         "graph_samples_us": [
-          676.0223865509033
+          673.1968402862549
         ],
-        "graph_achieved_TBps": 2.3824843201087154,
-        "graph_share_of_ceiling_pct": 39.220603028083715,
-        "dispatch_floor_pct_of_graph_time": 0.22027024710116766,
+        "graph_achieved_TBps": 2.3924840991754204,
+        "graph_share_of_ceiling_pct": 39.317402137603295,
+        "dispatch_floor_pct_of_graph_time": 0.2197670469309449,
         "eager_rounds_us": [
-          672.6783275604248,
-          674.1583347320557,
-          673.2044219970703,
-          672.6203441619873,
-          672.7283954620361
+          672.6907730102539,
+          673.0427265167236,
+          673.6407279968262,
+          672.9827404022217,
+          672.932767868042
         ],
-        "eager_spread_pct_of_min": 0.22865656434827739
+        "eager_spread_pct_of_min": 0.14121718695817242
       }
     ]
   },
@@ -307,31 +307,31 @@
         "elems_per_thread": 32,
         "working_set_bytes": 134217728,
         "fits_in_mall": true,
-        "eager_min_us": 30.660301446914673,
-        "eager_achieved_TBps": 4.377573659293107,
-        "eager_share_of_ceiling_pct": 72.0638861159415,
-        "host_only_us": 29.774001450277865,
+        "eager_min_us": 30.170199275016785,
+        "eager_achieved_TBps": 4.448685498446226,
+        "eager_share_of_ceiling_pct": 73.10843018200963,
+        "host_only_us": 29.108449234627187,
         "host_bound": true,
         "graph_calls_captured": 15,
-        "graph_per_call_us": 21.56686584154765,
+        "graph_per_call_us": 21.65213425954183,
         "graph_samples_us": [
-          22.049566109975178,
-          21.98819915453593,
-          21.888234217961628,
-          21.597532431284588,
-          21.56686584154765
+          21.740166346232098,
+          21.872166792551678,
+          21.67080044746399,
+          21.65213425954183,
+          21.733466784159344
         ],
-        "graph_achieved_TBps": 6.2233302226712635,
-        "graph_share_of_ceiling_pct": 102.44884388784885,
-        "dispatch_floor_pct_of_graph_time": 6.9044625781750995,
+        "graph_achieved_TBps": 6.198822083363533,
+        "graph_share_of_ceiling_pct": 101.86967625618057,
+        "dispatch_floor_pct_of_graph_time": 6.832882145452013,
         "eager_rounds_us": [
-          31.396299600601196,
-          31.390249729156494,
-          31.288298964500427,
-          31.130298972129822,
-          30.660301446914673
+          31.292250752449036,
+          30.170199275016785,
+          30.55025041103363,
+          30.83224892616272,
+          30.30019998550415
         ],
-        "eager_spread_pct_of_min": 2.4004922292131816
+        "eager_spread_pct_of_min": 3.7190721453450752
       },
       {
         "m": 2048,
@@ -346,31 +346,31 @@
         "elems_per_thread": 32,
         "working_set_bytes": 67108864,
         "fits_in_mall": true,
-        "eager_min_us": 30.56424856185913,
-        "eager_achieved_TBps": 2.195665431269414,
-        "eager_share_of_ceiling_pct": 36.145179019845294,
-        "host_only_us": 29.66350002679974,
+        "eager_min_us": 29.502201080322266,
+        "eager_achieved_TBps": 2.2747070232926143,
+        "eager_share_of_ceiling_pct": 37.38188722376488,
+        "host_only_us": 28.754450613632798,
         "host_bound": true,
         "graph_calls_captured": 24,
-        "graph_per_call_us": 11.773458371559778,
+        "graph_per_call_us": 11.788437763849894,
         "graph_samples_us": [
-          11.9401253759861,
-          11.828437447547913,
-          11.886770526568094,
-          11.81429127852122,
-          11.773458371559778
+          11.96510468920072,
+          11.95591688156128,
+          11.865083128213882,
+          11.788437763849894,
+          11.790916323661804
         ],
-        "graph_achieved_TBps": 5.700012849419814,
-        "graph_share_of_ceiling_pct": 93.8339611871484,
-        "dispatch_floor_pct_of_graph_time": 12.647738109916201,
+        "graph_achieved_TBps": 5.692769927987765,
+        "graph_share_of_ceiling_pct": 93.55335929408773,
+        "dispatch_floor_pct_of_graph_time": 12.550134679138052,
         "eager_rounds_us": [
-          30.56424856185913,
-          31.09630048274994,
-          30.80030083656311,
-          30.610299110412598,
-          31.45430088043213
+          30.426201224327087,
+          30.384251475334167,
+          29.502201080322266,
+          30.114200711250305,
+          29.62625026702881
         ],
-        "eager_spread_pct_of_min": 2.9120700179218106
+        "eager_spread_pct_of_min": 3.1319701926278394
       },
       {
         "m": 1024,
@@ -385,31 +385,31 @@
         "elems_per_thread": 32,
         "working_set_bytes": 33554432,
         "fits_in_mall": true,
-        "eager_min_us": 30.43625056743622,
-        "eager_achieved_TBps": 1.102449591340266,
-        "eager_share_of_ceiling_pct": 18.1485928010039,
-        "host_only_us": 29.679498402401805,
+        "eager_min_us": 29.614201188087463,
+        "eager_achieved_TBps": 1.1330520714331314,
+        "eager_share_of_ceiling_pct": 18.620254968772716,
+        "host_only_us": 28.660448151640594,
         "host_bound": true,
         "graph_calls_captured": 34,
-        "graph_per_call_us": 6.55241179115632,
+        "graph_per_call_us": 6.551220574799706,
         "graph_samples_us": [
-          6.6794704865006835,
-          6.581838078358594,
-          6.583588088259978,
-          6.600661751101999,
-          6.55241179115632
+          6.659456035670112,
+          6.582396871903363,
+          6.5600442535736985,
+          6.551220574799706,
+          6.627117447993335
         ],
-        "graph_achieved_TBps": 5.120928456494119,
-        "graph_share_of_ceiling_pct": 84.30103838761404,
-        "dispatch_floor_pct_of_graph_time": 22.725619646260125,
+        "graph_achieved_TBps": 5.121859601105841,
+        "graph_share_of_ceiling_pct": 84.17118161764527,
+        "dispatch_floor_pct_of_graph_time": 22.58304080953288,
         "eager_rounds_us": [
-          30.43625056743622,
-          30.688300728797913,
-          30.994299054145813,
-          30.792298913002014,
-          30.510249733924866
+          30.78620135784149,
+          29.85824942588806,
+          30.2482008934021,
+          30.020201206207275,
+          29.614201188087463
         ],
-        "eager_spread_pct_of_min": 1.8334994498522477
+        "eager_spread_pct_of_min": 3.957561314284156
       },
       {
         "m": 512,
@@ -424,31 +424,31 @@
         "elems_per_thread": 32,
         "working_set_bytes": 16777216,
         "fits_in_mall": true,
-        "eager_min_us": 30.236300826072693,
-        "eager_achieved_TBps": 0.55486999208359,
-        "eager_share_of_ceiling_pct": 9.134303847470191,
-        "host_only_us": 29.40199919976294,
+        "eager_min_us": 29.77220118045807,
+        "eager_achieved_TBps": 0.5635195025825722,
+        "eager_share_of_ceiling_pct": 9.260718975335038,
+        "host_only_us": 28.696449589915574,
         "host_bound": true,
-        "graph_calls_captured": 36,
-        "graph_per_call_us": 4.338374982277553,
+        "graph_calls_captured": 37,
+        "graph_per_call_us": 4.33787824334325,
         "graph_samples_us": [
-          4.411708149645063,
-          4.378375079896715,
-          4.356708377599716,
-          4.338374982277553,
-          4.356152895424101
+          4.361121638401134,
+          4.349216416075423,
+          4.355716141494545,
+          4.341108170715538,
+          4.33787824334325
         ],
-        "graph_achieved_TBps": 3.867165947742103,
-        "graph_share_of_ceiling_pct": 63.66152305808047,
-        "dispatch_floor_pct_of_graph_time": 34.32336271986229,
+        "graph_achieved_TBps": 3.867608784489446,
+        "graph_share_of_ceiling_pct": 63.559180996483214,
+        "dispatch_floor_pct_of_graph_time": 34.105724802208655,
         "eager_rounds_us": [
-          30.43625056743622,
-          30.79630136489868,
-          30.620300769805908,
-          30.346301198005676,
-          30.236300826072693
+          30.142250657081604,
+          30.184200406074524,
+          29.826250672340393,
+          29.77220118045807,
+          30.014199018478394
         ],
-        "eager_spread_pct_of_min": 1.8520801934312732
+        "eager_spread_pct_of_min": 1.3838386457192284
       },
       {
         "m": 256,
@@ -463,31 +463,31 @@
         "elems_per_thread": 32,
         "working_set_bytes": 8388608,
         "fits_in_mall": true,
-        "eager_min_us": 29.77229952812195,
-        "eager_achieved_TBps": 0.28175882054647455,
-        "eager_share_of_ceiling_pct": 4.638330987970615,
-        "host_only_us": 29.56300158984959,
+        "eager_min_us": 29.21620011329651,
+        "eager_achieved_TBps": 0.287121801174352,
+        "eager_share_of_ceiling_pct": 4.718477887955759,
+        "host_only_us": 28.452949482016265,
         "host_bound": true,
-        "graph_calls_captured": 37,
-        "graph_per_call_us": 3.4178785375646643,
+        "graph_calls_captured": 39,
+        "graph_per_call_us": 3.4092565377553306,
         "graph_samples_us": [
-          3.47085136014062,
-          3.4394864294980025,
-          3.4443514572607503,
-          3.4357160329818726,
-          3.4178785375646643
+          3.4492562214533486,
+          3.4184872339933348,
+          3.421564132739336,
+          3.4092565377553306,
+          3.415923088024824
         ],
-        "graph_achieved_TBps": 2.4543318048912064,
-        "graph_share_of_ceiling_pct": 40.403360729965165,
-        "dispatch_floor_pct_of_graph_time": 43.56726445802532,
+        "graph_achieved_TBps": 2.460538802845003,
+        "graph_share_of_ceiling_pct": 40.435793750928795,
+        "dispatch_floor_pct_of_graph_time": 43.395526254636685,
         "eager_rounds_us": [
-          30.416300892829895,
-          30.810299515724182,
-          30.34229874610901,
-          29.77229952812195,
-          30.80034852027893
+          30.50824999809265,
+          29.57020103931427,
+          29.318198561668396,
+          29.582250118255615,
+          29.21620011329651
         ],
-        "eager_spread_pct_of_min": 3.486462262082822
+        "eager_spread_pct_of_min": 4.422374846098213
       }
     ]
   }

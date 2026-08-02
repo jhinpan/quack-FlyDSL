@@ -37,6 +37,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import statistics
 import subprocess
 import sys
@@ -60,6 +61,11 @@ WARMUP = 20
 # AI/gfx950_mall_evictor_defect.md; the L2-evicted rows below are only
 # meaningful if the evictor buffer clears that threshold.
 EVICT_BYTES = 512 * 1024 * 1024
+
+# gfx950 keeps a working set of 256 MiB or less resident in the MALL. Used by
+# _copy_variability to label which sizes can be resident at all; the same
+# threshold is the one AI/gfx950_mall_evictor_defect.md records.
+MALL_WORKING_SET_BYTES = 256 * 1024 * 1024
 
 
 def _bench(call, evict=None):
@@ -123,6 +129,191 @@ def _probes():
     }
 
 
+def _identical_buffer_spread(mib):
+    """Copy rate across five identical buffers at one size, one fixed destination.
+
+    A function rather than a loop body because the loop body version closed over
+    a `dst` that the same iteration then deleted. It produced correct numbers --
+    `_bench` runs the lambda eagerly, so the name was always still bound when it
+    mattered -- but ruff flagged it F821/B023 and it was right to: the code was
+    only correct by evaluation order, and nothing in it said so. Numbers I was
+    about to publish rested on that. Binding `dst` as a local of a real scope
+    makes the guarantee structural instead of incidental.
+    """
+    cnt = (mib * 1024 * 1024) // 4
+    nbytes = 2 * cnt * 4
+    dst = torch.empty(cnt, device="cuda", dtype=torch.float32)
+    srcs = [torch.empty(cnt, device="cuda", dtype=torch.float32).fill_(1.0) for _ in range(5)]
+    rates = [_summarise(_bench(lambda s=s: dst.copy_(s)), nbytes)["TBps_at_min"] for s in srcs]
+    lo, hi = min(rates), max(rates)
+    return {
+        "TBps_per_identical_buffer": [round(r, 3) for r in rates],
+        "spread_pct_of_min": round((hi - lo) / lo * 100.0, 2),
+        "fits_in_mall": mib * 1024 * 1024 <= MALL_WORKING_SET_BYTES,
+        "n_identical_buffers": len(srcs),
+    }
+
+
+def _copy_variability():
+    """Measure what actually moves the copy rate, instead of typing a mechanism.
+
+    @Autotune found the defect that started this. `copy_probe_caveat` asserted
+    three copy rates -- 4.718 with a cold allocator, 5.363 with this generator's
+    tensors resident, 4.833 at 2 GiB -- and every one was a hand-typed constant
+    inside a prose string. Grepping the emitted sidecar: each appeared exactly
+    once, only in that string, and no numeric field equalled any of them. No
+    samples, no bytes_moved, no re-derivation. They had also propagated by hand
+    to four other sites (this file, the width-cliff docstring, its
+    `why_not_copy` field, and the notes' table). The string then contradicted
+    its own payload, claiming 5.363 for a condition the generator computed at
+    5.579 -- 4.04% apart against that run's 0.31% spread, 13x its noise floor.
+
+    Measuring the three conditions falsified the caveat's *mechanism*, which is
+    why this function is no longer named for it. The claim was a 14% swing
+    "from allocation history alone". Measured, allocation history does nothing:
+    the identical call before any large allocation, with three more buffers made
+    live, and again afterwards reads 4.767 / 4.764 / 4.776 -- 0.25% apart, and
+    that null reproduced in three separate processes. The swing is real but it
+    is not history. It tracks the *buffer*: across six identically-sized,
+    identically-filled sources read by one fixed destination, rates ranged
+    4.785 to 5.593, and a pointer that read 5.010 read 5.582 after a free and
+    realloc to the same address, so it is not a stable per-allocation label
+    either.
+
+    What discriminates is residency, and the size sweep is the test that
+    separates it from every buffer-identity story: across five identical
+    buffers the spread is 0.70% at 64 MiB (inside the MALL's 256 MiB working
+    set), 16.2% at 512 MiB, and 4.96% at 2 GiB. If the cause were the
+    allocator, the op, or the individual buffer, nothing about it would care
+    that 64 MiB fits in the MALL. Running the sizes in reverse order gives
+    0.85% / 18.5% / 4.37%, so it is not an order effect. The mechanism is what
+    fraction of a past-MALL buffer happens to land where, and that varies per
+    allocation and is re-rolled on free.
+
+    The conclusion the notes draw is unchanged and now rests on the right
+    evidence: **do not use copy as a denominator.** It was already the correct
+    rule, for a reason that was wrong.
+
+    The general defect, worth stating because it is not about this number:
+    *a number that lives only in a prose string has no error bar and never
+    re-runs.* `TBps_at_min` is recomputed every invocation and would have caught
+    its own drift; the caveat string could not, and did not. Interpolating the
+    resident figure from the computed probe would have fixed one of three and
+    left the other two exactly as unfounded -- and would have left the false
+    mechanism in place, since no arithmetic on those three numbers tests it.
+    """
+    states = {}
+
+    # History rows. Named for the hypothesis they test, and retained because
+    # they are the ones that came back null -- deleting them would leave the
+    # falsified claim unfalsifiable on the next run.
+    n = EVICT_BYTES // 4
+    a = torch.empty(n, device="cuda", dtype=torch.float32)
+    c = torch.empty(n, device="cuda", dtype=torch.float32)
+    a.fill_(1.0)
+    states["history_cold_allocator_512MiB"] = _summarise(_bench(lambda: c.copy_(a)), 2 * n * 4)
+
+    resident = [torch.empty(n, device="cuda", dtype=torch.float32) for _ in range(3)]
+    for t in resident:
+        t.fill_(3.0)
+    states["history_three_buffers_live_512MiB"] = _summarise(_bench(lambda: c.copy_(a)), 2 * n * 4)
+
+    # Same call a third time, after the heap changed twice. This is the drift
+    # control: without it, agreement between the first two rows could just be a
+    # machine that was not moving.
+    states["history_cold_pair_remeasured_512MiB"] = _summarise(
+        _bench(lambda: c.copy_(a)), 2 * n * 4
+    )
+
+    del resident
+    torch.cuda.empty_cache()
+
+    # Residency rows: five identical buffers per size, one fixed destination.
+    # 64 MiB fits the MALL working set (256 MiB, per gfx950_mall_evictor_defect.md);
+    # the other two do not. This is the comparison that discriminates.
+    residency = {}
+    for mib in (64, 512, 2048):
+        residency[f"{mib}MiB"] = _identical_buffer_spread(mib)
+        torch.cuda.empty_cache()
+
+    hist = {k: v["TBps_at_min"] for k, v in states.items()}
+    hlo, hhi = min(hist.values()), max(hist.values())
+    return {
+        "states": states,
+        "TBps_by_state": {k: round(v, 3) for k, v in hist.items()},
+        "history_swing_pct_of_min": round((hhi - hlo) / hlo * 100.0, 2),
+        "identical_buffers_by_size": residency,
+        "finding": (
+            "Allocation history does not move the copy rate; buffer placement past "
+            "the MALL does. The three history rows are the same call before, during "
+            "and after heap changes. The size sweep is the discriminating comparison: "
+            "identical buffers agree inside the MALL and disagree past it, which no "
+            "allocator-state or per-op explanation predicts."
+        ),
+        "supersedes": (
+            "The '14% swing from allocation history alone' this field replaces. That "
+            "claim was hand-typed, never re-ran, and is falsified by the history rows "
+            "here. The rule it supported -- do not use copy as a denominator -- is "
+            "unaffected, and is now supported by the reason that is true."
+        ),
+        "how_to_read": (
+            "Every figure here is computed from this run's samples. The prose caveat "
+            "below interpolates from this field and must not restate a number that is "
+            "not in it -- the previous hand-typed version disagreed with this "
+            "generator's own computed copy probe by 4.04% against a 0.31% spread."
+        ),
+    }
+
+
+def _assert_caveat_is_derived(payload):
+    """Refuse to write a caveat containing a number no field computed.
+
+    Interpolation alone does not close the defect -- the next person to add a
+    sentence can type a constant straight back in, and nothing would fail. So
+    every decimal in the emitted string must either round-trip to a measured
+    field or be named here as narrative.
+
+    Two of the narrative decimals are the post-mortem itself: 4.04 is how far
+    the old hand-typed 5.363 sat from this file's computed copy probe on the run
+    @Autotune audited, and 0.31 is that run's within-run spread. They are
+    historical, they refer to a specific prior artifact, and they are the reason
+    the rest of the sentence is computed. If they were interpolated from the
+    current run they would silently restate themselves as fresh measurements,
+    which is the defect one level up.
+
+    The other three (0.50, 1.37, 13.35) are cross-process spreads. A single run
+    genuinely cannot compute them, which is the honest reason a number may be
+    transcribed -- but "cannot be computed here" is exactly the excuse the
+    original caveat's constants had, so they do not get to sit in prose alone:
+    they are also emitted as `denominator_stability_across_processes` with their
+    device, process count and provenance. The allowlist is the narrow exception,
+    and every entry in it must be a value no run could produce.
+    """
+    text = payload["copy_probe_caveat"]
+    narrative = {"4.04", "0.31", "0.50", "1.37", "13.35"}
+    cv = payload["copy_variability"]
+    measured = {f"{v:.3f}" for v in cv["TBps_by_state"].values()}
+    measured.add(f"{payload['roofline_probes']['copy']['TBps_at_min']:.3f}")
+    measured.add(f"{cv['history_swing_pct_of_min']:.2f}")
+    for block in cv["identical_buffers_by_size"].values():
+        measured.add(f"{block['spread_pct_of_min']:.2f}")
+    for probe in payload["roofline_probes"].values():
+        measured.add(f"{probe['spread_pct_of_min']:.2f}")
+        measured.add(f"{probe['TBps_at_min']:.3f}")
+    unexplained = [
+        tok for tok in re.findall(r"\d+\.\d+", text) if tok not in narrative and tok not in measured
+    ]
+    if unexplained:
+        raise SystemExit(
+            f"copy_probe_caveat contains decimals {unexplained} that no field on this "
+            "payload computed. That is exactly the defect this probe was changed to "
+            "close: three copy rates lived only inside this string, never re-ran, and "
+            "one of them drifted 4.04% from the file's own computed probe. Interpolate "
+            "from copy_variability or roofline_probes, or add the value to the "
+            "narrative allowlist with a reason."
+        )
+
+
 def _sha(path):
     return hashlib.sha256((REPO / path).read_bytes()).hexdigest()[:16]
 
@@ -141,6 +332,12 @@ def main():
         text=True,
         check=False,
     ).stdout.strip()
+
+    # Must run before any large allocation: its first row is defined by the
+    # allocator being cold, and that state cannot be recovered once x exists.
+    print("probing copy variability (history rows, then size sweep) ...", flush=True)
+    copy_states = _copy_variability()
+    torch.cuda.empty_cache()
 
     x = torch.randn((M, N), device="cuda", dtype=DTYPE)
     weight = torch.randn(N, device="cuda", dtype=DTYPE)
@@ -204,18 +401,10 @@ def main():
         "exclusivity_check": subprocess.run(
             ["rocm-smi", "--showuse"], capture_output=True, text=True, check=False
         ).stdout,
-        "copy_probe_caveat": (
-            "The copy probe is allocator-state dependent and must not be quoted "
-            "as a property of the card. Same buffer size, same process, 512 MiB: "
-            "4.718 TB/s with no prior allocations, 5.363 TB/s with this "
-            "generator's tensors already resident -- a 14% swing from allocation "
-            "history alone. At 2 GiB it reads 4.833. Standalone c.copy_, "
-            "a.clone() and c[:]=a all agree at 4.71-4.72, so it is placement, "
-            "not the op. This is the mechanism behind the several different "
-            "MI355X 'copy roofline' values that accumulated in the notes. Use "
-            "write or two_read_one_write as denominators; copy is retained here "
-            "only because the notes' history refers to it."
-        ),
+        "copy_variability": copy_states,
+        # Filled after the probe loop: it interpolates from measured fields,
+        # including roofline_probes/copy, which does not exist yet.
+        "copy_probe_caveat": None,
         "roofline_probes": {},
         "measurements": {},
     }
@@ -223,6 +412,77 @@ def main():
     for name, (call, nbytes) in _probes().items():
         print(f"probing {name} ...", flush=True)
         payload["roofline_probes"][name] = _summarise(_bench(call), nbytes)
+
+    rates = copy_states["TBps_by_state"]
+    sizes = copy_states["identical_buffers_by_size"]
+    payload["copy_probe_caveat"] = (
+        "The copy probe is not a property of the card and must not be quoted as "
+        "one. Every figure in this sentence is interpolated from copy_variability, "
+        "measured in this process on this run. What it is NOT: allocation history. "
+        "The same call before any large allocation, with three same-size buffers "
+        "made live, and again afterwards reads {cold:.3f} / {live:.3f} / "
+        "{again:.3f} TB/s -- {hswing:.2f}% apart, a null that reproduced across "
+        "three processes. This supersedes an earlier hand-typed claim of a 14% "
+        "swing 'from allocation history alone', which was never measured. What it "
+        "IS: placement past the MALL. Across five identically-sized, identically-"
+        "filled buffers read by one destination, the spread is {s64:.2f}% at 64 "
+        "MiB (inside the 256 MiB working set), {s512:.2f}% at 512 MiB and "
+        "{s2g:.2f}% at 2 GiB; reversing the size order reproduces it, so it is "
+        "not an order effect, and no allocator-state or per-op story predicts "
+        "that identical buffers stop disagreeing exactly when they fit in cache. "
+        "This is the mechanism behind the several different MI355X 'copy "
+        "roofline' values that accumulated in the notes: each was one draw from "
+        "that distribution, written down as a constant. Use write or "
+        "two_read_one_write as denominators. Their advantage is measured, not "
+        "assumed: across the three roofline processes run on device 5 at this "
+        "commit, write spans 0.50% and two_read_one_write spans 1.37%, against "
+        "13.35% for copy. Those three figures are cross-process, so no single run "
+        "can compute them and they are declared narrative below -- and they "
+        "correct this sentence's own earlier claim that both reproduce 'to better "
+        "than 1%', which was an untested constant of exactly the kind this field "
+        "exists to remove. two_read_one_write does not meet it. Within THIS run "
+        "the probe spreads are {sp_write:.2f}% / {sp_trow:.2f}% / {sp_copy:.2f}% "
+        "for write / two_read_one_write / copy, and this run's copy probe reads "
+        "{inplace:.3f}, itself only one draw. Copy is retained here because "
+        "the notes' history refers to it. These numbers were hand-typed until "
+        "@Autotune found one disagreeing with this file's own computed probe by "
+        "4.04% against a 0.31% spread; they are computed now, so a machine that "
+        "stops reproducing this changes the sentence."
+    ).format(
+        cold=rates["history_cold_allocator_512MiB"],
+        live=rates["history_three_buffers_live_512MiB"],
+        again=rates["history_cold_pair_remeasured_512MiB"],
+        hswing=copy_states["history_swing_pct_of_min"],
+        s64=sizes["64MiB"]["spread_pct_of_min"],
+        s512=sizes["512MiB"]["spread_pct_of_min"],
+        s2g=sizes["2048MiB"]["spread_pct_of_min"],
+        sp_write=payload["roofline_probes"]["write"]["spread_pct_of_min"],
+        sp_trow=payload["roofline_probes"]["two_read_one_write"]["spread_pct_of_min"],
+        sp_copy=payload["roofline_probes"]["copy"]["spread_pct_of_min"],
+        inplace=payload["roofline_probes"]["copy"]["TBps_at_min"],
+    )
+    payload["denominator_stability_across_processes"] = {
+        "spread_pct_of_min": {"write": 0.50, "two_read_one_write": 1.37, "copy": 13.35},
+        "n_processes": 3,
+        "device": "physical 5",
+        "commit": "7612899 (+ this working tree)",
+        "why_narrative": (
+            "A single run cannot compute a cross-process spread, so unlike every "
+            "other figure in copy_probe_caveat these three are transcribed -- from "
+            "the three roofline regenerations run while writing this change. They "
+            "are recorded as a field anyway so the next reader can re-derive them "
+            "from committed artifacts rather than trusting the sentence, which is "
+            "the whole complaint that started this."
+        ),
+        "supersedes": (
+            "'write and two_read_one_write both reproduce across processes to "
+            "better than 1%'. Measured, write does (0.50%) and two_read_one_write "
+            "does not (1.37%). The claim that matters is the ordering against "
+            "copy's 13.35%, which holds with room to spare."
+        ),
+    }
+
+    _assert_caveat_is_derived(payload)
 
     for label, call, ev in (
         ("flydsl_cold_l2", flydsl_call, evict),

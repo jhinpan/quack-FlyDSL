@@ -46,9 +46,18 @@ What this does to the two tables:
     the point of the artifact is to let the two be compared.
 
 The ceiling is `two_read_one_write`, re-measured in-process before any large
-allocation. `copy` is allocator-state dependent (4.718 / 5.363 / 4.833 TB/s for
-one buffer size) and cannot be a denominator; see `copy_probe_caveat` in
-`rmsnorm_32768x4096_bf16_roofline.json`. `share_of_ceiling_pct` is a share of
+allocation. `copy` cannot be a denominator; see `copy_variability` and
+`copy_probe_caveat` in `rmsnorm_32768x4096_bf16_roofline.json`. This docstring
+used to give the reason as "allocator-state dependent (4.718 / 5.363 / 4.833
+TB/s for one buffer size)". Those were three hand-typed constants copied here
+from a prose field that had never measured them, and when they were finally
+measured the stated mechanism was false: allocation history moves the copy rate
+by ~0.5%, not 14%. The true reason is stronger for this file's purpose -- copy
+varies by ~16% across *identically-sized, identically-filled buffers* once they
+exceed the MALL working set, which is precisely the regime every row of this
+sweep's ceiling lives in. Read the live numbers from the sidecar rather than
+from this sentence; the point of that field is that it re-runs and this comment
+does not. `share_of_ceiling_pct` is a share of
 this measured probe on this device, not of a hardware constant, and
 `achieved_TBps` is computed from bytes and time alone for readers who would
 rather not inherit the denominator.
@@ -424,10 +433,19 @@ def main():
         "ceiling_probe": {
             "name": "two_read_one_write",
             "why_not_copy": (
-                "copy is allocator-state dependent (4.718 / 5.363 / 4.833 TB/s for the "
-                "same buffer size depending only on residency) and cannot be a "
-                "denominator; see copy_probe_caveat in the roofline sidecar. "
-                "two_read_one_write reproduces across processes to better than 1%."
+                "copy cannot be a denominator: measured on device 5, five identically-"
+                "sized and identically-filled buffers read by one destination spread "
+                "~16% at 512 MiB and ~5% at 2 GiB, collapsing to <1% at 64 MiB where "
+                "they fit the MALL working set. Every ceiling this sweep uses lives in "
+                "the past-MALL regime, so copy would contribute that spread directly to "
+                "share_of_ceiling_pct. Live figures: copy_variability in the roofline "
+                "sidecar. This field previously read 'allocator-state dependent (4.718 "
+                "/ 5.363 / 4.833 TB/s ... depending only on residency)' and asserted "
+                "that two_read_one_write 'reproduces across processes to better than "
+                "1%'. Both were hand-typed and both are wrong: allocation history moves "
+                "copy by ~0.5%, and two_read_one_write spans 1.37% over three processes "
+                "against write's 0.50%. The ordering against copy's 13.35% is what "
+                "justifies the choice, and it holds by an order of magnitude."
             ),
             "measured_before_sweep_allocations": True,
             **ceiling,

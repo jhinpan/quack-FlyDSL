@@ -727,26 +727,72 @@ comparison — and never once says they are different runs. They are not even
 different runs in the sense that matters. Measured deliberately, same process,
 same 512 MiB buffer, same op:
 
-| condition | TB/s |
-| --- | --- |
-| `c.copy_(a)`, no prior allocations | 4.718 |
-| `c.copy_(a)`, with other tensors already resident | 5.363 |
-| `c.copy_(a)` at 2 GiB | 4.833 |
+~~| condition | TB/s |~~
+~~| `c.copy_(a)`, no prior allocations | 4.718 |~~
+~~| `c.copy_(a)`, with other tensors already resident | 5.363 |~~
+~~| `c.copy_(a)` at 2 GiB | 4.833 |~~
+~~A 14% swing from **allocation history alone**.~~
 
-A 14% swing from **allocation history alone**. Standalone `c.copy_`,
-`a.clone()` and `c[:] = a` all agree at 4.71–4.72, so it is placement, not the
-operation. That is the mechanism behind the four values: each was measured in a
-process with a different heap, and each got written down as a property of the
-card. The regenerated sidecar reads 5.579 because the probe runs after the
-kernel's operands are allocated; `AI/probe_rmsnorm_roofline.py` records the
-caveat inline so the number cannot be lifted out of context again.
+**Retracted: the table above, and the mechanism it asserted.** @Autotune found
+that those three constants appeared exactly once each in the whole tree, all
+inside one prose string in the roofline sidecar, with no samples and no
+`bytes_moved` behind any of them — and that one of them, 5.363, disagreed with
+the *same file's own computed* copy probe (5.579) by 4.04% against a 0.31%
+within-run spread. They had been hand-copied from there to four other sites,
+including this table. They were never measurements.
 
-The consequence is a rule, not a number: **do not use copy as a denominator.**
-`write` (6.909) and `two_read_one_write` (6.052) reproduce across runs to
-better than 1%; copy does not reproduce against itself. The section below was
-written to argue that copy is too *low* to be a ceiling, which is true and
-insufficient — the stronger objection is that it is not stable enough to be
-anything.
+Measuring them falsified the mechanism as well as the numbers. Allocation
+history does nothing: the identical call before any large allocation, with three
+same-size buffers made live, and again afterwards agrees to within **0.13–0.72%**
+across six runs on device 5. The "14% swing from allocation history alone" was
+not a mis-transcription of a real effect; there is no such effect.
+
+What actually varies is placement past the MALL. Across five identically-sized,
+identically-filled buffers read by one fixed destination, over **six runs on
+device 5** (three of them size-ascending, one size-descending, two inside the
+roofline generator):
+
+| buffer size | fits in MALL working set | spread across identical buffers |
+| --- | --- | --- |
+| 64 MiB | yes | 0.58–0.92% |
+| 512 MiB | no | 16.1–18.5% |
+| 2 GiB | no | 4.37–5.49% |
+
+These are ranges over runs, and the run count is stated, because the first
+version of this paragraph quoted a single run's three spreads as though they
+were the quantity — and the very next regeneration landed at 0.69 / 17.38 /
+4.90, outside two of the three intervals I had just typed. The separation is
+what reproduces; the third digit of any one spread does not, and the sidecar's
+`copy_variability` is the field to read for a live value.
+
+Running the sizes in reverse order reproduces it, so it is not an order effect.
+No allocator-state or per-operation story predicts that identical buffers stop
+disagreeing exactly when they start fitting in cache. A pointer that read 5.010
+read 5.582 after a free and realloc to the same address, so it is not a stable
+per-buffer label either — it is re-rolled per allocation. Ranges rather than
+single values above because these are three runs, and the whole point is that
+one draw is not the quantity.
+
+The rule is unchanged and now rests on the reason that is true: **do not use
+copy as a denominator.** It was already correct, for a reason that was wrong.
+
+`write` and `two_read_one_write` are the denominators to use, and their
+advantage is now measured rather than assumed: across three roofline processes
+on device 5, `write` spans **0.50%**, `two_read_one_write` spans **1.37%**, and
+`copy` spans **13.35%**. That also retracts this section's previous claim that
+both reproduce "to better than 1%" — `two_read_one_write` does not. The ordering
+against copy is what justifies the choice and it holds by an order of magnitude.
+The live figures are in `copy_variability` and
+`denominator_stability_across_processes` in the sidecar; every number in the
+caveat string is now interpolated from a computed field, and the generator
+refuses to write a caveat containing a decimal no field produced — the guard
+fired on my own first draft of the replacement text, which is the only reason
+I noticed I had typed the within-run spreads by hand while writing the fix for
+hand-typed numbers.
+
+The section below was written to argue that copy is too *low* to be a ceiling,
+which is true and insufficient — the stronger objection is that it is not stable
+enough to be anything.
 
 The original text, kept because the reasoning is still right:
 
