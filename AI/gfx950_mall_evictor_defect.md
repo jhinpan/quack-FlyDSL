@@ -2,8 +2,11 @@
 
 Status: **confirmed by measurement**, fix not yet written. Blocks Experiment
 No.002 (MI355X flydsl-vs-torch matrix) — any MI355X numbers taken before this
-is fixed overstate bandwidth on **37 of the 90 benchmarked cells**, including
-one `m=32768` cell. (An earlier "11 of 18" here was computed from approximate
+is fixed overstate bandwidth on **37 of the 90 benchmarked cells**. Those 37
+contain **no `m=32768` cell** — an earlier version of this line said they
+included one, which conflated two different sets (see the `32768x1024` note
+below: those cells sit just *past* the MALL and are inflated for a related but
+distinct reason, so they are not in the 37). (An earlier "11 of 18" here was computed from approximate
 bytes and ignored the `use_evictor` gate; withdrawn — see below.) A second code
 path, `_pick_l2_rotate_count` in `quack/bench/bench_utils.py`, shares the root
 cause but **has no live consumer on this box**: the FlyDSL autotune path uses
@@ -409,10 +412,24 @@ Any MI355X figure in `AI/flydsl_rmsnorm_notes.md` whose picked working set is
 `<= 256 MiB` *and* which does not trigger the evictor is measured partly against
 MALL and is optimistic — **37 of 90 cells** across the full matrix, or 8 of 18
 per 16-bit mode and 5 of 18 for fp32/same.
-The `M=32768` row (100%/88%) is clean except for one undetermined cell:
-`32768x1024` forward sits at 256.004 MiB, marginally *over* MALL capacity, and
-the probe has no sample between 256 and 384 MiB to place it. It should be
-measured rather than classified. Whether that shifts the
+The `M=32768` row (100%/88%) contains no cell in the 37, but it is not clean.
+The four 16-bit `32768x1024` forward cells sit at 256.003906 MiB (16-bit
+weight) and 256.007812 MiB (fp32 weight) — a few KiB *past* MALL capacity, so
+the `ws <= MALL` test excludes them, yet they are still measured inflated. The
+fine-boundary block measures those exact working sets:
+
+    268435456   256.000000 MiB   6453 GB/s
+    268437504   256.001953 MiB   6349
+    268439552   256.003906 MiB   6191   <- 32768x1024 fwd, 16-bit weight
+    268443648   256.007812 MiB   6373   <- 32768x1024 fwd, fp32 weight
+    268500992   256.062500 MiB   5617
+    269484032   257.000000 MiB   5050
+    301989888   288.000000 MiB   4830
+
+Against a ~4900 GB/s HBM reference both variants are firmly on the inflated
+side. The decay from 256 to 288 MiB is gradual, not a cliff, which is why a
+threshold test misclassifies cells sitting a few KiB either side of it — and
+why these were measured rather than classified. Whether this shifts the
 published median depends on how many cells feed it, and should be recomputed
 rather than assumed. The `M=4096` row
 (71%/64%) and `M<=512` row (7%/5%) are affected, though at `M<=512` the cells

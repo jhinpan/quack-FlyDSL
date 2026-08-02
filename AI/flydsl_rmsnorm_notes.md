@@ -531,11 +531,15 @@ pure launch path, where the CuTe kernel is about 2.2x ahead (6.1 us against
 > Computing from the harness's real `logical_bytes` and actual buffer selection,
 > **37 of 90 cells** are both un-evicted and MALL-resident (8 of 18 per 16-bit
 > mode; 5 of 18 for fp32/same) — i.e. 37 cells are *exposed to* the defect, with
-> the per-cell magnitude unmeasured. The `M=4096` row (71% / 64%) is therefore
+> the per-cell magnitude unmeasured. **No `m=32768` cell is among the 37.**
+> The `M=4096` row (71% / 64%) is therefore
 > optimistic; `M<=512` is launch-bound so bandwidth is not the binding
-> constraint there; and `M=32768` is clean except for `32768x1024` forward,
-> which sits at 256.004 MiB and was measured directly at that exact working set
-> (6295–6325 GB/s, inflated side). Full analysis in
+> constraint there; and `M=32768` contains no exposed cell but is still not
+> clean — the four 16-bit `32768x1024` forward cells land a few KiB *past* the
+> MALL (256.003906 and 256.007812 MiB), so the threshold excludes them, yet
+> measuring those exact working sets gives 6191 and 6373 GB/s against a ~4900
+> GB/s HBM reference: inflated. The 256→288 MiB decay is gradual, so a
+> threshold misclassifies cells sitting either side of it. Full analysis in
 > [`gfx950_mall_evictor_defect.md`](gfx950_mall_evictor_defect.md). All three
 > rows should be re-measured before being cited; do not assume the large-m
 > median is unaffected without recomputing it.
