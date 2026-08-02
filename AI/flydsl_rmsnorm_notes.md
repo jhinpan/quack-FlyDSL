@@ -519,10 +519,14 @@ pure launch path, where the CuTe kernel is about 2.2x ahead (6.1 us against
 challenged as unsourced, then verified and cleared). Both halves come from the
 schema-v1 sweep of 2026-07-26, not from Experiment No.001:
 
-- H100: `timing-audit/xbench-archive/v1-20260726/h100-v1-results.csv`, 180 rows,
-  `copy_roofline_gbps = 2974.420002`.
-- H200: `h200-v1-results.csv` from the same sweep,
-  `copy_roofline_gbps = 4148.155822` — the two numbers already quoted above.
+- H100: `AI/archive/v1-20260726/h100-v1-results.csv`, 180 rows,
+  `copy_roofline_gbps = 2974.420002`,
+  sha256 `59d9429b95a1494eaec61c095543b4a831a217c8affc2547b675c7f60fdecea7`.
+- H200: `AI/archive/v1-20260726/h200-v1-results.csv`, 180 rows,
+  `copy_roofline_gbps = 4148.155822`,
+  sha256 `6a3cd36eb42f9f314cd601e4fd06354698c0f7455d07bbe1d6d45ece5a01cc50`.
+
+Both are the two denominators already quoted above.
 
 The rule that reproduces every cell: median of `copy_roofline_pct` over rows
 with `provider=quack`, bucketed by `m==32768` / `m==4096` / `m<=512` and by
@@ -531,10 +535,19 @@ operation, rounded to whole percent. Reproduced independently on both files:
 32.899/27.149, 13.792/9.146 for H200. The M=1 forward figure of 6.1 us above is
 the same file's `quack` `m=1` `fwd` median.
 
-Both files are archived with hashes alongside a README recording the formula,
-at `timing-audit/xbench-archive/v1-20260726/`. Do not attempt to re-derive this
+Both files are committed **in this repository** at `AI/archive/v1-20260726/`,
+with `SHA256SUMS` and a README recording the formula, so the provenance is
+resolvable from the PR rather than from a path on one machine. The per-cell
+`tuned_config` probes are archived beside them. Do not attempt to re-derive this
 table from the No.001 archive — that is a later, differently-configured run and
 it will not reproduce these numbers.
+
+Limits of this provenance: schema-v1 records no commit SHA, toolchain version or
+hostname, and the 2026-07-26 date comes from file mtimes rather than the data.
+These bytes pin the numbers; they do not pin the code or environment. Only the
+two Quack Hopper columns are covered — the MI355X column's six regime values,
+its 5279 GB/s roofline, the 13.0 us M=1 figure and the ~3.5 us Python/FFI floor
+remain unarchived and unverified.
 
 Caveat worth keeping: at 4096x3000 and 4096x4096 Quack is slower on the H200
 than on the H100 despite 1.39x more bandwidth. Stated exactly, over the 20
