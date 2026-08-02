@@ -834,18 +834,28 @@ def _packed_rows(tensor: torch.Tensor) -> torch.Tensor:
     256,512}`` for 2-D and per-head inputs.
 
     ``.contiguous()`` unconditionally was costing a full extra read+write of
-    the activation on those views: at 32768x4096 bf16 it took the forward from
-    26.9 us to 32.3 us, a **+19.3..22.0%** overhead over five independent
-    processes, with the bare copy alone measuring ~5.3 us. That is a real
-    tensor of traffic bought for nothing.
+    the activation on those views. At 32768x4096 bf16, against a packed
+    baseline of 89.9 us, the same call on a row-padded view took 183.2 us
+    before and 93.3 us after: **+103.6..104.0%** overhead reduced to
+    **+3.6..3.8%**, over five independent processes, both measured in-process
+    against that process's own baseline. Roughly half the call was repacking.
 
-    After this change the same comparison reads **-0.7..+1.2%** over five
-    fresh processes. That range straddles zero and lies inside the 1.99%
-    run-to-run noise floor measured for an unprofiled event median on this
-    harness, so what it establishes is that the overhead is no longer
-    *distinguishable from none* -- not that it is exactly zero. The before
-    range does not overlap the after range or the noise floor, which is what
-    makes the removal itself a real effect rather than a lucky pair of draws.
+    The residual ~3.7% is *not* claimed to be zero. It is far outside the
+    1.99% run-to-run noise floor measured for an unprofiled event median on
+    this harness, so something real remains -- most likely the padded rows
+    costing more DRAM pages per row than the packed ones. Recording it as a
+    remaining cost rather than rounding it away.
+
+    A note on how these were measured, because the first version of this
+    docstring quoted numbers that were wrong. Timing ran on ``cuda:6`` while
+    the process default device was 0, so the ``torch.cuda.Event`` pair was
+    created on device 0 and bracketed nothing: it read 26.9 us for a call that
+    actually takes 89.9 us, implying 19 TB/s on a part whose copy roofline is
+    ~5.3 TB/s. A figure that implies a bandwidth above the roofline is the
+    measurement announcing its own invalidity, and the number was quoted for a
+    whole commit before the roofline check caught it. These figures come from
+    ``torch.cuda.set_device(6)``, and the packed baseline of 89.9 us is
+    5967 GB/s of logical traffic, which is under the roofline.
 
     The predicate is ``stride(-1) != 1``, matching ``_ensure_contiguous`` in
     :mod:`quack.rmsnorm` exactly, so both backends copy on the same inputs. A
