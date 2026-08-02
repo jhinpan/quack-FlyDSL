@@ -212,10 +212,23 @@ torch's enumeration order does not match `rocm-smi`'s on this host. So neither
 the earlier `HIP_VISIBLE_DEVICES=7` in this line nor my later correction to
 "GPU 0" named the right card; the mask value is an index into the visible set
 and never denoted a physical GPU. The sidecar records `device_pci_bus_id` so
-the card is identifiable regardless of anyone's numbering. Note also that
-torch's `uuid` field does not correspond to `rocm-smi --showuniqueid`, so PCI
-BDF is the only cross-checkable identifier here — the same partial-identity
-hazard @Autotune flagged for the KFD helper.
+the card is identifiable regardless of anyone's numbering.
+
+> **Correction, 2026-08-02.** An earlier version of this paragraph said torch's
+> `uuid` "does not correspond to `rocm-smi --showuniqueid`, so PCI BDF is the
+> only cross-checkable identifier here." The first half is true and the
+> conclusion drawn from it was wrong. Torch's `uuid` is not a UUID at all: its
+> 16 bytes are the **ASCII text** of a hex string, so
+> `61363063-3239-3536-6364-396464346335` decodes to `a60c2956cd9dd4c5`, which
+> is exactly KFD's `unique_id` (11964983762810164421) for that node. Verified
+> on all 8 GPUs: torch `uuid`, decoded that way, equals KFD `unique_id` in
+> 8/8 cases. `rocm-smi --showuniqueid` prints a *different* per-GPU 64-bit
+> value that matches neither, which is what misled me — I compared against
+> rocm-smi, found no match, and concluded the field was useless instead of
+> checking what it actually encodes. So there are **two** cross-checkable
+> identifiers, and `unique_id` is the stronger one: it survives PCI
+> renumbering and, unlike a BDF, stays distinct when several KFD nodes share
+> one PCI address.
 
 Kernel held *exactly* fixed
 (`copy_` between rotating buffer pairs); only the number of rotation buffers
