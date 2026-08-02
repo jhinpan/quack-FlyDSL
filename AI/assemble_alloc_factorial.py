@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import math
+import random
 import statistics
 import subprocess
 import sys
@@ -36,6 +37,9 @@ _additive_fit, _f_sf = _stats()
 # of its OWN mean is granted 15% more headroom than one at 4.89, and that is how
 # 9/20 was once reported as 10/20. Absolute width, one denominator.
 BAND = (4.885, 4.895)
+
+# Fixed so the permutation p is a property of the artifact, not of the run.
+PERM_SEED = 20260804
 
 # The staircase's measured levels either side of its steps, from the committed
 # interleaved artifact. Only a reference point for the anchor check below, not
@@ -393,12 +397,55 @@ def _anchor(means):
     }
 
 
+def _rank(v):
+    s = sorted(range(len(v)), key=lambda i: v[i])
+    out = [0.0] * len(v)
+    i = 0
+    while i < len(s):
+        j = i
+        while j + 1 < len(s) and v[s[j + 1]] == v[s[i]]:
+            j += 1
+        r = (i + j) / 2 + 1
+        for k in range(i, j + 1):
+            out[s[k]] = r
+        i = j + 1
+    return out
+
+
+def _corr(x, y):
+    mx, my = statistics.fmean(x), statistics.fmean(y)
+    sxx = sum((a - mx) ** 2 for a in x)
+    syy = sum((b - my) ** 2 for b in y)
+    if sxx <= 0 or syy <= 0:
+        return 0.0
+    return sum((a - mx) * (b - my) for a, b in zip(x, y)) / math.sqrt(sxx * syy)
+
+
 def _order_control(means):
     """Is the shuffled collection position predicting the rate anyway?
 
     The staircase needed three iterations to kill exactly this. One seeded
     shuffle makes position independent of cell in expectation, not in the draw
     that actually happened, so it is checked rather than assumed.
+
+    Two corrections here, both from @Autotune's f31e6406, and the first one this
+    function committed in its own first draft:
+
+    RESIDUALS, NOT RAW RATE. The first version correlated position against the
+    raw rate and got -0.0362, which reads as a clean null. It is not a null; it
+    is the wrong quantity. Cell means differ by up to 0.064 TB/s, so the raw
+    series is dominated by which cell each process happened to draw, and a drift
+    in the residuals can hide underneath that -- or cancel against it. Removing
+    the cell mean first gives +0.4441 Pearson, +0.4971 Spearman. Twelve times the
+    magnitude and the opposite sign. Identical in shape to publishing
+    `corr_level_vs_position` (a randomization-quality diagnostic) as evidence
+    the outcome does not drift.
+
+    SPEARMAN, NOT ONLY PEARSON. Pearson tests linear association; a non-monotone
+    or periodic dependence on collection time passes it untouched. The rank
+    statistic is what addresses the objection, and the docstring of the first
+    draft said "a rank correlation instead" while the code computed Pearson --
+    prose describing a check the code did not perform.
     """
     rows = [{**r, "pos": str(r["seq"])} for r in means]
     gm = statistics.fmean(r["TBps_at_min"] for r in rows)
@@ -410,18 +457,71 @@ def _order_control(means):
     second = [r["TBps_at_min"] for r in rows if r["seq"] >= n / 2]
     xs = [r["seq"] for r in rows]
     ys = [r["TBps_at_min"] for r in rows]
-    mx, my = statistics.fmean(xs), statistics.fmean(ys)
-    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
-    sxx = sum((x - mx) ** 2 for x in xs)
-    syy = sum((y - my) ** 2 for y in ys)
-    corr = sxy / math.sqrt(sxx * syy) if sxx > 0 and syy > 0 else 0.0
+    corr = _corr(xs, ys)
+
+    # The cell mean removed. This is the series the drift question is about.
+    cmu = defaultdict(list)
+    for r in rows:
+        cmu[r["cell"]].append(r["TBps_at_min"])
+    cmu = {k: statistics.fmean(v) for k, v in cmu.items()}
+    res = [r["TBps_at_min"] - cmu[r["cell"]] for r in rows]
+    rp, rs = _corr(xs, res), _corr(_rank(xs), _rank(res))
+
+    # Two-sided permutation p on the rank statistic, seeded so it is a property
+    # of the artifact rather than of the run.
+    #
+    # The first version of this used the 16 cyclic rotations plus their reversals
+    # as a deterministic reference set, to avoid introducing a seed. That is
+    # WRONG and it is worth saying why, because it looked like the more rigorous
+    # choice. The permutation null here is exchangeability of positions, and
+    # rotations are not exchangeable draws: a rotation of 0..15 is still almost
+    # monotone, so every member of that reference set has a large |rank corr|
+    # with any trending residual. The statistic is therefore not extreme *within
+    # its own reference set* and the test cannot reject regardless of the data.
+    # It returned p=0.375 against 0.0519 from an honest shuffle -- a reference
+    # set constructed to avoid an arbitrary constant, which instead built the
+    # answer into the null. Same defect class as everything else in this file:
+    # a check that passes for a reason other than the one it documents.
+    rnd = random.Random(PERM_SEED)
+    perm_n = 20000
+    ge = 0
+    p2 = xs[:]
+    for _ in range(perm_n):
+        rnd.shuffle(p2)
+        if abs(_corr(_rank(p2), _rank(res))) >= abs(rs) - 1e-12:
+            ge += 1
+
+    # Bytes level by position, to show the shuffle decoupled treatment from time.
+    tot_rank = [float(r["prefix_high_water_GiB"]) for r in rows]
 
     cnt_by_half = defaultdict(list)
     for r in rows:
         cnt_by_half["first" if r["seq"] < n / 2 else "second"].append(r["count"])
 
     return {
-        "corr_rate_vs_collection_position": round(corr, 4),
+        "corr_RESIDUAL_vs_position_pearson": round(rp, 4),
+        "corr_RESIDUAL_vs_position_spearman": round(rs, 4),
+        "permutation_p_two_sided": round(ge / perm_n, 4),
+        "permutation_draws": perm_n,
+        "permutation_seed": PERM_SEED,
+        "residual_drift_verdict": (
+            "NOT a null. Removing the cell mean leaves a substantial positive drift with "
+            "collection order (Pearson +0.4441, Spearman +0.4971). 20000-draw two-sided permutation test on the same series gives p=0.0519. This "
+            "does NOT threaten the bytes result: the shuffle left total prior bytes "
+            "essentially uncorrelated with position (Spearman -0.1917), so drift cannot "
+            "manufacture a bytes effect, and the 94.53% survives. But 'collection order "
+            "does nothing' is unsupported and is not claimed anywhere in this artifact."
+        ),
+        "corr_RAW_rate_vs_position_pearson_DO_NOT_QUOTE_AS_THE_CONTROL": round(corr, 4),
+        "why_that_field_is_named_that": (
+            "the raw-rate correlation is -0.0362 and reads as a clean null. It is the "
+            "wrong quantity: cell means differ by up to 0.064 TB/s, so the raw series is "
+            "dominated by which cell each process drew and a residual drift hides "
+            "underneath it. Twelve times the magnitude, opposite sign. It is kept "
+            "because it is what the first draft of this function published, and a reader "
+            "comparing artifacts should be able to see the corrected pair side by side."
+        ),
+        "corr_total_prior_bytes_vs_position_spearman": round(_corr(_rank(xs), _rank(tot_rank)), 4),
         "first_half_mean_TBps": statistics.fmean(first),
         "second_half_mean_TBps": statistics.fmean(second),
         "half_difference_TBps": statistics.fmean(first) - statistics.fmean(second),
@@ -439,6 +539,12 @@ def _order_control(means):
             "16 distinct positions on 16 rows is a saturated model: it explains 100% of "
             "the variance by construction and says nothing. The trend and the half-split "
             "are the tests that can fail."
+        ),
+        "why_spearman_and_not_only_pearson": (
+            "Pearson tests linear association only; a non-monotone or periodic "
+            "dependence on collection time passes it untouched. The rank statistic is "
+            "what the objection actually requires, and the first draft of this function "
+            "claimed one in its docstring while computing the other."
         ),
     }
 
