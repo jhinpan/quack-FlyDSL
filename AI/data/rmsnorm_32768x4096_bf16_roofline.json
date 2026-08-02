@@ -1,113 +1,160 @@
 {
+  "what": "forward throughput at 32768x4096 bf16 against three measured bandwidth probes, with the raw rounds behind every cited figure",
+  "generator": "AI/probe_rmsnorm_roofline.py",
   "shape": [
     32768,
     4096
   ],
   "dtype": "bfloat16",
   "device": "AMD Instinct MI355X",
+  "device_uuid": "66636163-3034-3537-3439-313935646234",
   "HIP_VISIBLE_DEVICES": "6",
   "torch": "2.9.1+rocm7.2.0.git7e1940d4",
+  "hip": "7.2.26015-fc0010cf6a",
+  "python": "3.10.12",
+  "host": "mia1-p02-g23",
+  "commit": "d54ca0c2b4050649f3628616ae0b28698addb13e",
+  "worktree_dirty": true,
+  "source_sha256_16": {
+    "quack/rmsnorm_flydsl.py": "0c44997dc710d8e5",
+    "AI/probe_rmsnorm_roofline.py": "e1daff33fe252d8f"
+  },
   "bytes_moved_min_traffic": 536870912,
+  "bytes_moved_exact_including_weight": 536879104,
+  "byte_count_note": "bytes_moved_min_traffic is x + out and omits the bf16 weight; exact traffic is bytes_moved_exact_including_weight. The 8 KiB weight against 512 MiB moves a derived TB/s by 0.0015%. Probe TB/s use each probe's own bytes_moved (copy 2x buffer, two_read_one_write 3x, write 1x), NOT the kernel's byte count.",
   "protocol": {
     "reps_per_round": 50,
     "rounds": 7,
-    "statistic": "min over rounds of (round mean over reps)",
-    "events": "recorded on the operand device (HIP_VISIBLE_DEVICES pins it)"
+    "warmup_calls": 20,
+    "statistic": "min over rounds of (round mean over reps); all rounds retained",
+    "timer": "torch.cuda.Event, recorded around a rep loop",
+    "events": "recorded on the operand device (HIP_VISIBLE_DEVICES pins it)",
+    "eviction": "cold rows copy a 512 MiB buffer once per round, outside the timed window -- not between calls",
+    "exclusivity": "single visible device; caller is responsible for it being idle. rocm-smi utilisation at start is recorded below."
   },
+  "exclusivity_check": "\n\n============================ ROCm System Management Interface ============================\n=================================== % time GPU is busy ===================================\nGPU[0]\t\t: GPU use (%): 0\nGPU[0]\t\t: GFX Activity: 834461635\nGPU[1]\t\t: GPU use (%): 0\nGPU[1]\t\t: GFX Activity: 908748561\nGPU[2]\t\t: GPU use (%): 0\nGPU[2]\t\t: GFX Activity: 830533419\nGPU[3]\t\t: GPU use (%): 0\nGPU[3]\t\t: GFX Activity: 2228414581\nGPU[4]\t\t: GPU use (%): 0\nGPU[4]\t\t: GFX Activity: 898503557\nGPU[5]\t\t: GPU use (%): 0\nGPU[5]\t\t: GFX Activity: 872825552\nGPU[6]\t\t: GPU use (%): 1\nGPU[6]\t\t: GFX Activity: 851918106\nGPU[7]\t\t: GPU use (%): 0\nGPU[7]\t\t: GFX Activity: 865630348\n==========================================================================================\n================================== End of ROCm SMI Log ===================================\n",
+  "copy_probe_caveat": "The copy probe is allocator-state dependent and must not be quoted as a property of the card. Same buffer size, same process, 512 MiB: 4.718 TB/s with no prior allocations, 5.363 TB/s with this generator's tensors already resident -- a 14% swing from allocation history alone. At 2 GiB it reads 4.833. Standalone c.copy_, a.clone() and c[:]=a all agree at 4.71-4.72, so it is placement, not the op. This is the mechanism behind the several different MI355X 'copy roofline' values that accumulated in the notes. Use write or two_read_one_write as denominators; copy is retained here only because the notes' history refers to it.",
   "roofline_probes": {
     "copy": {
       "samples_us": [
-        227.1258544921875,
-        224.99174118041992,
-        226.9381332397461,
-        226.43976211547852,
-        228.1421661376953,
-        226.96435928344727,
-        226.20996475219727
+        192.78762817382812,
+        192.56441116333008,
+        192.87403106689453,
+        192.75884628295898,
+        192.44844436645508,
+        193.0484390258789,
+        192.65235900878906
       ],
-      "TBps": 4.772361058084221
+      "min_us": 192.44844436645508,
+      "median_us": 192.75884628295898,
+      "max_us": 193.0484390258789,
+      "spread_pct_of_min": 0.31176903580542054,
+      "bytes_moved": 1073741824,
+      "TBps_at_min": 5.579373881325901
     },
     "two_read_one_write": {
       "samples_us": [
-        262.5514030456543,
-        262.3625946044922,
-        263.0082130432129,
-        263.0522155761719,
-        263.3458137512207,
-        262.81274795532227,
-        262.6535415649414
+        266.6007995605469,
+        266.61922454833984,
+        267.08580017089844,
+        266.6954040527344,
+        266.1233711242676,
+        266.5521812438965,
+        266.4497756958008
       ],
-      "TBps": 6.13888095758458
+      "min_us": 266.1233711242676,
+      "median_us": 266.6007995605469,
+      "max_us": 267.08580017089844,
+      "spread_pct_of_min": 0.36164769842083827,
+      "bytes_moved": 1610612736,
+      "TBps_at_min": 6.052128113347538
     },
     "write": {
       "samples_us": [
-        78.158860206604,
-        77.8700590133667,
-        77.99726009368896,
-        78.26365947723389,
-        78.13005924224854,
-        78.06285858154297,
-        78.07005882263184
+        78.21331977844238,
+        77.70934104919434,
+        78.05014133453369,
+        77.9021406173706,
+        77.85974025726318,
+        78.15814018249512,
+        78.13414096832275
       ],
-      "TBps": 6.894445937274094
+      "min_us": 77.70934104919434,
+      "median_us": 78.05014133453369,
+      "max_us": 78.21331977844238,
+      "spread_pct_of_min": 0.648543305661285,
+      "bytes_moved": 536870912,
+      "TBps_at_min": 6.9087049864459775
     }
   },
   "measurements": {
     "flydsl_cold_l2": {
       "samples_us": [
-        90.78621864318848,
-        91.27182006835938,
-        89.95902061462402,
-        89.59819793701172,
-        89.34459686279297,
-        89.59502220153809,
-        89.32299613952637
+        91.90221786499023,
+        91.33341789245605,
+        90.22219657897949,
+        90.36379814147949,
+        90.43020248413086,
+        90.27421951293945,
+        90.33422470092773
       ],
-      "min_us": 89.32299613952637,
-      "median_us": 89.59819793701172,
-      "TBps_at_min": 6.010444512646941
+      "min_us": 90.22219657897949,
+      "median_us": 90.36379814147949,
+      "max_us": 91.90221786499023,
+      "spread_pct_of_min": 1.8620930876362234,
+      "bytes_moved": 536870912,
+      "TBps_at_min": 5.950541356306142
     },
     "flydsl_warm": {
       "samples_us": [
-        89.85980033874512,
-        90.16539573669434,
-        90.37981986999512,
-        90.34941673278809,
-        90.44861793518066,
-        90.24621963500977,
-        90.24459838867188
+        90.02619743347168,
+        90.18781661987305,
+        90.49739837646484,
+        90.5062198638916,
+        90.43261528015137,
+        90.17499923706055,
+        90.48219680786133
       ],
-      "min_us": 89.85980033874512,
-      "median_us": 90.24621963500977,
-      "TBps_at_min": 5.974539337681076
+      "min_us": 90.02619743347168,
+      "median_us": 90.43261528015137,
+      "max_us": 90.5062198638916,
+      "spread_pct_of_min": 0.533203049895174,
+      "bytes_moved": 536870912,
+      "TBps_at_min": 5.963496485528464
     },
     "torch_cold_l2": {
       "samples_us": [
-        155.8146572113037,
-        154.7378635406494,
-        155.14506340026855,
-        155.31705856323242,
-        155.45785903930664,
-        155.23466110229492,
-        154.93865966796875
+        154.77144241333008,
+        155.0074577331543,
+        155.0394630432129,
+        155.2690601348877,
+        155.09546279907227,
+        155.1642608642578,
+        155.09384155273438
       ],
-      "min_us": 154.7378635406494,
-      "median_us": 155.23466110229492,
-      "TBps_at_min": 3.469551018189965
+      "min_us": 154.77144241333008,
+      "median_us": 155.09384155273438,
+      "max_us": 155.2690601348877,
+      "spread_pct_of_min": 0.3215177902320555,
+      "bytes_moved": 536870912,
+      "TBps_at_min": 3.46879827201094
     },
     "torch_warm": {
       "samples_us": [
-        155.09143829345703,
-        154.94024276733398,
-        154.96824264526367,
-        154.9850368499756,
-        155.2186393737793,
-        154.9554443359375,
-        155.0786590576172
+        155.28823852539062,
+        155.02985954284668,
+        155.23785591125488,
+        155.2506446838379,
+        155.43866157531738,
+        155.31386375427246,
+        155.04584312438965
       ],
-      "min_us": 154.94024276733398,
-      "median_us": 154.9850368499756,
-      "TBps_at_min": 3.465019173915922
+      "min_us": 155.02985954284668,
+      "median_us": 155.2506446838379,
+      "max_us": 155.43866157531738,
+      "spread_pct_of_min": 0.2636924484587562,
+      "bytes_moved": 536870912,
+      "TBps_at_min": 3.4630161801289727
     }
   }
 }

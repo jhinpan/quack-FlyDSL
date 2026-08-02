@@ -647,6 +647,37 @@ there first.
 
 ## A same-device copy is not the bandwidth ceiling
 
+**First, a correction that subsumes most of this section: there is no such
+thing as "the" copy rate on this card.** This file quotes the MI355X copy
+roofline at four different values — 4.89 TB/s below, 4.772 in the sidecar
+section, "~5.3" in the event-binding entry, and 5279 GB/s in the CuTe
+comparison — and never once says they are different runs. They are not even
+different runs in the sense that matters. Measured deliberately, same process,
+same 512 MiB buffer, same op:
+
+| condition | TB/s |
+| --- | --- |
+| `c.copy_(a)`, no prior allocations | 4.718 |
+| `c.copy_(a)`, with other tensors already resident | 5.363 |
+| `c.copy_(a)` at 2 GiB | 4.833 |
+
+A 14% swing from **allocation history alone**. Standalone `c.copy_`,
+`a.clone()` and `c[:] = a` all agree at 4.71–4.72, so it is placement, not the
+operation. That is the mechanism behind the four values: each was measured in a
+process with a different heap, and each got written down as a property of the
+card. The regenerated sidecar reads 5.579 because the probe runs after the
+kernel's operands are allocated; `AI/probe_rmsnorm_roofline.py` records the
+caveat inline so the number cannot be lifted out of context again.
+
+The consequence is a rule, not a number: **do not use copy as a denominator.**
+`write` (6.909) and `two_read_one_write` (6.052) reproduce across runs to
+better than 1%; copy does not reproduce against itself. The section below was
+written to argue that copy is too *low* to be a ceiling, which is true and
+insufficient — the stronger objection is that it is not stable enough to be
+anything.
+
+The original text, kept because the reasoning is still right:
+
 The harness originally normalized against a `torch.copy_`, which sustains only
 4.89 TB/s on MI355X — low enough that the RMSNorm forward exceeded it and
 reported over 100%. Probing three patterns over 2 GiB buffers:
@@ -884,18 +915,38 @@ Regenerating them on the same card
 50, min-of-rounds, events recorded on the operand device) settles three things
 and unsettles one.
 
+**The sidecar now has a generator**, `AI/probe_rmsnorm_roofline.py`, which is
+the second half of the blocker above: the numbers could previously be re-read
+but not re-derived, and an artifact nobody can regenerate is a screenshot. It
+records host, device UUID, commit, source hashes, protocol, eviction scheme and
+the `rocm-smi` utilisation at start, matching
+`AI/probe_rmsnorm_harness_levels.py`, and it retains every round so the spread
+is auditable. Re-running it reproduces the table below within 0.7% on every
+row.
+
 | | min us | TB/s on 512 MiB minimum traffic |
 | --- | --- | --- |
-| FlyDSL, L2 evicted | 89.32 | 6.010 |
-| FlyDSL, warm | 89.86 | 5.975 |
-| torch, L2 evicted | 154.74 | 3.470 |
-| torch, warm | 154.94 | 3.465 |
+| FlyDSL, L2 evicted | 90.22 | 5.951 |
+| FlyDSL, warm | 90.03 | 5.964 |
+| torch, L2 evicted | 154.77 | 3.469 |
+| torch, warm | 155.03 | 3.463 |
+
+(Regenerated values. The previously published row was 89.32 / 89.86 / 154.74 /
+154.94; the deltas are +0.66%, +0.18%, +0.00% and -0.11%, all inside these
+rows' observed 0.26-1.86% round spread.)
+
+**Each probe's TB/s is computed against its own traffic, which the old artifact
+left for the reader to reverse-engineer.** A copy moves 2x its buffer, a
+two-read-one-write 3x, a pure write 1x. Storing only the three TB/s made them
+look directly comparable to the kernel's number when the byte count under each
+differed; `bytes_moved` is now recorded beside every probe.
 
 **89.9 us reproduces, and my reading of it was still wrong.** It is 5.972 TB/s.
-The copy proxy on this card measures 4.772 TB/s, so I had cited, as evidence of
+The copy proxy read 4.772 TB/s in that run, so I had cited, as evidence of
 headroom, a number 25% *above* the ceiling I was comparing it to. @Reviewer
 caught the arithmetic. The mistake is the one this file already records twice:
-a copy is not the roofline.
+a copy is not the roofline — and, per the section above, the copy figure was
+not even stable, so the specific 4.772 should not be read as the card's rate.
 
 Against `two_read_one_write`, 6.139 TB/s on the same card in the same process,
 the forward runs at **97.9% cold / 97.3% warm**. Both halves of that need
@@ -904,6 +955,14 @@ saying, and my first correction gave only the first: 97.9% is specifically
 97.3%. Quoting the cold ratio unlabelled picked the flattering one of two
 numbers sitting side by side in the same file. @Reviewer caught that too, in
 the correction to the previous mistake.
+
+On the regenerated sidecar the same ratios are **98.3% cold / 98.5% warm**
+(`5.9505 / 6.0521` and `5.9635 / 6.0521`), and 86.1% against write. Note the
+cold/warm order has flipped — warm is now the higher of the two — which is
+exactly what a 0.2 percentage-point gap between rows whose spread is 0.5-1.9%
+should be expected to do. Neither ordering means anything, and the earlier
+paragraph's care about *which* pair is quoted matters more than the pair's
+value: these two are not separable by this protocol.
 
 Two further qualifications on the denominator and the numerator:
 
@@ -918,7 +977,9 @@ Two further qualifications on the denominator and the numerator:
   weight**. Exact traffic is 536,879,104. The weight is 8,192 bytes against
   512 MiB, so it moves the derived TB/s by 0.0015% and no conclusion here
   turns on it -- but a figure labelled as exact should be exact, and it is the
-  sidecar's job to let the number be re-derived rather than approximated.
+  sidecar's job to let the number be re-derived rather than approximated. Both
+  counts are now stored, as `bytes_moved_min_traffic` and
+  `bytes_moved_exact_including_weight`.
 
 The three probes are in the sidecar so the denominator can be re-derived rather
 than taken on trust.
@@ -931,12 +992,25 @@ shape is 1.73x cold (`154.7379 / 89.323`) and 1.72x warm
 (`154.9402 / 89.8598`), not the 2.04x that number implied. Stating it as a bare
 "1.73x" repeated the habit the paragraph above corrects -- the cold pair is the
 larger of two, and which pair produced a ratio belongs next to the ratio.
+The regenerated run gives 1.72x cold and 1.72x warm, so the speedup is the one
+figure here that is genuinely stable; ~1.72x is the number to quote.
+
+**`157.5` and `902` remain unbacked.** Both appear in this section as torch
+figures and neither has a committed sample: the sidecar measures
+`F.rms_norm` only, so the `nn.RMSNorm` upper end of "154.7-157.5" and the
+unfused fp32-weight 902 us are still ad-hoc numbers of exactly the kind this
+section exists to condemn. They are retained because they are load-bearing only
+as *negative* evidence -- they are the two candidates ruled out as explanations
+for the withdrawn 183.2 -- but they should not be cited for anything else until
+the generator covers them.
 
 **The 1.9884% noise floor was borrowed.** It was a different shape, provider and
 card's observed span, quoted as though it bounded this experiment. The spread
 actually observed in these rows is 0.18-2.18%, worst case on the L2-evicted
 FlyDSL rows -- which is the number that belongs here, and it is only meaningful
-for these rows.
+for these rows. The regenerated run gives 0.26-1.86%, same worst-case row, so
+the span is itself only reproducible to about half a percentage point: read it
+as "order of two percent on the cold rows", not as a bound.
 
 The general rule, since this is the third variant of the same defect in this
 file: a figure quoted in a review or a message needs the raw samples committed
