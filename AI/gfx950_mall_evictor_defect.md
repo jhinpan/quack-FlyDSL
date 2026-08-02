@@ -215,16 +215,16 @@ window covers one whole rotation and the evictor runs *outside* it.
 
     ### buffer = 64 MiB
      buffers    working set   vs MALL      GB/s
-           1         128 MiB     0.50x      6101
-           2         256 MiB     1.00x      6478
-           3         384 MiB     1.50x      4784     <- step here
-           4         512 MiB     2.00x      4904
-           8        1024 MiB     4.00x      4941
-          32        4096 MiB    16.00x      5026
+           1         128 MiB     0.50x      6079
+           2         256 MiB     1.00x      6459
+           3         384 MiB     1.50x      4787     <- step here
+           4         512 MiB     2.00x      4902
+           8        1024 MiB     4.00x      4961
+          32        4096 MiB    16.00x      5016
 
 The honest figure is the **boundary step between adjacent rotation counts**:
-2 buffers (256 MiB) = 6478 GB/s vs 3 buffers (384 MiB) = 4784 GB/s, one
-rotation apart, same kernel — **1.354x inflation**.
+2 buffers (256 MiB) = 6459 GB/s vs 3 buffers (384 MiB) = 4787 GB/s, one
+rotation apart, same kernel — **1.349x inflation**.
 
 The 16 MiB sweep crosses the boundary at 8 → 9 buffers, but the script never
 computed that step: `bench_rotation` looks for `lo + 1 = 9` and `ROTATIONS`
@@ -237,9 +237,9 @@ is held to. `ROTATIONS` now samples 9, and the script prints an explicit
 With 9 sampled, the 16 MiB sweep does produce an adjacent step:
 
      buffers    working set   vs MALL      GB/s
-           8         256 MiB     1.00x      5326
-           9         288 MiB     1.12x      4012     <- step here
-          12         384 MiB     1.50x      4066
+           8         256 MiB     1.00x      5322
+           9         288 MiB     1.12x      4022     <- step here
+          12         384 MiB     1.50x      4030
 
 A second sampling defect turned up on the way here, and it is worth stating
 because it also came from my own code. `rounds` was `iters // n_buffers`, so a
@@ -248,7 +248,8 @@ sides of every boundary step were sampled unequally, and the *high* buffer
 count side, which is where the post-boundary rows live, always got less data.
 `ROUNDS` is now a constant 15 (75 rounds per point) regardless of buffer count.
 
-Across runs the same step measures **1.298x, 1.324x, 1.328x, 1.354x**. Quote
+Across runs the same step measures **1.298x, 1.323x, 1.324x, 1.328x, 1.345x,
+1.349x, 1.354x**. Quote
 this as **~1.3x**; the third significant figure is not reproducible and my
 earlier "1.32x at two buffer sizes, independently" claimed a precision and an
 agreement the data never supported. The qualitative result — a step of roughly
