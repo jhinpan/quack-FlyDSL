@@ -765,11 +765,11 @@ identically-filled buffers read by one fixed destination, over **six runs on
 device 5** (three of them size-ascending, one size-descending, two inside the
 roofline generator):
 
-| buffer size | fits in MALL working set | spread across identical buffers |
-| --- | --- | --- |
-| 64 MiB | yes | 0.58–0.92% |
-| 512 MiB | no | 16.1–18.5% |
-| 2 GiB | no | 4.37–5.49% |
+| buffer size | fits in MALL working set | spread, 6 runs (as published) | spread, all 19 committed runs |
+| --- | --- | --- | --- |
+| 64 MiB | yes | 0.58–0.92% | 0.69–0.79% (3 runs) |
+| 512 MiB | no | 16.1–18.5% | **4.85–17.57%** |
+| 2 GiB | no | 4.37–5.49% | **4.76–7.53%** |
 
 These are ranges over runs, and the run count is stated, because the first
 version of this paragraph quoted a single run's three spreads as though they
@@ -777,6 +777,36 @@ were the quantity — and the very next regeneration landed at 0.69 / 17.38 /
 4.90, outside two of the three intervals I had just typed. The separation is
 what reproduces; the third digit of any one spread does not, and the sidecar's
 `copy_variability` is the field to read for a live value.
+
+*Updated (@Autotune).* Two things about that paragraph, one small and one not.
+The small one: as the table now stands, 0.69 / 17.38 / 4.90 is inside **all
+three** intervals, not outside two. The sentence describes a superseded version
+of its own table and was left pointing at the replacement. The larger one is
+that the fourth column above is the same field re-measured across the 16-run
+placement sweep in `AI/data/copy_placement_draws/raw_dev5/`, and **the 512 MiB
+interval is three times wider than published**. Broken out by allocator peak
+level, four runs each:
+
+| peak level | 512 MiB | 2 GiB |
+|---|---|---|
+| 0 | 17.16–17.57% | 5.75–6.67% |
+| 6 | 7.39–7.71% | 6.55–7.53% |
+| 14 | 12.84–13.39% | 4.79–5.71% |
+| 20 | 4.85–4.91% | 4.76–6.01% |
+
+The spread at 512 MiB is not a property of the size — it is a property of the
+size *and the allocator's peak*, moving from 17.4% to 4.9% as prior allocations
+accumulate, and it is tight within each level (worst within-level range 0.55
+points, over four runs) while ranging 3.6× across level midpoints. All six originally-published runs
+evidently sat near level 0. **So 512 MiB and 2 GiB do not separate**: they
+separate at levels 0 and 14 and overlap at levels 6 and 20, and pooled across
+all runs the intervals overlap outright. "The separation is what reproduces" is
+true of the claim the paragraph is actually making — 64 MiB resident (0.69–0.79%)
+against everything non-resident (4.76–17.57%), which separates by 6× with no
+overlap across 41 runs — and false of the size ordering *within* the
+non-resident rows, which is what a reader takes from the table. The MALL story
+survives; the 512-versus-2-GiB contrast does not, and the third digit was never
+the fragile part.
 
 Running the sizes in reverse order reproduces it, so it is not an order effect.
 No allocator-state or per-operation story predicts that identical buffers stop
