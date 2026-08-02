@@ -235,14 +235,21 @@
       },
       {
         "path": "AI/assemble_copy_axes.py",
-        "sha256": "61b1cb5c44ebfd57993c1b54b932af5def303f97e5940fd1d057aaab5e2447b5",
-        "bytes": 66395
+        "sha256": "4cfc278b6dc0845ccdec218ad85ee0cb6d71536a90c1e407e8b17b3ea99c3d6a",
+        "bytes": 67515
       }
     ],
     "what_this_proves": "the assembler read exactly these bytes. It does not prove they came from a GPU, and a manifest cannot: it is a binding between artifact and raw runs, not an attestation."
   },
-  "commit": "134802e",
+  "commit": "567193c",
   "worktree_dirty": true,
+  "worktree_dirty_paths": [
+    "AI/assemble_copy_axes.py",
+    "AI/assemble_order_confound.py",
+    "AI/data/copy_placement_draws/copy_axes_dev5.json",
+    "AI/data/copy_placement_draws/order_confound_dev5.json"
+  ],
+  "worktree_dirty_note": "a dirty ancestor means the commit above does not pin the code that produced this artifact, so the paths are listed rather than just a boolean -- a reader needs to see whether the difference touches the probe, the assembler, or something unrelated. Note that this can never read clean in the commit that CONTAINS the artifact: writing the file dirties the tree the flag describes, and running the sibling assembler afterwards dirties it again. The flag is about the inputs and the code, and the path list is what makes that checkable.",
   "historical_table": {
     "source": "AI/flydsl_rmsnorm_notes.md:869",
     "buffer_size_mib": 2048,

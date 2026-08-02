@@ -1174,17 +1174,33 @@ def _input_manifest(src_dir, extra):
 
 
 def _git():
-    def run(*a):
+    def run(*a, strip=True):
         r = subprocess.run(
             ["git", "-C", str(REPO), *a], capture_output=True, text=True, check=False
         )
         if r.returncode != 0:
             raise SystemExit(f"git {' '.join(a)} failed: {r.stderr.strip()}")
-        return r.stdout.strip()
+        return r.stdout.strip() if strip else r.stdout
 
+    # Not `.strip()` then `ln[3:]`: porcelain status codes are two columns and an
+    # unstaged modification leads with a space, so stripping the whole output eats
+    # one character off the first path only -- producing something close enough to
+    # a real path to read as correct.
+    dirty = [ln[3:] for ln in run("status", "--porcelain", strip=False).splitlines()]
     return {
         "commit": run("rev-parse", "HEAD")[:7],
-        "worktree_dirty": bool(run("status", "--porcelain")),
+        "worktree_dirty": bool(dirty),
+        "worktree_dirty_paths": dirty,
+        "worktree_dirty_note": (
+            "a dirty ancestor means the commit above does not pin the code that "
+            "produced this artifact, so the paths are listed rather than just a "
+            "boolean -- a reader needs to see whether the difference touches the "
+            "probe, the assembler, or something unrelated. Note that this can never "
+            "read clean in the commit that CONTAINS the artifact: writing the file "
+            "dirties the tree the flag describes, and running the sibling assembler "
+            "afterwards dirties it again. The flag is about the inputs and the code, "
+            "and the path list is what makes that checkable."
+        ),
     }
 
 

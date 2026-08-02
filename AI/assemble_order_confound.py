@@ -384,7 +384,11 @@ def _git():
         "worktree_dirty_note": (
             "a dirty ancestor means the commit above does not pin the code that produced "
             "this artifact. The paths are listed so a reader can see whether the "
-            "difference touches the probe or the assembler."
+            "difference touches the probe or the assembler. Note that this can never "
+            "read clean in the commit that CONTAINS the artifact: writing the file "
+            "dirties the tree the flag describes, and running the sibling assembler "
+            "afterwards dirties it again. The flag is about the inputs and the code, "
+            "and the path list is what makes that checkable."
         ),
     }
 
