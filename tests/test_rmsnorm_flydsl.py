@@ -1997,6 +1997,95 @@ def test_the_autotuned_path_does_not_share_a_launcher_across_row_counts():
     _assert_close(rmsnorm_autotuned(ordinary, weight), _reference(ordinary, weight, 1e-6))
 
 
+def test_a_persisted_singleton_artifact_cannot_be_loaded_for_another_row_count(
+    tmp_path, monkeypatch
+):
+    """The disk-artifact singleton path, the other gap @Reviewer left open.
+
+    The tuner persists winners to ``$FLYDSL_AUTOTUNE_CACHE_DIR`` and reloads
+    them at import, so a singleton tuned in one process could in principle be
+    handed to an ordinary call in the next -- a reuse the in-process test
+    cannot see, because it never crosses a process boundary.
+
+    Measured end to end first, with a forced search (``FLYDSL_AUTOTUNE=1``)
+    into a private cache dir, guard present and guard removed:
+
+        A: singleton force-tuned    -> artifact written, 1 key, m = 1
+        B: fresh process, loads 1 key from disk
+        B: ordinary (m=8) error inheriting that artifact = 0.0  (both)
+
+    So the artifact does cross, and is correctly not applied to the other row
+    count. The reason is again that ``m`` leads the tuner key, and the key is
+    what gets serialised -- ``_save_disk_cache`` writes ``json.dumps(list(key))``
+    and ``_load_disk_cache`` reads it back with ``tuple(json.loads(...))``.
+
+    The subprocess version of this takes minutes of real tuning per case, so
+    what is asserted here is the property that makes the crossing safe: the
+    round-trip preserves the row count in the key. If a future change coarsens
+    the persisted key -- drops ``m``, or hashes the key into something m-free
+    to shorten the file -- this fails, and that is exactly the change that
+    would make a stale singleton artifact reusable for m = 8.
+    """
+    _clear_caches()
+    tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
+    monkeypatch.setattr(tuner, "_cache_file", tmp_path / "rmsnorm_direct.json")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CONFIG_DIR", str(tmp_path / "artifacts"))
+
+    def bench_once(call, warmup, rep):
+        call()
+        torch.cuda.synchronize()
+        return 1.0
+
+    monkeypatch.setattr(tuner, "_do_bench", bench_once)
+
+    # Real keys from real forced searches. An unforced call takes the
+    # default-config path and adds no entry at all -- measured, cache stays
+    # empty -- so manufacturing keys by hand would make the round-trip below a
+    # JSON identity check and nothing more.
+    weight = torch.randn(64, device="cuda", dtype=torch.bfloat16)
+    singleton = torch.randn((64, 1), device="cuda", dtype=torch.bfloat16).t()
+    ordinary = torch.randn((8, 64), device="cuda", dtype=torch.bfloat16)
+    rmsnorm_autotuned(singleton, weight)
+    rmsnorm_autotuned(ordinary, weight)
+
+    keys = set(tuner.cache)
+    assert len(keys) == 2, (
+        f"premise: the singleton and the ordinary call tuned separately, got {len(keys)} "
+        "key(s) -- if this is 1 they already share a tuner entry, before any disk round-trip"
+    )
+
+    tuner._save_disk_cache()
+    assert tuner._cache_file.exists(), "premise: the tuner wrote an artifact"
+    tuner.cache.clear()
+    tuner._load_disk_cache()
+    reloaded = set(tuner.cache)
+
+    for key in keys:
+        assert key in reloaded, (
+            "the tuner's own save/load round-trip did not preserve this key "
+            f"(row count {key[0]}); a persisted singleton artifact may now be "
+            "looked up for a different row count"
+        )
+
+    assert len(reloaded) == len(keys), (
+        f"{len(keys)} keys went to disk and {len(reloaded)} came back; the "
+        "persisted keys are collapsing, so artifacts tuned for one row count "
+        "can be loaded for another"
+    )
+    # The row count is what separates a singleton artifact from any other, so
+    # the persisted keys must still differ in that term wherever they differ at
+    # all. Writing this as ``key[0] == key[0]`` -- which is what a "check the
+    # leading term" assertion collapses to -- was the first draft, and it is the
+    # tautology this suite has spent the session removing.
+    from quack.flydsl.rmsnorm_autotune import _RMSNORM_AUTOTUNE_KEY
+
+    assert _RMSNORM_AUTOTUNE_KEY[0] == "m", (
+        "the persisted key no longer leads with the row count; a singleton "
+        "artifact written by an earlier process can now be loaded for any m"
+    )
+
+
 def test_a_compiled_singleton_backward_does_not_poison_later_gradients():
     """The backward path, which the forward tests do not reach.
 
