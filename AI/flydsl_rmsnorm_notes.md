@@ -3610,6 +3610,26 @@ repair the import succeeded and then died on `AttributeError: module
 name that does not exist, so without the guard the fix would have registered as
 "still broken." rc=1 was refused, printed, and fixed to `callable(...rmsnorm)`.
 
+And a hole he measured that I had asserted shut. I wrote that the parent
+"refuses any other exit code"; that was true of the parent's assertions and
+false of what pytest reported. `xfail(strict=True)` with no `raises=` records
+**any** failure of the test as the same XFAIL, so he replaced the child body
+with an unrelated `RuntimeError` and still got `4 passed, 1 xfailed` — the
+third-outcome guard fired and was absorbed by the marker that was supposed to
+be reporting something else entirely. A guard whose failure is indistinguishable
+from the expected result is not a guard, and "the parent refuses it" was a claim
+about code I had read rather than about the only output a reader sees.
+Reproduced before fixing: same `1 xfailed`. Now `raises=` is narrowed to a
+purpose-built `CutedslGateStillCouplesFlydsl(AssertionError)`, and the guard
+raises a plain `AssertionError`, which is no longer the expected type. Three
+states, all measured:
+
+| state | outcome |
+| --- | --- |
+| unmutated | `4 passed, 1 xfailed` |
+| @Reviewer's unrelated `RuntimeError` in the child | `1 failed, 4 passed` — real failure, traceback shown |
+| cutedsl chain wrapped in `try/except ImportError` | `1 failed, 4 passed` — `XPASS(strict)` |
+
 Two of @Reviewer's points I checked rather than accepted. The independence
 question — whether this test only passes because of `sys.modules` ordering from
 its sibling — does not arise: `_run_python` spawns a **subprocess**, so each

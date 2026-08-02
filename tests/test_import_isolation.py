@@ -170,8 +170,27 @@ def test_simulated_cuda_preserves_eager_bootstrap_order_and_exports():
     )
 
 
+class CutedslGateStillCouplesFlydsl(AssertionError):
+    """The one failure that counts as the expected xfail below.
+
+    A distinct type, and ``raises=`` on the marker, because @Reviewer measured
+    the hole in the first version: ``xfail(strict=True)`` with no ``raises``
+    records ANY failure of the test as the same XFAIL. He replaced the child
+    body with an unrelated ``RuntimeError`` and still got ``1 xfailed`` /
+    ``4 passed, 1 xfailed`` -- so my claim that "the parent refuses any other
+    exit code" was true of the parent's assertions and false of what pytest
+    reported, which is the only place a reader looks. Reproduced here before
+    fixing: same result.
+
+    With ``raises=`` set to this type, the third-outcome guard raises a plain
+    ``AssertionError``, which is no longer the expected exception and so
+    surfaces as a real failure instead of hiding inside the xfail.
+    """
+
+
 @pytest.mark.xfail(
     strict=True,
+    raises=CutedslGateStillCouplesFlydsl,
     reason=(
         "DESIRED BEHAVIOUR, NOT CURRENT BEHAVIOUR. FlyDSL has no cutlass "
         "dependency, so importing quack.rmsnorm_flydsl should survive a broken "
@@ -179,7 +198,9 @@ def test_simulated_cuda_preserves_eager_bootstrap_order_and_exports():
         "bootstrap unconditionally on CUDA. Written as a strict xfail per "
         "@Reviewer, so that repairing the import boundary turns this GREEN "
         "instead of red -- a plain green assertion on the broken behaviour "
-        "would make the fix look like a regression."
+        "would make the fix look like a regression. raises= is narrowed to "
+        "CutedslGateStillCouplesFlydsl so that an unrelated failure cannot be "
+        "absorbed as this expected one."
     ),
 )
 def test_simulated_cuda_flydsl_import_survives_a_broken_cutedsl_chain():
@@ -280,16 +301,22 @@ def test_simulated_cuda_flydsl_import_survives_a_broken_cutedsl_chain():
         check=False,
     )
 
+    # A plain AssertionError, deliberately NOT the expected-xfail type: an
+    # unrelated breakage must surface as a real failure rather than be absorbed
+    # as the expected one. This is the assertion @Reviewer's mutation escapes
+    # through when raises= is absent.
     assert result.returncode in (0, 3), (
         "the simulation broke for a reason that is neither outcome it "
         f"distinguishes (rc={result.returncode}):\n" + result.stdout + result.stderr
     )
-    # Today: 3. When the import boundary is fixed: 0, this passes, and the
-    # strict xfail turns that pass into a failure telling you to flip it.
-    assert result.returncode == 0, (
-        "import quack.rmsnorm_flydsl still dies inside the cutedsl bootstrap "
-        "it does not depend on (quack/__init__.py:6)"
-    )
+    # Today: 3, raised as the expected type -> XFAIL. When the import boundary
+    # is fixed: 0, the test passes, and strict=True turns that pass into a
+    # failure telling you to flip it.
+    if result.returncode != 0:
+        raise CutedslGateStillCouplesFlydsl(
+            "import quack.rmsnorm_flydsl still dies inside the cutedsl "
+            "bootstrap it does not depend on (quack/__init__.py:6)"
+        )
 
 
 def test_pytest_plugin_collects_on_rocm_without_cutlass(tmp_path):
