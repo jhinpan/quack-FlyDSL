@@ -3300,11 +3300,21 @@ thing that would actually survive a toolchain change.
 (`quack/autotuner.py:270`: `not os.environ.get(..., False)`), so `="0"`,
 `="false"` and `="no"` all *enable* forced update and there is no assignment
 that disables it — only `unset`, or the empty string. Confirmed. What makes it
-unambiguously a defect rather than a style choice is that it is the **only** one
-of the eight env reads in that file written this way: `:127`, `:174`, `:352`,
-`:456` all compare `== "1"`, and `quack/cache/__init__.py:38` does too. Anyone
-writing `QUACK_FORCE_CACHE_UPDATE=0` to turn the behaviour off gets the
-opposite, and the surrounding code taught them to expect otherwise.
+unambiguously a defect rather than a style choice is that it is the **only**
+boolean flag in that file written this way. The denominator matters and I got it
+wrong first: I published "the only one of the **eight** env reads", and there are
+**seven** — an AST walk over `os.getenv` / `os.environ.get` / `os.environ[]`
+gives `:35`, `:46`, `:127`, `:174`, `:270`, `:352`, `:456`. I had folded in
+`quack/cache/__init__.py:38`, which is a different file. @Autotune caught it
+(`b12b184f`) and supplied the tighter framing: `:35` (`QUACK_HOME`) and `:46`
+(`QUACK_CACHE_DIR`) are not flags at all but paths with defaults, so the honest
+statement is **1 of 5 flags** — `:127`, `:174`, `:352`, `:456` all compare
+`== "1"`, and only `:270` does not. Narrowing the denominator strengthens the
+finding rather than weakening it. Anyone writing `QUACK_FORCE_CACHE_UPDATE=0` to
+turn the behaviour off gets the opposite, and the surrounding code taught them to
+expect otherwise. (`:46` is in fact the sturdiest read in the file:
+`os.getenv(..., "").strip() or default_cache_dir()` falls back on empty and on
+all-whitespace. `:270` is the lone outlier.)
 
 Related, same file, also untouched: `autotune()`'s module-level default is
 `cache_results=True` (`:526`), `Autotuner.__init__`'s is `False` (`:109`), and
