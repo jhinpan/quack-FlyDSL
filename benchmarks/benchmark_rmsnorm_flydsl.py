@@ -270,6 +270,18 @@ def _last_level_cache_bytes(
     by_uid: list[str] = []
     by_bdf: list[str] = []
     unparsed_nodes: list[str] = []
+    contradicted: list[str] = []
+
+    def _field(props: dict[str, str], name: str) -> int | None:
+        """An integer field that must be *present* and must parse. None means
+        neither -- absent and malformed are the same amount of evidence."""
+        if name not in props:
+            return None
+        try:
+            return int(props[name])
+        except ValueError:
+            return None
+
     try:
         for node in sorted(os.listdir(node_root)):
             base = os.path.join(node_root, node)
@@ -279,38 +291,50 @@ def _last_level_cache_bytes(
             except OSError:
                 unparsed_nodes.append(f"{node}:unreadable")
                 continue
-            # Skip a node whose numeric fields do not parse, rather than letting
-            # the exception escape. Scanning the whole tree means an unrelated
-            # malformed node -- one that is not even a candidate match -- would
-            # otherwise abort the benchmark instead of falling back.
-            #
-            # But record it. A skipped node is not neutral: it is a node that
-            # could be neither confirmed nor ruled out as this card. If the
-            # skipped one WAS this card, the search falls through to a PCI match
-            # on some other node -- reachable under CPX, where eight logical
-            # devices share one address -- and reports another device's topology
-            # as if it were a clean read. @Autotune's point about cache entries
-            # applies here too, and I only checked this loop because of it.
-            try:
-                if int(props.get("gfx_target_version", 0)) == 0:
-                    continue  # CPU node
-                if (
-                    want_uid is not None
-                    and "unique_id" in props
-                    and int(props["unique_id"]) == want_uid
-                ):
-                    by_uid.append(base)
-                if bus is not None and device is not None:
-                    location = int(props.get("location_id", 0))
-                    if (
-                        int(props.get("domain", 0)) == domain
-                        and ((location >> 8) & 0xFF) == bus
-                        and ((location >> 3) & 0x1F) == device
-                    ):
-                        by_bdf.append(base)
-            except ValueError:
+
+            # Validate the fields; do not infer from what int() happens to
+            # raise. `.get("gfx_target_version", 0)` read a *missing* field as
+            # 0 and silently classified the node as a CPU -- so a GPU node with
+            # that field absent vanished from the scan without being recorded,
+            # and the search fell through to a same-BDF neighbour. @Reviewer
+            # demonstrated that against 337bdbd: it is the same wrong-device
+            # answer c597e11 closed, reached through a missing field instead of
+            # a bad integer. Absent and malformed are the same amount of
+            # evidence, so they take the same path.
+            gfx_version = _field(props, "gfx_target_version")
+            if gfx_version is None:
                 unparsed_nodes.append(f"{node}:unparseable_properties")
                 continue
+            if gfx_version == 0:
+                continue  # genuinely known to be a CPU node
+
+            node_uid = _field(props, "unique_id") if "unique_id" in props else None
+            if want_uid is not None and node_uid is not None and node_uid != want_uid:
+                # This node states an identity, and it is not the one we asked
+                # for. That is positive evidence of a *different* device, not
+                # missing evidence -- so it must not later be accepted by PCI
+                # address. Recording it is what distinguishes "no unique_id
+                # information available" from "the only candidate says no".
+                contradicted.append(node)
+                continue
+            if want_uid is not None and node_uid == want_uid:
+                by_uid.append(base)
+            elif "unique_id" in props and node_uid is None:
+                unparsed_nodes.append(f"{node}:unparseable_properties")
+                continue
+
+            if bus is not None and device is not None:
+                location = _field(props, "location_id")
+                node_domain = _field(props, "domain")
+                if location is None or node_domain is None:
+                    unparsed_nodes.append(f"{node}:unparseable_properties")
+                    continue
+                if (
+                    node_domain == domain
+                    and ((location >> 8) & 0xFF) == bus
+                    and ((location >> 3) & 0x1F) == device
+                ):
+                    by_bdf.append(base)
     except OSError:
         return fallback, {"source": "torch_l2_fallback", "reason": "no_kfd_topology"}
 
@@ -324,8 +348,27 @@ def _last_level_cache_bytes(
         # Reachable under CPX. unique_id would have separated these; getting
         # here means it was unavailable or matched nothing.
         return fallback, {"source": "torch_l2_fallback", "reason": "ambiguous_pci_address"}
+    elif contradicted:
+        # Distinguishable from a plain absence: candidates existed at this
+        # address and each stated a different identity. "No node matched" would
+        # read as "the topology does not describe this card", which is the
+        # opposite of what happened.
+        miss: dict[str, Any] = {
+            "source": "torch_l2_fallback",
+            "reason": "unique_id_contradicted",
+            "contradicting_nodes": contradicted[:20],
+        }
+        if unparsed_nodes:
+            miss["skipped_nodes"] = unparsed_nodes[:20]
+        return fallback, miss
     else:
-        return fallback, {"source": "torch_l2_fallback", "reason": "no_matching_node"}
+        miss = {"source": "torch_l2_fallback", "reason": "no_matching_node"}
+        if unparsed_nodes:
+            # Why nothing matched is the actionable part: a tree we could not
+            # fully read is a different situation from one that genuinely does
+            # not contain this card.
+            miss["skipped_nodes"] = unparsed_nodes[:20]
+        return fallback, miss
 
     # The two match keys are not equally robust to a skipped node, and the
     # difference is positive evidence versus absence of competing evidence:
@@ -342,6 +385,12 @@ def _last_level_cache_bytes(
     # corrupt, asking for its unique_id fell through to a PCI match on a
     # different node and returned that device's 268435456 with matched_by
     # pci_domain_bus_device and no degradation marked at all.
+    #
+    # A contradiction is stronger than a skip and is handled above rather than
+    # here: a node that states a *different* unique_id is not a candidate we
+    # failed to evaluate, it is one we evaluated and rejected, so accepting it
+    # by PCI address afterwards would override direct evidence with a weaker
+    # key. Those nodes never enter by_bdf.
     node_scan_degraded = bool(unparsed_nodes) and key != "unique_id"
 
     # Entries skipped inside the *matched* node are recorded, not just skipped.
@@ -376,6 +425,14 @@ def _last_level_cache_bytes(
                 level = int(cprops["level"])
             except ValueError:
                 skipped.append(f"{cache}:bad_level")
+                continue
+            if level < 1:
+                # A cache cannot be below L1. `level < 2 -> skip` treated 0 and
+                # -1 as ordinary low-level entries and dropped them silently,
+                # so a topology carrying nonsense still read as complete
+                # (@Reviewer, against 337bdbd). Only levels that are genuinely
+                # below the last level may be discarded without a record.
+                skipped.append(f"{cache}:invalid_level{level}")
                 continue
             if level < 2:
                 continue  # genuinely known to be below the last level
@@ -464,31 +521,49 @@ def _resolve_llc(
     llc_bytes, provenance = _last_level_cache_bytes(torch, properties, node_root)
     if _device_arch(torch) != "gfx950":
         return llc_bytes, provenance
-    if llc_bytes >= GFX950_MALL_BYTES and "degraded" not in provenance:
+    # Three independent conditions, and the value is only one of them. An
+    # earlier version accepted any figure at or above the MALL size with no
+    # degradation marked, which let the *fallback* through whenever torch
+    # happened to report a large enough L2 -- flatly contradicting the promise
+    # one paragraph up that a whole-topology failure is fatal. @Reviewer
+    # constructed it: absent topology plus `L2_cache_size = 256 MiB` returned
+    # `source: torch_l2_fallback` and was accepted. A number that is right by
+    # coincidence is not evidence, so the source has to be checked first.
+    if (
+        provenance["source"] == "kfd_topology"
+        and "degraded" not in provenance
+        and llc_bytes >= GFX950_MALL_BYTES
+    ):
         return llc_bytes, provenance
+    # Every applicable reason, not the first one that matches. The `elif` chain
+    # this replaces reported half the problem when both degradations occurred
+    # -- and the half it dropped was arbitrary, decided by clause order rather
+    # than by severity (@Reviewer). A run that fails closed for two independent
+    # reasons and names one sends its reader to fix half of it.
     degraded = provenance.get("degraded", [])
+    reasons = []
     if provenance["source"] == "torch_l2_fallback":
-        detail = f"the KFD topology could not be read ({provenance['reason']})"
-    elif "unidentified_nodes" in degraded:
-        detail = (
+        reasons.append(f"the KFD topology could not be read ({provenance['reason']})")
+    if "unidentified_nodes" in degraded:
+        reasons.append(
             f"the node was matched only by {provenance['matched_by']}, which is not "
             "unique under CPX, while "
             f"{', '.join(provenance['skipped_nodes'])} could not be identified, so "
             f"{provenance.get('matched_node')} may belong to a different device"
         )
-    elif "unparseable_cache_entries" in degraded:
-        detail = (
+    if "unparseable_cache_entries" in degraded:
+        entries = provenance["skipped_cache_entries"]
+        reasons.append(
             "the KFD topology was read but "
-            f"{len(provenance['skipped_cache_entries'])} cache entr"
-            f"{'y was' if len(provenance['skipped_cache_entries']) == 1 else 'ies were'} "
-            f"unparseable ({', '.join(provenance['skipped_cache_entries'])}), so the "
-            "MALL entry may be among them"
+            f"{len(entries)} cache entr{'y was' if len(entries) == 1 else 'ies were'} "
+            f"unusable ({', '.join(entries)}), so the MALL entry may be among them"
         )
-    else:
-        detail = (
+    if not reasons:
+        reasons.append(
             f"the KFD topology was read cleanly from {provenance.get('matched_node')} "
             "but reports no cache at or above the MALL size"
         )
+    detail = "; and ".join(reasons)
     # Do not claim the value is too small when it is not. Two of these paths
     # reach a value that is the right size and still untrustworthy -- a
     # wrong-card read, or a degraded read that happened to find the MALL anyway.

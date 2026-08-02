@@ -190,6 +190,165 @@ def _gfx950_node(tmp_path, caches):
     return str(root)
 
 
+def _node(root, index, properties, caches=()):
+    """A node written from a literal properties string, so a test can omit a
+    field entirely -- which is the case _write_node's keyword arguments cannot
+    express, and therefore the case that went untested."""
+    node = root / str(index)
+    (node / "caches").mkdir(parents=True)
+    (node / "properties").write_text(properties)
+    for cache_index, (level, size_kb) in enumerate(caches):
+        cache = node / "caches" / str(cache_index)
+        cache.mkdir()
+        (cache / "properties").write_text(f"level {level}\nsize {size_kb}\n")
+    return node
+
+
+REAL_UID = 11964983762810164421  # 0xa60c2956cd9dd4c5, as KFD prints it
+GPU_AT_BDF = f"gfx_target_version 90500\nunique_id {REAL_UID}\ndomain 0\nlocation_id 29952\n"
+
+
+def test_a_cache_level_below_one_is_recorded_not_silently_dropped(tmp_path):
+    # `level < 2 -> skip` treated 0 and -1 as ordinary low-level entries. No
+    # cache is below L1, so those are nonsense, and a topology carrying
+    # nonsense is not a topology that was read completely -- even when the
+    # surviving entries happen to produce the right number. @Reviewer's case:
+    # valid L2 + valid MALL + {level 0, size 524288} was accepted clean.
+    root = _gfx950_node(
+        tmp_path,
+        ["level 2\nsize 4096\n", "level 3\nsize 262144\n", "level 0\nsize 524288\n"],
+    )
+    value, provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), root)
+    assert value == 256 * 1024**2  # right answer, incomplete evidence
+    assert provenance["degraded"] == ["unparseable_cache_entries"]
+    assert provenance["skipped_cache_entries"] == ["2:invalid_level0"]
+
+    with pytest.raises(RuntimeError, match="cache entr(y was|ies were) unusable"):
+        benchmark._resolve_llc(
+            _gfx950_torch(), _properties(), argparse.Namespace(llc_bytes=None), root
+        )
+
+
+def test_a_genuine_l1_entry_is_still_dropped_silently(tmp_path):
+    # The negative control @Reviewer asked for. Level 1 is a real cache level
+    # and the live tree is full of them -- node 2 has 544 L1 entries
+    # (144x16 KiB + 256x32 KiB + 144x64 KiB). Recording those would mark every
+    # healthy read degraded.
+    root = _gfx950_node(
+        tmp_path,
+        [
+            "level 1\nsize 16\n",
+            "level 1\nsize 64\n",
+            "level 2\nsize 4096\n",
+            "level 3\nsize 262144\n",
+        ],
+    )
+    value, provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), root)
+    assert value == 256 * 1024**2
+    assert "degraded" not in provenance
+
+
+def test_a_missing_node_field_cannot_hand_the_read_to_a_neighbour(tmp_path):
+    # Same wrong-device answer c597e11 closed, reached through a missing field
+    # instead of a bad integer: `.get("gfx_target_version", 0)` read absent as
+    # 0 and classified this card's node as a CPU, so it left the scan without
+    # being recorded and a same-BDF neighbour was accepted clean.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    _node(root, 2, f"unique_id {REAL_UID}\ndomain 0\nlocation_id 29952\n", ((2, 4096), (3, 262144)))
+    _node(
+        root,
+        5,
+        "gfx_target_version 90500\ndomain 0\nlocation_id 29952\nunique_id 999\n",
+        ((2, 4096), (3, 262144)),
+    )
+    value, provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), str(root))
+    assert value == 4 * 1024**2
+    assert provenance["source"] == "torch_l2_fallback"
+    assert provenance["skipped_nodes"] == ["2:unparseable_properties"]
+
+    with pytest.raises(RuntimeError, match="could not be read"):
+        benchmark._resolve_llc(
+            _gfx950_torch(), _properties(), argparse.Namespace(llc_bytes=None), str(root)
+        )
+
+
+def test_a_node_that_states_a_different_uid_is_not_accepted_by_pci_address(tmp_path):
+    # A node asserting unique_id B when we asked for A is not missing evidence,
+    # it is evidence of a different device. Falling back to the PCI key there
+    # overrides a direct answer with a weaker one -- and the PCI key is shared
+    # under CPX, so it cannot overrule an explicit identity.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    _node(
+        root,
+        5,
+        "gfx_target_version 90500\ndomain 0\nlocation_id 29952\nunique_id 12345\n",
+        ((2, 4096), (3, 262144)),
+    )
+    value, provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), str(root))
+    assert value == 4 * 1024**2
+    assert provenance["reason"] == "unique_id_contradicted"
+    assert provenance["contradicting_nodes"] == ["5"]
+
+
+def test_a_node_with_no_uid_at_all_still_matches_by_pci(tmp_path):
+    # Over-refusal negative for the rule above: silence is not contradiction.
+    # A node that states no unique_id has not denied being this card, so the
+    # PCI key is still the best evidence available and must keep working.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    _node(
+        root, 5, "gfx_target_version 90500\ndomain 0\nlocation_id 29952\n", ((2, 4096), (3, 262144))
+    )
+    value, provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), str(root))
+    assert value == 256 * 1024**2
+    assert provenance["matched_by"] == "pci_domain_bus_device"
+    assert "degraded" not in provenance
+
+
+def test_gfx950_requires_a_trustworthy_source_not_merely_a_large_number(tmp_path):
+    # The resolver accepted any value >= the MALL with nothing marked degraded,
+    # checking the number before the provenance. On a host where torch reports
+    # a 256 MiB L2 the *fallback* satisfied that -- contradicting the promise
+    # that a whole-topology failure is fatal on gfx950. A number that is right
+    # by coincidence is not evidence.
+    big_l2 = _properties(l2=256 * 1024**2)
+    with pytest.raises(RuntimeError, match="could not be read"):
+        benchmark._resolve_llc(
+            _gfx950_torch(), big_l2, argparse.Namespace(llc_bytes=None), str(tmp_path / "absent")
+        )
+
+
+def test_all_applicable_reasons_are_named_not_just_the_first(tmp_path):
+    # The elif chain reported whichever clause came first, so a run failing
+    # closed for two independent reasons named one and sent its reader to fix
+    # half the problem. Clause order is not severity order.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    _node(root, 2, "gfx_target_version 90500\ndomain 0\nlocation_id not-a-number\n")
+    _node(root, 5, "gfx_target_version 90500\ndomain 0\nlocation_id 29952\n", ((2, 4096),))
+    bad = root / "5" / "caches" / "1"
+    bad.mkdir()
+    (bad / "properties").write_text("level 3\nsize 0\n")
+
+    _, provenance = benchmark._last_level_cache_bytes(
+        _hip_torch(), _properties(uuid_text=None), str(root)
+    )
+    assert provenance["degraded"] == ["unidentified_nodes", "unparseable_cache_entries"]
+
+    with pytest.raises(RuntimeError) as excinfo:
+        benchmark._resolve_llc(
+            _gfx950_torch(),
+            _properties(uuid_text=None),
+            argparse.Namespace(llc_bytes=None),
+            str(root),
+        )
+    message = str(excinfo.value)
+    assert "may belong to a different device" in message
+    assert "unusable" in message
+
+
 def test_resolve_llc_fails_closed_on_gfx950_rather_than_measuring_cache_warm(tmp_path):
     # The whole point of the helper. Returning torch's 4 MiB L2 here would let
     # the run complete with every row silently measured against a resident
@@ -222,7 +381,7 @@ def test_a_corrupt_mall_entry_beside_a_good_l2_entry_is_not_reported_as_success(
     assert provenance["degraded"] == ["unparseable_cache_entries"]
     assert provenance["skipped_cache_entries"] == ["1:bad_size_level3"]
 
-    with pytest.raises(RuntimeError, match="unparseable"):
+    with pytest.raises(RuntimeError, match="cache entr(y was|ies were) unusable"):
         benchmark._resolve_llc(
             _gfx950_torch(), _properties(), argparse.Namespace(llc_bytes=None), root
         )
@@ -253,7 +412,7 @@ def test_every_way_an_entry_can_go_missing_is_recorded(tmp_path, entry, tag):
     assert provenance["degraded"] == ["unparseable_cache_entries"]
     assert provenance["skipped_cache_entries"] == [f"1:{tag}"]
 
-    with pytest.raises(RuntimeError, match="unparseable"):
+    with pytest.raises(RuntimeError, match="cache entr(y was|ies were) unusable"):
         benchmark._resolve_llc(
             _gfx950_torch(), _properties(), argparse.Namespace(llc_bytes=None), root
         )
