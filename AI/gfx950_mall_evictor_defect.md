@@ -2,7 +2,9 @@
 
 Status: **confirmed by measurement**, fix not yet written. Blocks Experiment
 No.002 (MI355X flydsl-vs-torch matrix) — any MI355X numbers taken before this
-is fixed will overstate bandwidth on every shape below `32768x2048`.
+is fixed overstate bandwidth on 11 of the 18 benchmarked cells, including one
+`m=32768` cell. A second code path (`quack/autotuner.py`, 8 of 18) shares the
+root cause; see below.
 
 ## Summary
 
@@ -134,6 +136,39 @@ evidence, what costs the 1.32x. An earlier version of this block reported
 280–1070 GB/s at the larger evictor sizes; that was my own bug — the evictor
 was being run inside the timed window, so those numbers measured the evictor
 itself, not the copy.
+
+## A second code path with the same root cause
+
+`quack/autotuner.py` does not share the harness's rotation logic. It calls
+`_pick_l2_rotate_count` (`quack/bench/bench_utils.py:179`), which makes the same
+`L2_cache_size` mistake — `target_ratio * l2_size` = 12 MiB on gfx950 — but with
+different bounds: `min_buffers=4, max_buffers=16` against the harness's
+`min=2, max=4`.
+
+The different bounds change the outcome substantially. Because a 12 MiB target
+divided by any realistic per-call size yields `n_by_l2 == 1`, the
+`max(min_buffers, ...)` floor wins in **every** cell, so the autotuner always
+picks exactly 4 buffers. `target_ratio` and `max_buffers=16` are inert today.
+Simulating the same 18 cells:
+
+| path | picked | cells with WS <= 256 MiB |
+| --- | --- | --- |
+| harness `_rotation_count` (min=2) | 2 in most cells | 11 of 18, incl. `32768x1024` fwd at exactly 256.0 MiB |
+| autotuner `_pick_l2_rotate_count` (min=4) | 4 everywhere | 8 of 18, all `m=32768` cells clean |
+
+So the autotuner path is *less* affected than the harness, accidentally — the
+`min_buffers=4` floor absorbs the sizing error. Two consequences worth noting:
+
+- `4096x4096` forward lands at 4 x 64 MiB = **exactly 256.0 MiB**, the same
+  boundary the probe measured on the inflated side. Different cell from the
+  harness's, same trap.
+- Fixing the target to an effective LLC would make `n_by_l2` meaningful for the
+  first time, so it is a behavioural change here, not just a correctness one.
+  Unlike the harness, this path has **no evictor at all** — only rotation — so
+  the 8 affected cells have nothing else to fall back on.
+
+Scope note: `quack/autotuner.py` is not in PR #4's diff (that PR touches
+`quack/flydsl/rmsnorm_autotune.py`), so this is not blocked by the PR #4 fence.
 
 ## A false start worth recording
 
