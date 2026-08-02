@@ -2525,18 +2525,52 @@ bf16, `m*N` held at 2^24, against an fp32 reference, with `MAX_N` patched to
 `AI/probe_flydsl_cap_lift_accuracy.py`, artifact
 `AI/data/flydsl_cap_lift_accuracy.json`:
 
-| N | over cap | status | mean rel err |
-| --- | --- | --- | --- |
-| 4096 | no | ok | 1.9e-8 |
-| 8192 | no | ok | 2.2e-8 |
-| 16384 | yes | ok | 2.5e-8 |
-| 32768 | yes | ok | 2.7e-8 |
-| 65536 | yes | ok | 1.0e-8 |
-| 131072 | yes | ok | 2.8e-8 |
-| 262144 | yes | ok | 7.5e-8 |
+| N | over cap | fwd | mean rel err | bwd | dw outside suite tol |
+| --- | --- | --- | --- | --- | --- |
+| 4096 | no | ok | 1.9e-8 | ok | 0 |
+| 8192 | no | ok | 2.2e-8 | ok | 0 |
+| 16384 | yes | ok | 2.5e-8 | ok | 0 |
+| 32768 | yes | ok | 2.7e-8 | ok | 0 |
+| 65536 | yes | ok | 1.0e-8 | ok | 0 |
+| 131072 | yes | ok | 2.8e-8 | ok | 0 |
+| 262144 | yes | ok | 7.5e-8 | ok | 0 |
 
-Flat across a 64x range with no discontinuity at the cap. So the FlyDSL half
-of the policy-cap claim is now measured rather than asserted.
+Flat across a 64x range with no discontinuity at the cap, forward and
+backward. So the FlyDSL half of the policy-cap claim is now measured rather
+than asserted.
+
+**The first version of this artifact was not evidence, and @CrossVendor said
+so.** He held two older MI355X sidecars to a provenance standard -- no
+executed commit/tree, dirty worktrees, no accuracy assertions -- and then
+applied the same standard to mine, which failed it: no commit, tree,
+interpreter, device UUID, toolchain, source hashes or raw samples. He was
+right, and there was a worse instance of it he could not see from the JSON:
+the probe did `sys.path.insert(0, "/root/quack-FlyDSL-review")`, a *shared*
+checkout other agents move. The artifact could not name the code that produced
+it even in principle. An accuracy number attributed to a tree that may not have
+been the tree is this file's recurring defect wearing provenance clothes.
+
+The rewritten probe pins `--repo` (asserted clean, at `--expect-commit`, with
+the imported modules asserted to resolve inside it) before any GPU call, hashes
+the five load-bearing sources, records the environment and raw samples, and
+measures backward as well -- his H100 wide row covered fwd+bwd while mine
+covered fwd only, so the two sides were unequal in scope as well as in rigour.
+
+**And the backward verdict took two wrong single-number forms first, in
+opposite directions.** Bare `max_abs_err_dw = 0.125` looked like a breach of
+the 3e-2 bf16 gradient tolerance -- but the dw it sits on has magnitude 124, so
+as a fraction it is 7.5e-3. Switching to bare *relative* error then flagged
+131072 and 262144 as failures at 1.7e-1 and 4.9e-2 -- but those maxima land on
+single elements whose reference dw is about 1e-5, one bf16 ulp, where a ratio
+measures rounding and not accuracy: 1 element of 131072 and 2 of 262144, with
+the top-magnitude decile at 5e-3 and 6.8e-3. Neither number is what the suite
+asserts. `assert_close` applies `|a-b| <= atol + rtol*|b|`, and under that
+criterion every row passes with **zero** elements outside. Both raw numbers are
+still recorded in the artifact; only `within_suite_tolerance` is the claim.
+
+Which is the same defect twice more in one measurement -- a number correct
+about a set other than the one its label names -- caught only because the
+first version's verdict disagreed with the second version's.
 
 So the honest statement of row 10, after five wrong ones:
 
