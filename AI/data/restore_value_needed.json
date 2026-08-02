@@ -1,6 +1,6 @@
 {
   "probe": "probe_restore_value_needed.py",
-  "source_sha256_16": "5462da5ae9d970be",
+  "source_sha256_16": "640ddf2ae0136ed5",
   "device": "AMD Instinct MI355X",
   "hip_visible_devices": "5",
   "question": "Does rmsnorm need autotuner.restore_value? If not, the L2-cold -> L2-hot regime switch it forces (via has_hooks at autotuner.py:199 and :363) is a cost paid for nothing.",
@@ -90,51 +90,51 @@
       "rotation_can_matter_here": false,
       "cells_ms": {
         "graph_rotate__what_autotune_uses_today": {
-          "median": 0.09100167274475097,
+          "median": 0.09113679885864258,
           "runs": [
-            0.09113086700439453,
-            0.09024426460266113,
-            0.09100167274475097,
-            0.09020265579223632,
-            0.09113926887512207
+            0.09126020431518554,
+            0.09026419639587402,
+            0.09113679885864258,
+            0.09033740043640137,
+            0.09133660316467285
           ]
         },
         "graph_single__same_mechanism_no_rotation": {
-          "median": 0.08963126182556153,
+          "median": 0.08985259056091309,
           "runs": [
-            0.08959345817565918,
-            0.09086206436157226,
-            0.08953906059265136,
-            0.09101771354675293,
-            0.08963126182556153
+            0.08941799163818359,
+            0.09085080146789551,
+            0.08963739395141601,
+            0.0909585952758789,
+            0.08985259056091309
           ]
         },
         "do_bench_rotate__other_mechanism_rotated": {
-          "median": 0.11282049864530563,
+          "median": 0.11272100359201431,
           "runs": [
-            0.11364100128412247,
-            0.11282049864530563,
+            0.11368100345134735,
+            0.11272100359201431,
             0.11260099709033966,
-            0.11286100000143051,
-            0.11256100237369537
+            0.11287999898195267,
+            0.11244100332260132
           ]
         },
         "do_bench_single__what_restore_value_switches_to": {
-          "median": 0.1151610016822815,
+          "median": 0.11528100073337555,
           "runs": [
-            0.11496099829673767,
-            0.11536099761724472,
+            0.11514000222086906,
+            0.11512099951505661,
             0.11528100073337555,
-            0.1151610016822815,
-            0.11490100249648094
+            0.11552000045776367,
+            0.11532100290060043
           ]
         }
       },
       "effects": {
-        "rotation_effect_within_graph__single_over_rotate": 0.9849408161646293,
-        "rotation_effect_within_do_bench__single_over_rotate": 1.0207453704342695,
-        "mechanism_effect_at_rotate__do_bench_over_graph": 1.2397629103121424,
-        "end_to_end_switch__do_single_over_graph_rotate": 1.2654822511372357
+        "rotation_effect_within_graph__single_over_rotate": 0.9859090036756574,
+        "rotation_effect_within_do_bench__single_over_rotate": 1.0227109150893205,
+        "mechanism_effect_at_rotate__do_bench_over_graph": 1.2368330356528086,
+        "end_to_end_switch__do_single_over_graph_rotate": 1.264922645705186
       },
       "note": "The end-to-end ratio is NOT a cache measurement and must not be quoted as one. do_bench_single is SLOWER than graph_rotate here, which looks backwards for a 'warm is faster' story -- because the mechanism term dominates: do_bench pays one event pair and one fresh output allocation per launch, while the graph replays 200 recorded calls with no Python in the window. Also: bench_utils.py:98 is a claim about which CONFIG wins (relative ranking across layouts), not about the magnitude of any single config, so none of these ratios confirm or refute it -- that needs the whole config set scored under both regimes.",
       "why_the_rotation_term_is_~1.00_here": "Third version of this field. v1 argued the null result from torch's L2_cache_size = 4 MiB -- wrong cache, and precisely defect 1 of AI/gfx950_mall_evictor_defect.md (gfx950 is per-CU L1D -> 4 MiB per-XCD L2 x8 -> 256 MiB MALL -> HBM, ROCm Kernel Wiki hw-chiplet-xcd). v2 retracted that and reported NO surviving explanation. The explanation now on record is measured, not argued, and it is simpler than any of v2's three candidates: BOTH shapes this probe benchmarks sit on the same side of the MALL boundary in the rotated and single cells alike, so neither is a contrast. With inputs rotating over n=4 buffers and the output over exactly 1 (measured above, not inferred), the sets are (n+1)*t rotated vs 2*t single, and rotation can only change cache state when 2*t <= 256 MiB < (n+1)*t -- i.e. t in (51.2, 128] MiB. 8192x2048 has t=32 MiB (both sets fit); 32768x4096 has t=256 MiB (neither fits). Both predict ~1.00x, and both measure it. A scan over t = 32/48/56/64/96/128/160/192 MiB at N=1024 agrees on all eight points: 0.992, 1.010 outside the low edge; 0.932, 0.862, 0.864, 0.862 inside; 0.992, 1.003 outside the high edge. So rotation IS doing what it was built to do -- this probe just picked two shapes where it cannot show. Caveats that keep this short of settled: the MALL size is hardcoded here, not measured (the same caveat that document flags about its own 256 MiB); and a tight scan across the edges (t = 50/51/52/53 and 127/129/132/136 MiB) shows the transition is SOFT, ~0.95x and ~0.89x just outside where the model says 1.00x, so the capacity rule predicts the band but not a step at its edges. Sharpening that is Experiment No.002 territory, which gfx950_mall_evictor_defect.md blocks pending re-collection.",
@@ -161,51 +161,51 @@
       "rotation_can_matter_here": false,
       "cells_ms": {
         "graph_rotate__what_autotune_uses_today": {
-          "median": 0.012422095537185669,
+          "median": 0.012469079494476318,
           "runs": [
-            0.012411090135574341,
-            0.01241349458694458,
-            0.012422095537185669,
-            0.01248108983039856,
-            0.01244109034538269
+            0.01248908519744873,
+            0.012446285486221313,
+            0.012475880384445191,
+            0.012469079494476318,
+            0.012457679510116577
           ]
         },
         "graph_single__same_mechanism_no_rotation": {
-          "median": 0.012377489805221558,
+          "median": 0.012398085594177245,
           "runs": [
-            0.012421890497207641,
-            0.012440090179443359,
-            0.012352689504623413,
-            0.012360689640045166,
-            0.012377489805221558
+            0.012398085594177245,
+            0.012383079528808594,
+            0.012401084899902343,
+            0.012374085187911988,
+            0.01243309497833252
           ]
         },
         "do_bench_rotate__other_mechanism_rotated": {
-          "median": 0.020679999142885208,
+          "median": 0.020320000126957893,
           "runs": [
-            0.020160000771284103,
-            0.02072099968791008,
-            0.020640000700950623,
-            0.020700499415397644,
-            0.020679999142885208
+            0.019840000197291374,
+            0.020200499333441257,
+            0.020320000126957893,
+            0.020479999482631683,
+            0.020759999752044678
           ]
         },
         "do_bench_single__what_restore_value_switches_to": {
-          "median": 0.016440000385046005,
+          "median": 0.01727999933063984,
           "runs": [
-            0.017480000853538513,
-            0.016720000654459,
-            0.016440000385046005,
-            0.01640000008046627,
-            0.01640000008046627
+            0.017920000478625298,
+            0.016839999705553055,
+            0.01735999993979931,
+            0.01727999933063984,
+            0.01655999943614006
           ]
         }
       },
       "effects": {
-        "rotation_effect_within_graph__single_over_rotate": 0.9964091620588021,
-        "rotation_effect_within_do_bench__single_over_rotate": 0.7949710380284062,
-        "mechanism_effect_at_rotate__do_bench_over_graph": 1.6647754061284927,
-        "end_to_end_switch__do_single_over_graph_rotate": 1.3234482326941295
+        "rotation_effect_within_graph__single_over_rotate": 0.9943064040669143,
+        "rotation_effect_within_do_bench__single_over_rotate": 0.8503936625332505,
+        "mechanism_effect_at_rotate__do_bench_over_graph": 1.6296311316291998,
+        "end_to_end_switch__do_single_over_graph_rotate": 1.385827986604361
       },
       "note": "The end-to-end ratio is NOT a cache measurement and must not be quoted as one. do_bench_single is SLOWER than graph_rotate here, which looks backwards for a 'warm is faster' story -- because the mechanism term dominates: do_bench pays one event pair and one fresh output allocation per launch, while the graph replays 200 recorded calls with no Python in the window. Also: bench_utils.py:98 is a claim about which CONFIG wins (relative ranking across layouts), not about the magnitude of any single config, so none of these ratios confirm or refute it -- that needs the whole config set scored under both regimes.",
       "why_the_rotation_term_is_~1.00_here": "Third version of this field. v1 argued the null result from torch's L2_cache_size = 4 MiB -- wrong cache, and precisely defect 1 of AI/gfx950_mall_evictor_defect.md (gfx950 is per-CU L1D -> 4 MiB per-XCD L2 x8 -> 256 MiB MALL -> HBM, ROCm Kernel Wiki hw-chiplet-xcd). v2 retracted that and reported NO surviving explanation. The explanation now on record is measured, not argued, and it is simpler than any of v2's three candidates: BOTH shapes this probe benchmarks sit on the same side of the MALL boundary in the rotated and single cells alike, so neither is a contrast. With inputs rotating over n=4 buffers and the output over exactly 1 (measured above, not inferred), the sets are (n+1)*t rotated vs 2*t single, and rotation can only change cache state when 2*t <= 256 MiB < (n+1)*t -- i.e. t in (51.2, 128] MiB. 8192x2048 has t=32 MiB (both sets fit); 32768x4096 has t=256 MiB (neither fits). Both predict ~1.00x, and both measure it. A scan over t = 32/48/56/64/96/128/160/192 MiB at N=1024 agrees on all eight points: 0.992, 1.010 outside the low edge; 0.932, 0.862, 0.864, 0.862 inside; 0.992, 1.003 outside the high edge. So rotation IS doing what it was built to do -- this probe just picked two shapes where it cannot show. Caveats that keep this short of settled: the MALL size is hardcoded here, not measured (the same caveat that document flags about its own 256 MiB); and a tight scan across the edges (t = 50/51/52/53 and 127/129/132/136 MiB) shows the transition is SOFT, ~0.95x and ~0.89x just outside where the model says 1.00x, so the capacity rule predicts the band but not a step at its edges. Sharpening that is Experiment No.002 territory, which gfx950_mall_evictor_defect.md blocks pending re-collection.",
@@ -218,7 +218,7 @@
     "aliased_control_did_move": true,
     "control_is_meaningful": true,
     "restore_value_needed_for_flydsl_rmsnorm": false,
-    "cutedsl_status": "NOT MEASURED HERE. rmsnorm_fwd_tuned (rmsnorm.py:514) and rmsnorm_bwd_tuned (:1530) are the decorators restore_value would attach to, and quack/rmsnorm.py imports cuda.bindings.driver at module scope (:7), which does not exist on MI355X. The argument that they need no restore is source-level only: schema :367 and :1210 mutate output buffers exclusively, inputs carry no (a!) alias, dw_partial is stored via copy(tXrdW, tXgdW) at :1175/:1200 rather than accumulated, and every allocation is torch.empty. Confirming it on hardware needs an H100/H200 run of this probe against quack.rmsnorm._rmsnorm_fwd.",
+    "cutedsl_status": "NOT MEASURED HERE. rmsnorm_fwd_tuned (rmsnorm.py:514) and rmsnorm_bwd_tuned (:1530) are the decorators restore_value would attach to, and quack/rmsnorm.py imports cuda.bindings.driver at module scope (:7), which does not exist on MI355X. The argument that they need no restore is source-level only: schema :367 and :1210 mutate output buffers exclusively, inputs carry no (a!) alias, dw_partial is stored via copy(tXrdW, tXgdW) at :1175/:1200 rather than accumulated, and every allocation is torch.empty. Confirming it on hardware needs an H100/H200 run of this probe against quack.rmsnorm._rmsnorm_fwd. THAT REMEDY IS CURRENTLY UNAVAILABLE, and this field used to imply otherwise. Both tailscale H200 boxes (hyper00 100.101.70.115, hyper01 100.105.68.76) have nvidia-cutlass-dsl 4.5.2 installed while pyproject.toml pins ==4.6.1, and quack/pipeline.py:13 imports alloc_reserved_mbarrier, which 4.5.2's cutlass.pipeline does not export (it has MbarrierArray only). So quack.rmsnorm cannot be imported there either -- a different cause from the MI355X block, same consequence. Worse, quack/__init__.py:6 gates the whole cutedsl import chain on torch.version.hip is None, so on a CUDA box the FlyDSL path is unreachable too: 'import quack.rmsnorm_flydsl' fails inside quack/__init__.py before it ever reaches the FlyDSL module. On MI355X the same gate is what keeps FlyDSL working. Verified on both boxes, including @CrossVendor's own checkout at 4f36477.",
     "reading": "If outputs are stable AND the aliased control moved, the check is sensitive and the FlyDSL rmsnorm genuinely has nothing to restore. Combined with restore_value having zero callers tree-wide (inherited whole in b69bb67) and the identical pure-output mutation structure on the cutedsl side, that makes 'set restore_value on the rmsnorm decorators' a change that buys no correctness while costing the measurement regime. If the control did NOT move, this probe proves nothing -- the check would be vacuous and the stable result uninformative."
   }
 }

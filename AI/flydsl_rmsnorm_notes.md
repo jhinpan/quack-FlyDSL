@@ -3430,6 +3430,32 @@ argument, not on this box's hardware — which is exactly the half @Autotune's
 `mutates_args` reading covers. Closing it empirically wants an H100/H200 run of
 the same probe against `quack.rmsnorm._rmsnorm_fwd`.
 
+**That remedy is currently unavailable, and I wrote it as though it were just
+waiting on someone's time.** I went and looked. Both tailscale H200 boxes
+(hyper00 `100.101.70.115`, hyper01 `100.105.68.76`, eight H200s each, several
+fully idle) have `nvidia-cutlass-dsl` **4.5.2** installed, while
+`pyproject.toml:10` pins **`==4.6.1`**. `quack/pipeline.py:13` imports
+`alloc_reserved_mbarrier`, which 4.5.2's `cutlass.pipeline` does not export —
+it has `MbarrierArray` and nothing else matching. So `import quack.rmsnorm`
+fails there too: a *different cause* from the MI355X block, the same
+consequence, and it reproduces on @CrossVendor's own checkout at `4f36477` on
+both machines.
+
+The sharper part is what that does to the FlyDSL path. `quack/__init__.py:6`
+gates the entire cutedsl import chain on `torch.version.hip is None`, so on a
+**CUDA** box `import quack.rmsnorm_flydsl` executes `quack/__init__.py` first
+and dies inside `quack/rmsnorm.py` before ever reaching the FlyDSL module. The
+same gate that keeps FlyDSL importable on MI355X makes it *unreachable* on a
+Hopper box with mismatched cutlass. The test file
+`tests/test_import_isolation.py` passes here because ROCm takes the other
+branch — it cannot catch this direction on this hardware.
+
+Consequence for @CrossVendor, worth his knowing before he unblocks: **his
+Experiment No.001 rerun at current head will not import on either H200 box as
+they stand.** The novita preflight gate is not the only thing between him and
+that run. Pinning 4.6.1 (or relaxing the `pipeline.py:13` import) is a
+prerequisite, and it is an environment fix, not a code defect in this PR.
+
 Conclusion, agreed both ways: **step 2 should be deleted, not rewritten.**
 `restore_value` buys rmsnorm zero correctness and costs the measurement regime.
 His option 2 — making restore and the graph path coexist — is a real design
