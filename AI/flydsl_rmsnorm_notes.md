@@ -562,7 +562,35 @@ kernel.** One `rmsnorm(x, w)` costs ~30 us of *host* time at `256x4096`, against
 there against 28.22 as rung L4 of the ladder below** — 11% apart, on one machine,
 same shape, both host-side. The ladder holds five other configurations warm in
 the same process and the other probe does not, which is the obvious suspect and
-is *not* something either probe establishes. The threshold above is therefore
+is *not* something either probe establishes.
+
+**Measured since, and the obvious suspect is not it — it has the wrong sign.**
+`AI/probe_sidecar_disagreement.py` runs the 2×2 {short params, long params} ×
+{cold process, ladder prefix replayed warm}, each cell in its own subprocess,
+5 replicates per cell (`AI/data/sidecar_disagreement.json`). The two harnesses
+disagree about their own parameters — decomposition `REPS=20/ROUNDS=5/WARMUP=10`,
+ladder `REPS=200/ROUNDS=30/WARMUP=20` — and that is the larger factor at
+~1.8–3.2 µs. Warm process state contributes ~−0.1 to −0.7 µs: holding the
+prefix warm makes the call *faster*, while the ladder is the sidecar reporting
+the *lower* number, so it cannot be what raised the decomposition figure. That
+sign is the one conclusion here that survives the noise.
+
+The magnitude does not, and saying so is the point. Single 2×2 runs of the same
+code reproduced **34%** and then **128%** of the 3.08 µs gap before I added
+replicates; I had already hardcoded "about a third" into the artifact after
+seeing the first. Replicated, the stable finding is not a fraction but a
+variance: **the short-params harness scatters ~2.9× more process-to-process**
+(2.10 µs spread vs 0.72 µs; 2.87 vs 0.80 on the prior run), which is what
+`REPS=20` against `REPS=200` predicts. Two numbers whose *noise* differs
+threefold were never interchangeable, whatever the residual bias is.
+
+One correction inside the correction: my first version modelled "five other
+configurations" as five other *shapes*. Reading `_build_ladder`
+(`AI/probe_rmsnorm_stage_stubs.py:109-200`), the ladder's other rungs are five
+decompositions of the *same* 256×4096 call — one shape, six callables. A real
+measurement of the wrong set, the same defect this section is about; the probe
+now imports `_build_ladder` and replays the actual prefix rather than imitating
+it. The threshold above is therefore
 written as ~30 rather than the ~26 it used to say, and the honest reading is
 "about 30, ±3 depending on process state" — a figure with a 3 µs process-dependence
 should not be quoted to three digits, which the earlier "~26 us / 26.1 total"

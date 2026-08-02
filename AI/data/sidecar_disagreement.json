@@ -1,0 +1,115 @@
+{
+  "what": "2x2 separating the two candidate causes of the 31.30-vs-28.22 us host-time disagreement between AI/data/rmsnorm_call_decomposition.json and AI/data/rmsnorm_stage_stubs.json (rung L4). Factors: harness parameters (reps/rounds/warmup, taken verbatim from each generator) and whether five other configurations are held warm in the same process (the suspect the notes named). Each cell is its own subprocess so 'cold' means cold.",
+  "shape": {
+    "M": 256,
+    "N": 4096,
+    "dtype": "bfloat16"
+  },
+  "params": {
+    "decomposition": {
+      "reps": 20,
+      "rounds": 5,
+      "warmup": 10
+    },
+    "ladder": {
+      "reps": 200,
+      "rounds": 30,
+      "warmup": 20
+    }
+  },
+  "ladder_prefix_replayed_when_warm": [
+    "L0_flydsl_dispatch_floor",
+    "L1_cached_launcher",
+    "L2_plus_allocations",
+    "L3_plus_autograd",
+    "L3b_plus_wrapper_minus_validation"
+  ],
+  "published": {
+    "decomposition_us": 31.303352443501353,
+    "ladder_L4_us": 28.22
+  },
+  "cells": {
+    "decomposition__warm=0": {
+      "median_of_medians_us": 30.246400274336338,
+      "per_run_median_us": [
+        29.65145104099065,
+        30.098899151198566,
+        30.246400274336338,
+        30.823901761323214,
+        31.74640005454421
+      ],
+      "spread_us": 2.09494901355356,
+      "n_runs": 5,
+      "n_rungs_built": 0
+    },
+    "decomposition__warm=1": {
+      "median_of_medians_us": 29.99540010932833,
+      "per_run_median_us": [
+        29.4104014756158,
+        29.94390088133514,
+        29.99540010932833,
+        30.41840100195259,
+        30.958399293012917
+      ],
+      "spread_us": 1.5479978173971176,
+      "n_runs": 5,
+      "n_rungs_built": 6
+    },
+    "ladder__warm=0": {
+      "median_of_medians_us": 28.536915051518008,
+      "per_run_median_us": [
+        28.171770100016147,
+        28.35669496562332,
+        28.536915051518008,
+        28.56351507944055,
+        28.847960056737065
+      ],
+      "spread_us": 0.6761899567209184,
+      "n_runs": 5,
+      "n_rungs_built": 0
+    },
+    "ladder__warm=1": {
+      "median_of_medians_us": 28.03897761623375,
+      "per_run_median_us": [
+        27.611412660917267,
+        27.85690507153049,
+        28.03897761623375,
+        28.225145069882274,
+        28.33149512298405
+      ],
+      "spread_us": 0.7200824620667845,
+      "n_runs": 5,
+      "n_rungs_built": 6
+    }
+  },
+  "verdict": {
+    "published_gap_us": 3.083,
+    "replica_gap_us": 2.207,
+    "unexplained_us": 0.876,
+    "fraction_of_published_gap_reproduced": 0.716,
+    "harness_parameter_effect_us": 1.833,
+    "warm_configs_effect_us": -0.374,
+    "which_factor_dominates": "harness_parameters",
+    "harness_parameters_explain_the_gap": true,
+    "notes_suspect_was_warm_configs": true,
+    "notes_suspect_has_the_wrong_sign": true,
+    "worst_cell_spread_us": 2.095,
+    "param_effect_exceeds_worst_cell_spread": false,
+    "warm_effect_exceeds_worst_cell_spread": false,
+    "decomposition_cell_spread_us": 2.095,
+    "ladder_cell_spread_us": 0.72,
+    "short_params_noisier_by": 2.91,
+    "reading": "Harness parameters are the larger factor, and the notes' suspect is not merely smaller but points the OTHER WAY: holding the ladder prefix warm makes the call slightly FASTER, while the ladder is the sidecar reporting the LOWER number. Warm process state therefore cannot be what raised the decomposition figure -- which is the one claim here that survives the noise, since it is a claim about SIGN. How much of the 3.08 us the two factors reproduce is not something this probe pins down: single 2x2 runs of this same code gave 34% and 128%, so the replicated fractions below should be read against worst_cell_spread_us, not quoted alone. The actionable conclusion needs neither: the two figures were produced by different harnesses, are not interchangeable, and neither belongs in prose to four digits.",
+    "what_this_does_not_establish": "Which of the three parameters (reps, rounds, warmup) carries the effect -- they are moved together here, as one harness against the other, because that is the comparison the two sidecars actually made. It also does not establish that either figure is the RIGHT one; a difference in how a number was measured says nothing about which measurement to prefer, only that the two are not interchangeable and neither should be quoted to four digits."
+  },
+  "env": {
+    "python": "/opt/venv/bin/python",
+    "why_python_is_recorded": "An earlier probe of mine reported a property of a machine that was a property of the interpreter I happened to invoke.",
+    "torch": "2.9.1+rocm7.2.0.git7e1940d4",
+    "platform": "Linux-6.8.0-60-generic-x86_64-with-glibc2.35",
+    "hip_visible_devices": "5",
+    "gpu_verified_idle_before_run": true
+  },
+  "source_sha256_16": "6a4ba7736ff8e8b5",
+  "generated_by": "AI/probe_sidecar_disagreement.py"
+}
