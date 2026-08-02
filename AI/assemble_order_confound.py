@@ -121,18 +121,126 @@ def _offsets(runs):
 
 
 def _relative_offset_eta(runs, values):
+    """Variance explained by relative offset -- and whether that is a separate fact.
+
+    It is not, on this design. @Reviewer, a7fe31c8. Every process allocates the
+    five sources in the same fixed order and the allocator hands back the same
+    offset vector every time, so offset bucket and allocation ordinal are a
+    bijection: they induce the identical partition of the 100 rows, and any
+    between-group statistic is therefore numerically identical by construction.
+    Reporting 98.10% for both read as corroboration -- two variables agreeing --
+    when it is one variable named twice. The bijection is now computed and
+    published, so the reader is told the equality is arithmetic rather than
+    evidential.
+
+    What the offset data DO establish is separate and stands: the offset vector
+    repeats byte-for-byte while the absolute base moves across 11 TiB-scale
+    regions (see `_offsets`). That rules out absolute placement as the carrier.
+    It does not promote relative offset from "the same partition" to "the
+    mechanism" -- separating those needs a design that varies offset at fixed
+    ordinal, which this one cannot do.
+    """
     gm = sum(values) / len(values)
     sst = sum((v - gm) ** 2 for v in values)
     g = defaultdict(list)
+    fwd, rev = defaultdict(set), defaultdict(set)
     for d in runs:
         for r in d["rows"]:
-            g[round((r["address"] - d["dst_address"]) / 2**31)].append(r["TBps_at_min"])
+            b = round((r["address"] - d["dst_address"]) / 2**31)
+            g[b].append(r["TBps_at_min"])
+            fwd[r["alloc_ordinal"]].add(b)
+            rev[b].add(r["alloc_ordinal"])
     ss = sum(len(v) * ((sum(v) / len(v)) - gm) ** 2 for v in g.values())
+    bijective = all(len(v) == 1 for v in fwd.values()) and all(len(v) == 1 for v in rev.values())
     return {
         "eta_squared_pct": round(ss / sst * 100.0, 2),
         "bucket_width": "2 GiB",
         "bucket_means": {str(k): round(sum(v) / len(v), 4) for k, v in sorted(g.items())},
+        "is_a_bijection_with_alloc_ordinal": bijective,
+        "alloc_ordinal_to_offset_bucket": {str(k): sorted(v) for k, v in sorted(fwd.items())},
+        "why_the_eta_squared_is_not_independent_evidence": (
+            "offset bucket and allocation ordinal partition these rows identically, so "
+            "their eta-squareds are equal by construction and the agreement carries no "
+            "information. This design cannot separate them; it can only show that "
+            "ABSOLUTE address is not the carrier, which is what the offset-vector "
+            "stability across 11 base regions does show."
+            if bijective
+            else "the two groupings differ on this data, so the comparison is meaningful"
+        ),
     }
+
+
+def _additive_fit(rows, factors, iters=20000):
+    """Least-squares additive categorical fit by alternating projections.
+
+    Unbalanced cells mean the factors are not orthogonal, so a sequential
+    sum-of-squares depends on entry order. Alternating each factor's centred
+    effects to convergence gives the same fit as solving the normal equations,
+    which is what makes the SS below a Type-II (each factor adjusted for the
+    others) rather than a Type-I quantity.
+    """
+    eff = {f: {k: 0.0 for k in {r[f] for r in rows}} for f in factors}
+    mu = sum(r["TBps_at_min"] for r in rows) / len(rows)
+    groups = {f: defaultdict(list) for f in factors}
+    for f in factors:
+        for r in rows:
+            groups[f][r[f]].append(r)
+    for _ in range(iters):
+        for f in factors:
+            others = [g for g in factors if g != f]
+            for k, rs in groups[f].items():
+                eff[f][k] = sum(
+                    r["TBps_at_min"] - mu - sum(eff[g][r[g]] for g in others) for r in rs
+                ) / len(rs)
+            m = sum(eff[f].values()) / len(eff[f])
+            for k in eff[f]:
+                eff[f][k] -= m
+            mu += m
+    rss = sum((r["TBps_at_min"] - mu - sum(eff[f][r[f]] for f in factors)) ** 2 for r in rows)
+    npar = 1 + sum(len(eff[f]) - 1 for f in factors)
+    return rss, npar
+
+
+def _f_sf(F, df1, df2):
+    """Upper-tail F probability, via the regularized incomplete beta."""
+    if F <= 0:
+        return 1.0
+
+    def betacf(a, b, x):
+        fpmin, c, d = 1e-300, 1.0, 1.0 - (a + b) * x / (a + 1.0)
+        d = 1.0 / (d if abs(d) > fpmin else fpmin)
+        h = d
+        for m in range(1, 400):
+            m2 = 2 * m
+            aa = m * (b - m) * x / ((a - 1.0 + m2) * (a + m2))
+            d = 1.0 + aa * d
+            d = 1.0 / (d if abs(d) > fpmin else fpmin)
+            c = 1.0 + aa / c
+            c = c if abs(c) > fpmin else fpmin
+            h *= d * c
+            aa = -(a + m) * (a + b + m) * x / ((a + m2) * (a + 1.0 + m2))
+            d = 1.0 + aa * d
+            d = 1.0 / (d if abs(d) > fpmin else fpmin)
+            c = 1.0 + aa / c
+            c = c if abs(c) > fpmin else fpmin
+            de = d * c
+            h *= de
+            if abs(de - 1.0) < 3e-16:
+                break
+        return h
+
+    def betai(a, b, x):
+        if x <= 0.0:
+            return 0.0
+        if x >= 1.0:
+            return 1.0
+        lb = math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+        bt = math.exp(lb + a * math.log(x) + b * math.log1p(-x))
+        if x < (a + 1.0) / (a + b + 2.0):
+            return bt * betacf(a, b, x) / a
+        return 1.0 - bt * betacf(b, a, 1.0 - x) / b
+
+    return betai(df2 / 2.0, df1 / 2.0, df2 / (df2 + df1 * F))
 
 
 def _nested(rows, values):
@@ -140,9 +248,26 @@ def _nested(rows, values):
 
     The two marginal eta-squareds are not a decomposition -- the design is
     unbalanced (a random permutation per process does not fill the 5x5 grid
-    evenly), so they overlap. The number that settles it is timing position
-    *within* allocation ordinal: variance the ordinal cannot already account for.
-    Reported alongside within-cell scatter so the residual is attributable.
+    evenly), so they overlap. Reported alongside within-cell scatter so the
+    residual is attributable.
+
+    Two quantities, and an earlier version conflated them. @Reviewer, a7fe31c8.
+
+    `time_within_alloc_eta_squared_pct` is computed from the SATURATED cell
+    means: it is the between-cell variation left after removing each ordinal's
+    own mean, so it carries the ordinal x time INTERACTION as well as any timing
+    main effect. With 25 cells over 100 rows and replicate counts from 1 to 7,
+    that is a noisy quantity, and a cell of size 1 contributes its own residual
+    to it entirely.
+
+    `additive` is the main effect: refit the data as mu + alloc + time with no
+    interaction term and ask what the time term buys over alloc alone. That is
+    0.0412%, an order of magnitude below the saturated 0.30%, F(4,72)=0.52,
+    p=0.72 when processes are blocked. The conclusion is unchanged in direction
+    and much weaker in kind than what I wrote: the right statement is that this
+    design finds NO DETECTABLE additive timing effect, not that "warmup, clock
+    ramp and drift are out". A null at n=100 excludes nothing; it bounds. The
+    bound is what is published.
     """
     gm = sum(values) / len(values)
     sst = sum((v - gm) ** 2 for v in values)
@@ -159,16 +284,45 @@ def _nested(rows, values):
         ss += sum(len(u) * ((sum(u) / len(u)) - m) ** 2 for u in h.values())
     within = sum(sum((x - sum(u) / len(u)) ** 2 for x in u) for u in by_cell.values())
     counts = sorted(len(u) for u in by_cell.values())
+
+    add = {}
+    for label, base, full in (
+        ("unblocked", ["alloc_ordinal"], ["alloc_ordinal", "time_position"]),
+        (
+            "blocked_on_process",
+            ["alloc_ordinal", "proc"],
+            ["alloc_ordinal", "proc", "time_position"],
+        ),
+    ):
+        r0, p0 = _additive_fit(rows, base)
+        r1, p1 = _additive_fit(rows, full)
+        extra, df1, df2 = r0 - r1, p1 - p0, len(rows) - p1
+        f = (extra / df1) / (r1 / df2)
+        add[label] = {
+            "eta_squared_pct": round(extra / sst * 100.0, 4),
+            "F": round(f, 3),
+            "df": [df1, df2],
+            "p": round(_f_sf(f, df1, df2), 4),
+        }
+
     return {
         "time_within_alloc_eta_squared_pct": round(ss / sst * 100.0, 2),
+        "time_within_alloc_is_saturated": (
+            "computed from the 25 cell means, so it includes the ordinal x time "
+            "interaction and not just a timing main effect; with cells of 1 to 7 "
+            "replicates it also absorbs per-cell noise"
+        ),
+        "additive_timing_main_effect": add,
         "within_cell_eta_squared_pct": round(within / sst * 100.0, 2),
         "cells_occupied": len(by_cell),
         "cells_possible": len(by_alloc) ** 2,
         "cell_replicate_counts_min_max": [counts[0], counts[-1]],
         "note": (
             "the design is unbalanced, so the two marginal eta-squareds overlap and do "
-            "not sum to 100. Timing position within allocation ordinal is the residual "
-            "that matters, and it is smaller than the scatter between identical repeats."
+            "not sum to 100. The load-bearing figure is the additive main effect of "
+            "timing adjusted for allocation ordinal, which is not distinguishable from "
+            "zero here. That is a bound, not an exclusion: it says this design did not "
+            "detect a timing effect, not that no timing effect exists."
         ),
     }
 
@@ -286,7 +440,11 @@ def _guard(payload):
 def main():
     src = sys.argv[1] if len(sys.argv) > 1 else str(RAW)
     runs, paths, src = _load(src)
-    rows = [r for d in runs for r in d["rows"]]
+    # `proc` tags each row with the process that produced it, so the timing main
+    # effect can be tested with process as a blocking factor -- 20 processes each
+    # contributing 5 rows is exactly the structure that would otherwise leak
+    # between-process differences into the timing term.
+    rows = [{**r, "proc": d["seed"]} for d in runs for r in d["rows"]]
     values = [r["TBps_at_min"] for r in rows]
 
     alloc = _eta(rows, "alloc_ordinal", values)
@@ -327,35 +485,53 @@ def main():
         "pooled_range_pct_of_min": round((max(values) / min(values) - 1) * 100.0, 2),
     }
 
+    blocked = nested["additive_timing_main_effect"]["blocked_on_process"]
     payload["verdict"] = (
         f"Allocation ordinal explains {alloc['eta_squared_pct']}% of the variance; "
         f"timing position explains {timing['eta_squared_pct']}%. With the two varied "
         "independently across "
         f"{payload['distinct_measurement_orders']} distinct measurement orders, the "
-        "effect tracks WHERE a buffer was allocated, not WHEN it was measured. Warmup, "
-        "clock ramp and drift within a process are excluded as the primary cause. "
-        "The placement reading of prior artifacts is supported -- but it was not "
-        "supported BY those artifacts, which could not have distinguished these cases."
+        "effect tracks WHERE a buffer was allocated, not WHEN it was measured. "
+        "Adjusted for allocation ordinal and blocked on process, the additive timing "
+        f"main effect is {blocked['eta_squared_pct']}% of variance, "
+        f"F({blocked['df'][0]},{blocked['df'][1]})={blocked['F']}, p={blocked['p']} -- "
+        "no detectable effect of measurement order. That BOUNDS warmup, clock ramp and "
+        "drift within a process; it does not exclude them, and an earlier version of "
+        "this sentence said 'excluded', which n=100 cannot support (@Reviewer, "
+        "a7fe31c8). The placement reading of prior artifacts is supported -- but it was "
+        "not supported BY those artifacts, which could not have distinguished these "
+        "cases."
     )
     payload["verdict_strength"] = (
         f"The two marginal figures overlap ({timing['eta_squared_pct']}% is not a "
-        "residual: the permuted design is unbalanced). The load-bearing number is "
-        f"timing position WITHIN allocation ordinal, "
-        f"{nested['time_within_alloc_eta_squared_pct']}%, which is smaller than the "
-        f"{nested['within_cell_eta_squared_pct']}% scatter between identical repeats of "
-        "the same (ordinal, position) cell. Once you know where a buffer was allocated, "
-        "when it was measured tells you less than noise does."
+        "residual: the permuted design is unbalanced). Nor is the saturated "
+        f"time-within-ordinal figure of "
+        f"{nested['time_within_alloc_eta_squared_pct']}% the timing main effect -- it "
+        "carries the ordinal x time interaction and, with cells of "
+        f"{nested['cell_replicate_counts_min_max'][0]} to "
+        f"{nested['cell_replicate_counts_min_max'][1]} replicates, per-cell noise as "
+        "well. The load-bearing number is the additive main effect above, "
+        f"{blocked['eta_squared_pct']}%, which is an order of magnitude smaller again "
+        f"and sits far inside the {nested['within_cell_eta_squared_pct']}% scatter "
+        "between identical repeats of the same cell. Once you know where a buffer was "
+        "allocated, when it was measured tells you less than noise does."
     )
     payload["mechanism"] = (
         "The src-dst offset vector is byte-identical across every process while the "
         f"absolute base varies over {offs['distinct_dst_bases_by_1TiB_region']} distinct "
-        "1 TiB regions, and bucketing by that relative offset recovers "
-        f"{rel['eta_squared_pct']}% of the variance -- the same as allocation ordinal, "
-        "because in this design they are the same partition. So 'allocation slot' is "
-        "more precisely the source's offset relative to the destination. Absolute "
-        "placement is randomized here and does not track the rate. What this does NOT "
-        "establish is why a given offset is faster; that needs a probe that varies the "
-        "offset directly rather than through the allocation sequence."
+        "1 TiB regions. That is the finding: ABSOLUTE placement is randomized here and "
+        "does not track the rate, so whatever carries the effect is relative. "
+        "Bucketing by relative offset also recovers "
+        f"{rel['eta_squared_pct']}% of the variance, but that is not a second piece of "
+        "evidence -- offset bucket and allocation ordinal are a bijection on this "
+        "design, so they partition the rows identically and their eta-squareds are "
+        "equal by construction. Quoting the agreement as corroboration was wrong "
+        "(@Reviewer, a7fe31c8). So 'allocation slot' is at most redescribed as the "
+        "source's offset relative to the destination, not explained by it. What this "
+        "does NOT "
+        "establish is why a given offset is faster, or that offset rather than ordinal "
+        "is the carrier; both need a probe that varies the offset directly at fixed "
+        "allocation ordinal, which this design cannot do."
     )
     payload["prose_guard"] = _guard(payload)
 

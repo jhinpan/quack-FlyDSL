@@ -122,24 +122,22 @@
       },
       {
         "path": "AI/assemble_order_confound.py",
-        "sha256": "118359a356f32c37c489fe1aeb0181fa3515c25d8aa39eaf5db2628481ae383b",
-        "bytes": 15639
+        "sha256": "e8e43d5ccb8a3a456a9614410d48a8d61fd4bea7bbe3baf8c5d2b6195597dfdc",
+        "bytes": 24228
       }
     ],
     "what_this_proves": "the assembler read exactly these bytes. It does not prove they came from a GPU, and a manifest cannot: it is a binding between artifact and raw runs, not an attestation."
   },
-  "commit": "62fcef5",
+  "commit": "df13d9e",
   "worktree_dirty": true,
   "worktree_dirty_paths": [
     "AI/assemble_copy_axes.py",
-    "AI/assemble_intervention_cross_device.py",
     "AI/assemble_order_confound.py",
     "AI/data/copy_placement_draws/copy_axes_dev5.json",
     "AI/data/copy_placement_draws/order_confound_dev5.json",
+    "AI/data/copy_placement_draws/raw_dev5/_peak_sweep.json",
+    "AI/flydsl_rmsnorm_notes.md",
     "AI/probe_copy_size_draws.py",
-    "AI/probe_order_confound.py",
-    "AI/probe_rmsnorm_measured_occupancy.py",
-    "AI/probe_rmsnorm_occupancy_intervention.py",
     "AI/probe_rmsnorm_roofline.py"
   ],
   "worktree_dirty_note": "a dirty ancestor means the commit above does not pin the code that produced this artifact. The paths are listed so a reader can see whether the difference touches the probe or the assembler.",
@@ -173,6 +171,27 @@
   },
   "nested": {
     "time_within_alloc_eta_squared_pct": 0.3,
+    "time_within_alloc_is_saturated": "computed from the 25 cell means, so it includes the ordinal x time interaction and not just a timing main effect; with cells of 1 to 7 replicates it also absorbs per-cell noise",
+    "additive_timing_main_effect": {
+      "unblocked": {
+        "eta_squared_pct": 0.0412,
+        "F": 0.505,
+        "df": [
+          4,
+          91
+        ],
+        "p": 0.7318
+      },
+      "blocked_on_process": {
+        "eta_squared_pct": 0.0412,
+        "F": 0.521,
+        "df": [
+          4,
+          72
+        ],
+        "p": 0.7204
+      }
+    },
     "within_cell_eta_squared_pct": 1.6,
     "cells_occupied": 25,
     "cells_possible": 25,
@@ -180,7 +199,7 @@
       1,
       7
     ],
-    "note": "the design is unbalanced, so the two marginal eta-squareds overlap and do not sum to 100. Timing position within allocation ordinal is the residual that matters, and it is smaller than the scatter between identical repeats."
+    "note": "the design is unbalanced, so the two marginal eta-squareds overlap and do not sum to 100. The load-bearing figure is the additive main effect of timing adjusted for allocation ordinal, which is not distinguishable from zero here. That is a bound, not an exclusion: it says this design did not detect a timing effect, not that no timing effect exists."
   },
   "by_relative_offset_from_dst": {
     "eta_squared_pct": 98.1,
@@ -191,7 +210,26 @@
       "-3": 4.926,
       "-2": 5.036,
       "-1": 4.8369
-    }
+    },
+    "is_a_bijection_with_alloc_ordinal": true,
+    "alloc_ordinal_to_offset_bucket": {
+      "0": [
+        -1
+      ],
+      "1": [
+        -2
+      ],
+      "2": [
+        -3
+      ],
+      "3": [
+        -4
+      ],
+      "4": [
+        -5
+      ]
+    },
+    "why_the_eta_squared_is_not_independent_evidence": "offset bucket and allocation ordinal partition these rows identically, so their eta-squareds are equal by construction and the agreement carries no information. This design cannot separate them; it can only show that ABSOLUTE address is not the carrier, which is what the offset-vector stability across 11 base regions does show."
   },
   "address_structure": {
     "distinct_offset_vectors": 1,
@@ -214,12 +252,12 @@
     "interpretation": "one offset vector across all processes while the absolute base varies means the ordinal effect is a function of the source's address RELATIVE to the destination, not of where the pair lands in the address space. Absolute placement is randomized here and does not track the rate."
   },
   "pooled_range_pct_of_min": 6.25,
-  "verdict": "Allocation ordinal explains 98.1% of the variance; timing position explains 7.11%. With the two varied independently across 19 distinct measurement orders, the effect tracks WHERE a buffer was allocated, not WHEN it was measured. Warmup, clock ramp and drift within a process are excluded as the primary cause. The placement reading of prior artifacts is supported -- but it was not supported BY those artifacts, which could not have distinguished these cases.",
-  "verdict_strength": "The two marginal figures overlap (7.11% is not a residual: the permuted design is unbalanced). The load-bearing number is timing position WITHIN allocation ordinal, 0.3%, which is smaller than the 1.6% scatter between identical repeats of the same (ordinal, position) cell. Once you know where a buffer was allocated, when it was measured tells you less than noise does.",
-  "mechanism": "The src-dst offset vector is byte-identical across every process while the absolute base varies over 11 distinct 1 TiB regions, and bucketing by that relative offset recovers 98.1% of the variance -- the same as allocation ordinal, because in this design they are the same partition. So 'allocation slot' is more precisely the source's offset relative to the destination. Absolute placement is randomized here and does not track the rate. What this does NOT establish is why a given offset is faster; that needs a probe that varies the offset directly rather than through the allocation sequence.",
+  "verdict": "Allocation ordinal explains 98.1% of the variance; timing position explains 7.11%. With the two varied independently across 19 distinct measurement orders, the effect tracks WHERE a buffer was allocated, not WHEN it was measured. Adjusted for allocation ordinal and blocked on process, the additive timing main effect is 0.0412% of variance, F(4,72)=0.521, p=0.7204 -- no detectable effect of measurement order. That BOUNDS warmup, clock ramp and drift within a process; it does not exclude them, and an earlier version of this sentence said 'excluded', which n=100 cannot support (@Reviewer, a7fe31c8). The placement reading of prior artifacts is supported -- but it was not supported BY those artifacts, which could not have distinguished these cases.",
+  "verdict_strength": "The two marginal figures overlap (7.11% is not a residual: the permuted design is unbalanced). Nor is the saturated time-within-ordinal figure of 0.3% the timing main effect -- it carries the ordinal x time interaction and, with cells of 1 to 7 replicates, per-cell noise as well. The load-bearing number is the additive main effect above, 0.0412%, which is an order of magnitude smaller again and sits far inside the 1.6% scatter between identical repeats of the same cell. Once you know where a buffer was allocated, when it was measured tells you less than noise does.",
+  "mechanism": "The src-dst offset vector is byte-identical across every process while the absolute base varies over 11 distinct 1 TiB regions. That is the finding: ABSOLUTE placement is randomized here and does not track the rate, so whatever carries the effect is relative. Bucketing by relative offset also recovers 98.1% of the variance, but that is not a second piece of evidence -- offset bucket and allocation ordinal are a bijection on this design, so they partition the rows identically and their eta-squareds are equal by construction. Quoting the agreement as corroboration was wrong (@Reviewer, a7fe31c8). So 'allocation slot' is at most redescribed as the source's offset relative to the destination, not explained by it. What this does NOT establish is why a given offset is faster, or that offset rather than ordinal is the carrier; both need a probe that varies the offset directly at fixed allocation ordinal, which this design cannot do.",
   "prose_guard": {
-    "accept_set_size": 226,
-    "false_negative_rate_pct": 0.95,
+    "accept_set_size": 293,
+    "false_negative_rate_pct": 1.249,
     "ceiling_pct": 12.0
   }
 }
