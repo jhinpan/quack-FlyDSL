@@ -467,8 +467,10 @@ tensor does not move the process's *current* device, which stays 0. `record()`
 then binds the event to device 0's stream, and `elapsed_time` returns the gap
 between two markers on an idle device -- a number that is neither the kernel's
 duration nor obviously wrong. It read 26.9 us for a 32768x4096 bf16 forward
-that actually takes 89.9 us, and the error is not a constant factor, so it
-cannot be divided out afterwards. Either `torch.cuda.set_device(N)` before the
+that actually takes 89.9 us (raw samples in
+`AI/data/rmsnorm_32768x4096_bf16_roofline.json`), and the error is not a
+constant factor, so it cannot be divided out afterwards. Either
+`torch.cuda.set_device(N)` before the
 first `record()`, or select the card with `HIP_VISIBLE_DEVICES=N` and address it
 as plain `"cuda"`; the harness and every committed probe here do the latter,
 which is why this trap stayed in ad-hoc scripts.
@@ -857,3 +859,47 @@ Note also that the `N=16384, m=4096` cell read **104.3%** of ceiling, above the
 roofline. That working set is 256 MiB, exactly the MALL boundary that
 `AI/gfx950_mall_evictor_defect.md` documents, so this row is cache-warm and is
 excluded from the table above rather than explained away.
+
+## A cited number needs a sidecar, and two of mine did not have one
+
+@Reviewer asked where the 89.9 / 183.2 / 93.3 us figures came from, and the
+honest answer was that they came from ad-hoc scripts that no longer existed.
+Regenerating them on the same card
+(`AI/data/rmsnorm_32768x4096_bf16_roofline.json`, 32768x4096 bf16, 7 rounds of
+50, min-of-rounds, events recorded on the operand device) settles three things
+and unsettles one.
+
+| | min us | TB/s on 512 MiB minimum traffic |
+| --- | --- | --- |
+| FlyDSL, L2 evicted | 89.32 | 6.010 |
+| FlyDSL, warm | 89.86 | 5.975 |
+| torch, L2 evicted | 154.74 | 3.470 |
+| torch, warm | 154.94 | 3.465 |
+
+**89.9 us reproduces, and my reading of it was still wrong.** It is 5.972 TB/s.
+The copy proxy on this card measures 4.772 TB/s, so I had cited, as evidence of
+headroom, a number 25% *above* the ceiling I was comparing it to. @Reviewer
+caught the arithmetic. The mistake is the one this file already records twice:
+a copy is not the roofline. Against `two_read_one_write`, 6.139 TB/s on the same
+card in the same process, the forward runs at **97.9% of achievable** -- which
+is the real result, and it is a better one than the claim it replaces. The
+three probes are in the sidecar so the denominator can be re-derived rather
+than taken on trust.
+
+**183.2 us does not reproduce and I cannot reconstruct it.** torch's fused path
+is 154.7-157.5 us here across `F.rms_norm` and `nn.RMSNorm`. The only nearby
+figure is the unfused fp32-weight path at 902 us, which is not it either. I
+sent 183.2 to @Reviewer; it is withdrawn, not re-explained. The speedup at this
+shape is 1.73x, not the 2.04x that number implied.
+
+**The 1.9884% noise floor was borrowed.** It was a different shape, provider and
+card's observed span, quoted as though it bounded this experiment. The spread
+actually observed in these rows is 0.18-2.18%, worst case on the L2-evicted
+FlyDSL rows -- which is the number that belongs here, and it is only meaningful
+for these rows.
+
+The general rule, since this is the third variant of the same defect in this
+file: a figure quoted in a review or a message needs the raw samples committed
+next to it, or it cannot survive the question "where did that come from". Two
+of these three were fine as measurements and indefensible as citations, and the
+third was neither.
