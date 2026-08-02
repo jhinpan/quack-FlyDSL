@@ -1,0 +1,167 @@
+{
+  "achievable_bandwidth": {
+    "best_probe": "write",
+    "median_gbps": 6639.511641,
+    "median_us": 80.86,
+    "probe_bytes": 536870912,
+    "probes": {
+      "copy": {
+        "gbps": 5472.662227,
+        "median_us": 196.201004
+      },
+      "two_read_one_write": {
+        "gbps": 5935.729378,
+        "median_us": 271.342009
+      },
+      "write": {
+        "gbps": 6639.511641,
+        "median_us": 80.86
+      }
+    },
+    "samples": 30
+  },
+  "architecture_overrides": {
+    "ARCH": null,
+    "FLYDSL_GPU_ARCH": null
+  },
+  "artifact_directory": "/tmp/gate_v4.json",
+  "command": [
+    "/opt/venv/bin/python",
+    "benchmarks/benchmark_rmsnorm_flydsl.py",
+    "--providers",
+    "torch",
+    "--operations",
+    "fwd",
+    "--activation-dtypes",
+    "bfloat16",
+    "--weight-modes",
+    "same",
+    "--shape",
+    "4096x4096",
+    "--shape",
+    "32768x1024",
+    "--output-dir",
+    "/tmp/gate_v4.json"
+  ],
+  "comparison_scope": "same-device providers. RMSNorm is memory bound, so a cross-vendor comparison of microseconds mostly reports the HBM bandwidth ratio; compare peak_bw_pct instead",
+  "completed_at_utc": "2026-08-02T02:18:40.765328+00:00",
+  "contention_canary": {
+    "closing_gbps": 6476.048899,
+    "closing_over_opening": 0.97538,
+    "opening_gbps": 6639.511641,
+    "quiet": true
+  },
+  "correctness_gate": "required",
+  "evictor_gate": {
+    "margin": 2,
+    "predicate": "rotation_working_set_bytes <= margin * last_level_cache_bytes",
+    "threshold_bytes": 536870912
+  },
+  "generated_at_utc": "2026-08-02T02:18:40.452176+00:00",
+  "git_commit": "1486fdaacecc2e6bfa9974a644264884059337f0",
+  "gpu": {
+    "arch": "gfx950",
+    "compute_units": 256,
+    "l2_cache_bytes_reported": 4194304,
+    "name": "AMD Instinct MI355X",
+    "total_memory_bytes": 309220868096,
+    "visible_count": 1,
+    "visible_index": 0
+  },
+  "host": {
+    "hostname": "mia1-p02-g23",
+    "platform": "Linux-6.8.0-60-generic-x86_64-with-glibc2.35"
+  },
+  "last_level_cache_bytes": 268435456,
+  "last_level_cache_provenance": {
+    "matched_by": "unique_id",
+    "matched_node": "/sys/class/kfd/kfd/topology/nodes/2",
+    "source": "kfd_topology"
+  },
+  "matrix": {
+    "dtype_weight_modes": [
+      [
+        "bfloat16",
+        "same"
+      ]
+    ],
+    "eps": 1e-06,
+    "operations": [
+      "fwd"
+    ],
+    "providers": [
+      "torch"
+    ],
+    "shapes": [
+      [
+        4096,
+        4096
+      ],
+      [
+        32768,
+        1024
+      ]
+    ]
+  },
+  "methodology": {
+    "cache": "round-robin cloned tensor sets sized against rotation_target_bytes (= --l2-target-ratio x the last-level cache, which on gfx950 is the 256 MiB MALL and not the 4 MiB per-XCD L2 torch reports); when a set's working set is at most evictor_threshold_bytes (= EVICTOR_LLC_MARGIN x LLC) a device copy evicts the cache once per timed rotation, before the event window opens, not between individual calls",
+    "l2_target_ratio": 3,
+    "last_level_cache": "read from the KFD topology, matched by unique_id and then by PCI domain:bus:device; see last_level_cache_provenance for which key matched. A gfx950 host that cannot be matched aborts rather than falling back to torch's L2, which would silently measure cache-warm",
+    "logical_bytes": {
+      "bwd": "read x + dout + weight + fp32 rstd; write dx + dweight",
+      "fwd": "read x + weight; write y"
+    },
+    "max_rotation_buffers": 4,
+    "peak_bandwidth": "best of a same-device copy, a two-read one-write elementwise, and a pure write; a copy alone understates the memory system",
+    "sample_rounds": 40,
+    "steady_state": "per-call torch.cuda device events after provider warmup; FlyDSL first-launch JIT is synchronized, recorded separately, and excluded",
+    "warmup_rounds": 3
+  },
+  "result_rows": 2,
+  "result_schema": [
+    "schema_version",
+    "provider",
+    "provider_detail",
+    "operation",
+    "m",
+    "n",
+    "activation_dtype",
+    "weight_dtype",
+    "weight_mode",
+    "eps",
+    "cold_compile_ms",
+    "cold_compile_reused",
+    "median_us",
+    "p10_us",
+    "p90_us",
+    "logical_bytes",
+    "logical_gbps",
+    "peak_bw_gbps",
+    "peak_bw_pct",
+    "rotation_buffers",
+    "rotation_working_set_bytes",
+    "rotation_target_bytes",
+    "evictor_threshold_bytes",
+    "l2_eviction_between_calls",
+    "timed_samples"
+  ],
+  "rotation_target_bytes": 805306368,
+  "runtime_scope": "AMD Instinct MI355X / gfx950",
+  "schema_version": 3,
+  "status": "passed",
+  "torch_l2_cache_size": 4194304,
+  "versions": {
+    "cuda": null,
+    "flydsl": "0.3.0.dev765",
+    "hip": "7.2.26015-fc0010cf6a",
+    "python": "3.10.12",
+    "quack": null,
+    "torch": "2.9.1+rocm7.2.0.git7e1940d4"
+  },
+  "visibility": {
+    "CUDA_VISIBLE_DEVICES": null,
+    "HIP_VISIBLE_DEVICES": "0",
+    "ROCR_VISIBLE_DEVICES": null
+  },
+  "working_directory": "/root/quack-FlyDSL-review"
+}

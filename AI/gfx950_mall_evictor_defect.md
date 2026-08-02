@@ -1,16 +1,33 @@
 # The benchmark harness does not produce cold reads on gfx950
 
-Status: **confirmed by measurement**, fix not yet written. Blocks Experiment
-No.002 (MI355X flydsl-vs-torch matrix) — any MI355X numbers taken before this
-is fixed are **unsound on 37 of the 90 benchmarked cells** — those cells are
-un-evicted and inside nominal MALL capacity, so the measurement method does not
-establish HBM bandwidth there. This is an exposure count, not a per-cell
-result: without an RMSNorm before/after nobody knows how far any individual
-cell moves. Those 37
-contain **no `m=32768` cell** — an earlier version of this line said they
-included one, which conflated two different sets (see the `32768x1024` note
-below: those cells sit just *past* the MALL and are contract-invalid for a
-related but distinct reason, so they are not in the 37). (An earlier "11 of 18" here was computed from approximate
+Status: **confirmed by measurement**; the harness-side fix is **written and
+measured** (`31c1fd4` sized the rotation target and the gate against the MALL,
+`fad422c` made the LLC lookup fail closed; before/after cost is committed under
+`AI/gate_llc_before_after/`). What is *not* done is re-collection: no MI355X
+cell has been re-measured under the fixed harness. Blocks Experiment No.002
+(MI355X flydsl-vs-torch matrix) — any MI355X numbers taken before the fix are
+**unsound on 41 of the 90 benchmarked cells**.
+
+**41 and 37 count different things and must not be merged.**
+
+- **37** is the *strict-resident* subset: working set `<= 256 MiB` **and** the
+  evictor does not fire (47 fit the MALL, 10 of those do run the evictor).
+  8 of 18 per 16-bit mode, 5 of 18 for `float32/same`. **No `m=32768` cell is
+  in the 37** — an earlier version of this line said one was, conflating the
+  two sets.
+- **41** is the *contract-invalid* headline: the 37 plus the four
+  `32768x1024` fwd 16-bit cells at 256.004 MiB. Those sit a few KiB *past*
+  capacity, so a `ws <= MALL` rule excludes them, but they were probed directly
+  at their exact working sets and read MALL-warm anyway. Per 16-bit mode that
+  is 8 strict-resident + 1 exact-probed = 9, so `4 x 9 + 5 = 41`.
+
+An earlier version of this note derived the 9-per-mode figure correctly and
+then still wrote the full total as 37; @Reviewer caught the arithmetic not
+matching its own premise. Use 37 when the claim is "strictly resident and
+un-evicted", 41 when it is "the cold-measurement contract was not established".
+
+Both are exposure counts, not per-cell results: without an RMSNorm before/after
+nobody knows how far any individual cell moves. (An earlier "11 of 18" here was computed from approximate
 bytes and ignored the `use_evictor` gate; withdrawn — see below.) A second code
 path, `_pick_l2_rotate_count` in `quack/bench/bench_utils.py`, shares the root
 cause but **has no live consumer on this box**: the FlyDSL autotune path uses
@@ -41,18 +58,21 @@ bandwidth probe**. No RMSNorm kernel has been run before and after a fix, and
 no MI355X 90-cell matrix has been re-collected. The consequences:
 
 - The **~1.3x is a property of the copy probe at one working set**. It is not a
-  per-cell correction factor and must not be applied to the 37 exposed cells,
+  per-cell correction factor and must not be applied to the 41 exposed cells,
   to the six regime values in `flydsl_rmsnorm_notes.md`, or to any roofline
   percentage. Doing that would report an inferred number as a measured one.
-- **37 of 90** is an exposure count — cells where the gate provably does not
-  fire and the working set provably fits the MALL. It says nothing about how
-  far any of those cells is off.
+- **41 of 90** is an exposure count — 37 where the gate provably does not fire
+  and the working set provably fits the MALL, plus 4 probed directly a few KiB
+  past capacity. It says nothing about how far any of those cells is off.
 - What the probe does establish is that the *measurement method* is unsound on
   MALL-resident shapes, which is sufficient to justify fixing the gate and
   re-collecting. It is not sufficient to restate existing numbers.
 
 Closing this gap needs an RMSNorm before/after on the exposed cells, which is
-Experiment No.002 and has not been run.
+Experiment No.002 and has not been run. The gate fix's own cost *is* measured —
+`AI/gate_llc_before_after/` holds twelve committed runs — but that measures what
+the harness change costs in reported GB/s, which is not the same as knowing the
+true HBM number for any cell.
 
 The cache hierarchy on this part (ROCm Kernel Wiki `hw-chiplet-xcd`):
 
@@ -73,12 +93,17 @@ eviction happens, and 128 MiB fits comfortably in the 256 MiB MALL.
 The evictor is also only 12 MiB, which on the face of it cannot flush a 256 MiB
 cache even when it does run. That reasoning turns out not to survive
 measurement: forcing a 12 MiB evictor to run at the boundary recovers almost
-all of the gap — 4898.37 GB/s against a 4935.34 GB/s HBM reference, 0.75%
-below it, and in fact 1.46% *above* the 4827.98 GB/s that a 256 MiB evictor
-reaches. (Percentages are computed from the raw medians in the sidecar, not
-from rounded GB/s; rounding first shifted these by over a point. The exact
-values move run to run — see the spread note below — so read them to the
-nearest point, not the nearest hundredth.) A
+all of the gap — 4880.56 GB/s against a 4992.27 GB/s HBM reference, 2.2%
+below it, and in fact 2.0% *above* the 4786.65 GB/s that a 256 MiB evictor
+reaches. (Percentages are computed from the raw medians in the current sidecar
+— stored in `c0b7c0b`, generated by the script at `21e91f6` — not from rounded
+GB/s; rounding first shifted these by over a point. An earlier version of this
+paragraph quoted 4898.37 / 4935.34 / 4827.98 from a *superseded* sidecar while
+the tables below had already moved on, which gave the file two current answers.
+The exact values move run to run — see the spread note below — so read them to
+the nearest point, not the nearest hundredth; the 0.75%-below figure the old
+sidecar gave and the 2.2%-below figure this one gives are the same
+qualitative result.) A
 copy-based evictor evidently disturbs MALL
 residency out of proportion to its own footprint. The binding problem is the
 gate, not the size.
@@ -150,9 +175,13 @@ rather than one dtype:
 - of those, **10 actually run the evictor** — the `m=1` cells, whose sets are
   small enough to satisfy `ws < 12 MiB`
 - so **37 of 90** are both un-evicted and MALL-resident
+- plus **4** `32768x1024` fwd 16-bit cells at 256.004 MiB, a few KiB *past*
+  capacity so the `<=` test excludes them, but probed directly and reading
+  MALL-warm — **41 of 90** contract-invalid in total
 
-Per mode that is **8 of 18** for each of the four 16-bit modes and **5 of 18**
-for `float32/same`. These are recomputed from the harness's real `logical_bytes`
+Per mode that is **8 of 18** strict-resident for each of the four 16-bit modes
+and **5 of 18** for `float32/same`; adding the exact-probed cell gives 9 of 18
+contract-invalid per 16-bit mode, i.e. `4 x 9 + 5 = 41`. These are recomputed from the harness's real `logical_bytes`
 and actual buffer selection. A separate "8 of 18" figure quoted earlier in this
 thread was @Autotune's, derived from a synthetic single-tensor model of
 `_pick_l2_rotate_count`; the agreement is coincidental and the two should not be
@@ -174,9 +203,16 @@ harness working set of 268439552 bytes.
 > 256.00–257 MiB was really walking 512–514 MiB. They are not measurements of
 > this cell and must not be cited. The corrected sweep is in
 > "Fine boundary sweep" below; the authoritative value for this working set is
-> **6067.802 GB/s** at 268439552 B, from the current sidecar. Leaving the old
-> table in place alongside the new one gave the file two incompatible "current"
-> answers, which is @Reviewer's blocker 1.
+> **6391.418 GB/s** at 268439552 B, from the current sidecar (`c0b7c0b`,
+> generated by the script at `21e91f6`). Leaving the old table in place
+> alongside the new one gave the file two incompatible "current" answers, which
+> is @Reviewer's blocker 1. **This line then reproduced that same failure**: it
+> was left reading **6067.802 GB/s**, a value from the *previous* sidecar, so
+> the sentence that exists to name one authoritative number named a stale one.
+> The two differ by 5.3% — more than the run-to-run spread of the surrounding
+> rows — and 6391.418 is the higher, i.e. the correction moves this cell
+> *further* from the HBM reference, not closer. Do not read the change as
+> tightening the case.
 
 The verdict for the cell is unchanged — a copy probe at its exact working set
 shows the cold-measurement contract does not hold there, and being 4 KiB over
@@ -270,18 +306,29 @@ sidecar says so itself (`mall_bytes_is_hardcoded: true`,
 Timing follows `_time_rotating_calls`: the
 window covers one whole rotation and the evictor runs *outside* it.
 
+All eleven sampled points from the current sidecar, not a subset:
+
     ### buffer = 64 MiB
      buffers    working set   vs MALL      GB/s
-           1         128 MiB     0.50x      6079
-           2         256 MiB     1.00x      6459
-           3         384 MiB     1.50x      4787     <- step here
-           4         512 MiB     2.00x      4902
-           8        1024 MiB     4.00x      4961
-          32        4096 MiB    16.00x      5016
+           1         128 MiB     0.50x      5992
+           2         256 MiB     1.00x      6385
+           3         384 MiB     1.50x      4882     <- step here
+           4         512 MiB     2.00x      4882
+           6         768 MiB     3.00x      4958
+           8        1024 MiB     4.00x      4966
+           9        1152 MiB     4.50x      4992
+          12        1536 MiB     6.00x      5001
+          16        2048 MiB     8.00x      5029
+          24        3072 MiB    12.00x      4999
+          32        4096 MiB    16.00x      5021
 
 The honest figure is the **boundary step between adjacent rotation counts**:
-2 buffers (256 MiB) = 6459 GB/s vs 3 buffers (384 MiB) = 4787 GB/s, one
-rotation apart, same kernel — **1.349x inflation**.
+2 buffers (256 MiB) = 6385.24 GB/s vs 3 buffers (384 MiB) = 4881.77 GB/s, one
+rotation apart, same kernel — **1.308x inflation** on this run. An earlier
+version of this table printed 6459 / 4787 / **1.349x** from a superseded
+sidecar and dropped six of the eleven rows; 1.349 is a real measurement (it is
+`c9c10fc` in the run table below), but it is not what the committed sidecar
+says today. The run-to-run range is in that table.
 
 The 16 MiB sweep crosses the boundary at 8 → 9 buffers, but the script never
 computed that step: `bench_rotation` looks for `lo + 1 = 9` and `ROTATIONS`
@@ -294,9 +341,23 @@ is held to. `ROTATIONS` now samples 9, and the script prints an explicit
 With 9 sampled, the 16 MiB sweep does produce an adjacent step:
 
      buffers    working set   vs MALL      GB/s
-           8         256 MiB     1.00x      5322
-           9         288 MiB     1.12x      4022     <- step here
-          12         384 MiB     1.50x      4030
+           1          32 MiB     0.12x      4173
+           2          64 MiB     0.25x      4609
+           3          96 MiB     0.38x      4954
+           4         128 MiB     0.50x      5069
+           6         192 MiB     0.75x      5226
+           8         256 MiB     1.00x      5280
+           9         288 MiB     1.12x      4096     <- step here
+          12         384 MiB     1.50x      4035
+          16         512 MiB     2.00x      4087
+          24         768 MiB     3.00x      4084
+          32        1024 MiB     4.00x      4108
+
+5279.90 / 4096.39 = **1.289x**, the low end of the run range. (The previous
+version of this block quoted 5322 / 4022 / 1.32x from the superseded sidecar.)
+Note the 16 MiB sweep climbs steadily from 1 to 8 buffers before the step —
+below ~256 MiB the copy is *gaining* from residency, which is the same effect
+seen from the other side.
 
 A second sampling defect turned up on the way here, and it is worth stating
 because it also came from my own code. `rounds` was `iters // n_buffers`, so a
@@ -305,8 +366,9 @@ sides of every boundary step were sampled unequally, and the *high* buffer
 count side, which is where the post-boundary rows live, always got less data.
 `ROUNDS` is now a constant 15 (75 rounds per point) regardless of buffer count.
 
-Across runs the same step measures **1.289x, 1.298x, 1.308x, 1.318x, 1.324x,
-1.328x, 1.334x, 1.341x, 1.344x, 1.345x, 1.349x, 1.354x**. Each is recomputable from a JSON
+Across runs the same step measures **1.266x, 1.289x, 1.298x, 1.308x, 1.318x,
+1.324x, 1.328x, 1.334x (x2), 1.341x, 1.344x, 1.345x, 1.349x, 1.354x**, so the
+committed-run range is **1.266-1.354x**. Each is recomputable from a JSON
 sidecar committed in this repo's history. Sidecar-holding commit → the script
 commit that generated it (`environment.git_commit`), which are *different
 commits* and which an earlier version of this list conflated:
@@ -319,7 +381,8 @@ commits* and which an earlier version of this list conflated:
 | `250502a` | `2bd5624` | 1.341131 | **1.345494** |
 | `d853d7b`, `1b53896` | `250502a` | 1.343588 | 1.333958 |
 | `c9c10fc` | `1b53896` | 1.323130 | 1.349374 |
-| (this commit) | `21e91f6` | 1.288916 | 1.307976 |
+| `f4e36e9` | `742196f` | **1.266049** | 1.334622 |
+| `c0b7c0b` | `21e91f6` | 1.288916 | 1.307976 |
 
 > **Retraction of a retraction, 2026-08-02.** I previously "withdrew" `1.345x`
 > as appearing in no committed artifact. **That withdrawal was wrong** —
@@ -331,6 +394,15 @@ commits* and which an earlier version of this list conflated:
 > block it comes from is unaffected. Withdrawing a real measurement on a bad
 > audit is worse than the original error, because it destroys evidence while
 > looking like diligence.
+>
+> **And the same omission recurred, 2026-08-02.** @Reviewer then found that
+> this very table was still missing `f4e36e9` (source `742196f`), whose sidecar
+> gives 16 MiB **1.266049x** and 64 MiB 1.334622x — recomputed here and
+> confirmed. 1.266 is the *lowest* value on record, so leaving it out narrowed
+> the published range to 1.289-1.354x in the direction that flattered the
+> claim. That the fix for an omission left another omission of the same kind in
+> the same table is the point: I was correcting entries rather than
+> regenerating the table from the set of sidecars in history.
 
 Quote
 this as **~1.3x**; the third significant figure is not reproducible and my
@@ -360,20 +432,24 @@ probe on a shared box, not a PR-grade number.
 
 A correctly-sized evictor recovers the HBM number:
 
-    64 MiB x2 bufs (WS=256 MiB), evictor=0 MiB      6458.99 GB/s  <- current behaviour
-    64 MiB x2 bufs (WS=256 MiB), evictor=12 MiB     4898.37 GB/s  <- current evictor size
-    64 MiB x2 bufs (WS=256 MiB), evictor=256 MiB    4827.98 GB/s
-    64 MiB x2 bufs (WS=256 MiB), evictor=512 MiB    4637.79 GB/s
-    64 MiB x2 bufs (WS=256 MiB), evictor=1024 MiB   4709.39 GB/s
-    64 MiB x8 bufs (WS=1024 MiB), no evictor        4935.34 GB/s  <- HBM reference
+    64 MiB x2 bufs (WS=256 MiB), evictor=0 MiB      6415.76 GB/s  <- pre-fix behaviour
+    64 MiB x2 bufs (WS=256 MiB), evictor=12 MiB     4880.56 GB/s  <- old evictor size
+    64 MiB x2 bufs (WS=256 MiB), evictor=256 MiB    4786.65 GB/s
+    64 MiB x2 bufs (WS=256 MiB), evictor=512 MiB    4756.04 GB/s
+    64 MiB x2 bufs (WS=256 MiB), evictor=1024 MiB   4683.10 GB/s
+    64 MiB x8 bufs (WS=1024 MiB), no evictor        4992.27 GB/s  <- HBM reference
 
 Evicting at all is what matters here: with no evictor the boundary cell reads
-6458.99 GB/s against a 4935.34 GB/s HBM reference (1.309x), and *any* of the
-evictor sizes brings it to 4637.79–4898.37 GB/s. The worst of those, the
-512 MiB evictor, is 6.03% below the reference; the best, the 12 MiB one, is
-0.75% below it. Which
-of the large evictors comes last is not stable across runs (the 1 GiB one was
-worst last run, mid-pack this one), so read only the grouping, not the order. The
+6415.76 GB/s against a 4992.27 GB/s HBM reference (1.285x), and *any* of the
+evictor sizes brings it to 4683.10–4880.56 GB/s. The worst of those, the
+1 GiB evictor, is 6.19% below the reference; the best, the 12 MiB one, is
+2.24% below it. Which
+of the large evictors comes last is not stable across runs (the 1 GiB one is
+worst here and was mid-pack on the previous sidecar), so read only the
+grouping, not the order. These six rows are the current sidecar; the previous
+version of this block quoted the superseded one (6458.99 / 4898.37 / 4827.98 /
+4637.79 / 4709.39 / 4935.34), where the 512 MiB row rather than the 1 GiB row
+came last — which is exactly why the ordering is not a result. The
 12 MiB evictor is not obviously worse than the 256–1024 MiB ones on this
 access pattern, so the measured defect is **defect 1** — the `ws < 12 MiB`
 gate means no evictor runs on these shapes at all. Defect 2 (the evictor being
@@ -508,16 +584,20 @@ Recommendation: **1 + 3**.
 Any MI355X figure in `AI/flydsl_rmsnorm_notes.md` whose picked working set is
 `<= 256 MiB` *and* which does not trigger the evictor was taken **without the
 cold-measurement contract holding** — **37 of 90 cells** across the full matrix,
-or 8 of 18 per 16-bit mode and 5 of 18 for fp32/same.
+or 8 of 18 per 16-bit mode and 5 of 18 for fp32/same. Adding the four
+`32768x1024` fwd 16-bit cells, which were probed directly at their exact
+working sets rather than classified by the threshold, gives the **41 of 90**
+headline in the status line above.
 
-Those 37 cells are **invalid and need re-collection; they are not "optimistic by
+Those 41 cells are **invalid and need re-collection; they are not "optimistic by
 a known amount"**. Everything measured here is a `copy_` probe. A copy kernel
 losing MALL residency says the *contract* was not established; it does not
 transfer a direction or a magnitude to an RMSNorm cell, whose arithmetic
 intensity, access pattern and launch configuration all differ. An earlier
 version of this line called the cells "optimistic", which asserts a signed error
 this evidence cannot support.
-The `M=32768` row (100%/88%) contains no cell in the 37, but it is not clean.
+The `M=32768` row (100%/88%) contains no cell in the 37 — but it contributes
+four of the 41, and it is not clean.
 The four 16-bit `32768x1024` forward cells sit at 256.003906 MiB (16-bit
 weight) and 256.007812 MiB (fp32 weight) — a few KiB *past* MALL capacity, so
 the `ws <= MALL` test excludes them, yet a copy probe at those exact working
@@ -529,7 +609,10 @@ fine-boundary block measures those exact working sets:
     268439552   256.003906 MiB   6391   <- 32768x1024 fwd, 16-bit weight
     268443648   256.007812 MiB   6367   <- 32768x1024 fwd, fp32 weight
     268500992   256.062500 MiB   5584
+    268697600   256.250000 MiB   5898
+    269484032   257.000000 MiB   5031
     301989888   288.000000 MiB   4871
+    402653184   384.000000 MiB   4991
 
 Against this run's 4992 GB/s HBM reference the **copy probe** at both working
 sets reads high (6391 and 6367 GB/s, i.e. 1.28x and 1.28x). That is a statement

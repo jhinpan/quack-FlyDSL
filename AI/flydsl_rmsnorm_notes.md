@@ -519,7 +519,7 @@ pure launch path, where the CuTe kernel is about 2.2x ahead (6.1 us against
 > a rotation working set of 256 MiB or less stays resident in the MALL, and the
 > `use_evictor` gate compares against a 12 MiB target derived from the 4 MiB
 > per-XCD L2 that torch reports, so on these shapes no eviction runs at all.
-> A `copy_` probe measures **~1.3x** inflation at the boundary (1.289–1.354x
+> A `copy_` probe measures **~1.3x** inflation at the boundary (1.266–1.354x
 > across runs and both buffer sizes; the third digit does not reproduce),
 > confirmed by a
 > second reviewer re-running the committed probe. **That ~1.3x is a property of
@@ -531,17 +531,32 @@ pure launch path, where the CuTe kernel is about 2.2x ahead (6.1 us against
 > Computing from the harness's real `logical_bytes` and actual buffer selection,
 > **37 of 90 cells** are both un-evicted and MALL-resident (8 of 18 per 16-bit
 > mode; 5 of 18 for fp32/same) — i.e. 37 cells are *exposed to* the defect, with
-> the per-cell magnitude unmeasured. **No `m=32768` cell is among the 37.**
+> the per-cell magnitude unmeasured. **No `m=32768` cell is among the 37**, but
+> four `m=32768` cells are in the 41 (below).
+>
+> **37 and 41 count different things; do not merge them.** 37 is the
+> strict-resident subset: `ws <= 256 MiB` and un-evicted. It excludes the four
+> `32768x1024` fwd 16-bit cells, whose working set is 256.004 MiB — *over* the
+> MALL by 4 KiB, so not strictly resident, yet directly probed and shown to read
+> on the MALL-warm side. Counting those as contract-invalid too gives
+> **4 x 9 + 5 = 41**. Use 37 for "strictly resident and un-evicted" and 41 for
+> "measurement contract not established"; the headline number is 41, and an
+> earlier version of this note derived 9-per-mode correctly and then still wrote
+> the total as 37.
 > The `M=4096` row (71% / 64%) is therefore **invalid pending re-collection —
 > not "optimistic"**: a `copy_` probe losing MALL residency shows the
 > cold-measurement contract was never established, and does not transfer a
 > direction or a size to an RMSNorm cell. `M<=512` is launch-bound so bandwidth
 > is not the binding
-> constraint there; and `M=32768` contains no exposed cell but is still not
-> clean — the four 16-bit `32768x1024` forward cells land a few KiB *past* the
+> constraint there; and `M=32768` contains none of the 37 but four of the 41,
+> so it is not clean either — the four 16-bit `32768x1024` forward cells land a few KiB *past* the
 > MALL (256.003906 and 256.007812 MiB), so the threshold excludes them, yet a
-> `copy_` probe at those exact working sets reads 6068 and 6398 GB/s against a
-> ~4935 GB/s HBM reference, i.e. 1.23x and 1.30x high. That is a statement about
+> `copy_` probe at those exact working sets reads 6391 and 6367 GB/s against
+> that run's 4992 GB/s HBM reference, i.e. 1.28x and 1.28x high. (This line
+> previously read "6068 and 6398 ... against ~4935 ... 1.23x and 1.30x", which
+> mixed the *previous* sidecar's values with the current one's and quoted the
+> two working sets in the wrong order; the figures above are the current
+> sidecar, `c0b7c0b`.) That is a statement about
 > **copy traffic at those working sets**, not a measurement of the RMSNorm cells
 > themselves. The 256→288 MiB decay is gradual, so a
 > threshold misclassifies cells sitting either side of it. Full analysis in
