@@ -841,8 +841,19 @@ def test_comparison_scope_does_not_recommend_the_column_it_cannot_compare():
 def test_the_methodology_string_points_at_evidence_instead_of_asserting_a_number():
     # @Reviewer's blocker 4: a machine-readable methodology should not state an
     # unarchived diagnostic as fact. The 178% figure was never archived and did
-    # not reproduce (the measured per-call over-read is +52%/+18%/+6%). The
-    # string now cites the committed probe rather than quoting a magnitude.
+    # not reproduce. The string now cites the committed probe rather than
+    # quoting a magnitude -- which is also why this test survived the
+    # correction below unchanged, and why it is written against the *shape* of
+    # the string rather than its numbers.
+    #
+    # This comment used to gloss the measured per-call over-read as
+    # "+52%/+18%/+6%". Those were mine and they were wrong: unprofiled event
+    # medians divided by the per_rotation phase's hardware median, mixing
+    # profiler regimes and borrowing another run's baseline. The probe stores
+    # over_read_vs_hardware = +138%/+50%/+22% per-call and +103%/+14%/+5%
+    # per-rotation. A test comment is not machine-readable, but it is read by
+    # the next person deciding what the artifact says, so it gets the same
+    # standard as the string it is testing.
     torch = types.SimpleNamespace(
         __version__="2.9.1",
         version=types.SimpleNamespace(hip="7.2", cuda=None),
@@ -1307,3 +1318,42 @@ def test_a_cache_directory_whose_entries_all_failed_says_so(tmp_path):
     )[1]
     assert unusable["reason"] == "no_usable_level2_plus_cache"
     assert unusable["skipped_cache_entries"] == ["0:bad_size_level3"]
+
+
+def test_the_over_read_figures_match_the_field_the_probe_actually_stores():
+    # The blocker @Reviewer found against 43ffc5b, turned into something that
+    # cannot come back quietly. The docstring justifying per-rotation timing
+    # quoted six percentages that no field in the committed sidecar contains:
+    # they divided the *unprofiled* event median by the *per_rotation* phase's
+    # hardware median -- crossing profiler regimes, and in the per-call row
+    # charging one process's event timing against another process's hardware
+    # baseline. The probe defines over_read_vs_hardware as the profiled pair
+    # and says so in its own docstring.
+    #
+    # Archiving the data is what let him recompute and refute it. It did not by
+    # itself make the derived number honest, which is the point worth keeping:
+    # a figure that is not the stored field needs its derivation shown.
+    sidecar = json.loads(
+        (BENCHMARK_PATH.parents[1] / "AI" / "probe_event_timing_calibration.json").read_text()
+    )
+    source = BENCHMARK_PATH.read_text()
+    doc = source[source.index("def _time_rotating_calls") :]
+    doc = doc[: doc.index('"""', doc.index('"""') + 3)]
+
+    for record in sidecar["measurements"]:
+        for mode in ("per_call", "per_rotation"):
+            entry = record[mode]
+            # The stored field is self-consistent: both halves come from the
+            # same profiled phase of the same process.
+            recomputed = entry["event_median_us_profiled"] / entry["hardware_median_us"] - 1.0
+            assert recomputed == pytest.approx(entry["over_read_vs_hardware"], rel=1e-9)
+            assert f"+{round(entry['over_read_vs_hardware'] * 100):d}%" in doc
+
+    # And the ordering the function's design rests on, which is what the
+    # numbers are cited to support: one pair per rotation over-reads less than
+    # one pair per call, at every shape measured.
+    for record in sidecar["measurements"]:
+        assert (
+            record["per_rotation"]["over_read_vs_hardware"]
+            < record["per_call"]["over_read_vs_hardware"]
+        )

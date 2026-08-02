@@ -985,17 +985,39 @@ def _time_rotating_calls(
     A ``torch.cuda.Event`` record carries barrier semantics, so bracketing
     every launch charges two pipeline drains to each kernel. Measured against
     rocprofv3 hardware timestamps on gfx950 by
-    ``AI/probe_event_timing_calibration.py``, sidecar committed beside it:
-    per-call pairs read +52% / +18% / +6% over the hardware duration at
-    ``512x4096`` / ``4096x4096`` / ``32768x1024``, and one pair per rotation
-    reads +16% / +5% / +1%. The over-read shrinks as the kernel grows, which
-    is the expected shape for a fixed per-launch cost.
+    ``AI/probe_event_timing_calibration.py``, sidecar committed beside it.
+    Quoting the field the probe defines and stores, ``over_read_vs_hardware``
+    -- profiled event median over the hardware median of that same profiled
+    phase -- at ``512x4096`` / ``4096x4096`` / ``32768x1024``:
 
-    An earlier version of this docstring said "178% high on a 6us kernel and
-    9% high on a 29us one, while one pair around the rotation is within 5% of
-    both". Those numbers were never archived and do not reproduce; the ordering
-    they were used to justify does. @Reviewer refused the unarchived figure
-    (blocker 4) and the probe exists because he was right to.
+        per-call      +138% / +50% / +22%
+        per-rotation  +103% / +14% /  +5%
+
+    The over-read shrinks as the kernel grows, which is the expected shape for
+    a fixed per-launch cost, and per-rotation is the smaller over-read at every
+    shape, which is the ordering this function's design rests on.
+
+    Two corrections have now landed here, and the second is the more
+    instructive. The original text asserted "178% high on a 6us kernel and 9%
+    high on a 29us one" from a shell that was thrown away; @Reviewer refused it
+    (blocker 4) and the probe exists because he was right.
+
+    The replacement was archived but still wrong. It read +52% / +18% / +6%
+    and +16% / +5% / +1%, computed by dividing ``event_median_us_unprofiled``
+    by ``per_rotation.hardware_median_us`` -- in the per-call row too. That
+    crosses profiler regimes (unprofiled numerator, profiled denominator) and,
+    worse, charges the per-call figure against a *different process's* hardware
+    baseline, which is why +52% appeared where the self-consistent pair reads
+    +138%. @Reviewer caught it by recomputing from the committed JSON, and the
+    contradiction was available to anyone who did: the probe stores the honest
+    ratio in every record and its own doc says the over-read "should be read
+    against the profiled pair, which is self-consistent".
+
+    Being archived is what made the second error checkable, not what made it
+    right. A committed sidecar removes the excuse for a remembered number; it
+    does not license deriving a new one whose halves come from different runs.
+    If a figure is not the field the artifact stores, it needs its own
+    derivation shown -- and this one could not have survived showing it.
 
     The evictor runs outside the window. Keeping the operands out of L2 is the
     rotation's job -- ``_rotation_count`` sizes it against the L2 target for
