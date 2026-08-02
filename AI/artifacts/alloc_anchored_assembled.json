@@ -1,0 +1,408 @@
+{
+  "what": "the pre-registered anchored six-cell run: count=0 and count=13 added to the original four in one shuffle, 24 processes.",
+  "preregistration": "this assembler was written and committed before alloc_factorial_anchored.json existed. The two questions it answers were declared in the FOUR-cell artifact, in anchor_limitation.declared_followup and in slot_structure.declared_followup_for_the_anchor_run, before that run either.",
+  "device_name": "AMD Instinct MI355X",
+  "shuffle_seed": 20260805,
+  "anchored": true,
+  "n_processes": 24,
+  "preconditions": {
+    "prefix_high_water_GiB_by_cell": {
+      "hi_hi": 48.0,
+      "hi_lo": 24.0,
+      "lo_hi": 24.0,
+      "lo_lo": 12.0,
+      "step": 6.5,
+      "zero": 0.0
+    },
+    "measurement_live_set_GiB": 12.0,
+    "cells_below_the_measurement_live_set": [
+      "step",
+      "zero"
+    ],
+    "this_is_by_design_not_a_failure": "the anchors exist to sample BELOW where the four-cell grid could reach. Their process high-water is therefore pinned by the measurement's own 12.0 GiB rather than by their prefix -- the staircase sweep's limitation, reintroduced knowingly.",
+    "_bytes_axis_is_not_valid_across_anchors": "do NOT plot 0 / 6.5 / 12 / 24 / 48 GiB as one ordered bytes axis. For the two anchors the prefix does not set the peak, so the x value is not the quantity the other cells' x values measure. The anchors answer 'does the prefix matter at all', not 'where on the bytes curve does this sit'."
+  },
+  "cell_means": {
+    "hi_hi": {
+      "n": 4,
+      "mean_TBps": 4.97352,
+      "sd_TBps": 0.00762,
+      "values": [
+        4.97149,
+        4.96414,
+        4.97626,
+        4.98217
+      ]
+    },
+    "hi_lo": {
+      "n": 4,
+      "mean_TBps": 4.9584,
+      "sd_TBps": 0.01045,
+      "values": [
+        4.96712,
+        4.95219,
+        4.94691,
+        4.9674
+      ]
+    },
+    "lo_hi": {
+      "n": 4,
+      "mean_TBps": 4.94826,
+      "sd_TBps": 0.00573,
+      "values": [
+        4.95047,
+        4.93992,
+        4.94972,
+        4.95295
+      ]
+    },
+    "lo_lo": {
+      "n": 4,
+      "mean_TBps": 4.90501,
+      "sd_TBps": 0.00418,
+      "values": [
+        4.90221,
+        4.9013,
+        4.91048,
+        4.90604
+      ]
+    },
+    "step": {
+      "n": 4,
+      "mean_TBps": 4.97662,
+      "sd_TBps": 0.00513,
+      "values": [
+        4.97772,
+        4.98046,
+        4.9792,
+        4.96911
+      ]
+    },
+    "zero": {
+      "n": 4,
+      "mean_TBps": 4.91798,
+      "sd_TBps": 0.00498,
+      "values": [
+        4.92304,
+        4.9163,
+        4.91181,
+        4.92077
+      ]
+    }
+  },
+  "P1_PREREGISTERED_does_the_prefix_move_the_rate": {
+    "ran": true,
+    "question": "does the prefix move the rate at all, relative to allocating nothing?",
+    "contrasts": {
+      "hi_hi_minus_zero": {
+        "delta_TBps": 0.05554,
+        "welch_t": 12.202,
+        "welch_df": 5.2
+      },
+      "hi_lo_minus_zero": {
+        "delta_TBps": 0.04042,
+        "welch_t": 6.986,
+        "welch_df": 4.3
+      },
+      "lo_hi_minus_zero": {
+        "delta_TBps": 0.03028,
+        "welch_t": 7.979,
+        "welch_df": 5.9
+      },
+      "lo_lo_minus_zero": {
+        "delta_TBps": -0.01297,
+        "welch_t": -3.991,
+        "welch_df": 5.8
+      },
+      "step_minus_zero": {
+        "delta_TBps": 0.05864,
+        "welch_t": 16.403,
+        "welch_df": 6.0
+      }
+    },
+    "why_welch": "cell sds in the four-cell run spanned 0.0018 to 0.0083 TB/s, a factor of 4.6. Pooling variances that unequal is how a difference in spread gets reported as a difference in means.",
+    "what_a_null_here_would_mean": "if count=0 matches the count>0 cells then the prefix does not move the rate in this regime, and the four-cell grid's 94.53% total-bytes figure is describing something other than what it claims. Named before the run because it is the outcome that would cost the most."
+  },
+  "P2_PREREGISTERED_argmin_slot": {
+    "per_cell": {
+      "hi_hi": {
+        "argmin_each_process": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "unanimous": true,
+        "modal": 0
+      },
+      "hi_lo": {
+        "argmin_each_process": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "unanimous": true,
+        "modal": 1
+      },
+      "lo_hi": {
+        "argmin_each_process": [
+          3,
+          3,
+          3,
+          3
+        ],
+        "unanimous": true,
+        "modal": 3
+      },
+      "lo_lo": {
+        "argmin_each_process": [
+          2,
+          2,
+          2,
+          2
+        ],
+        "unanimous": true,
+        "modal": 2
+      },
+      "step": {
+        "argmin_each_process": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "unanimous": true,
+        "modal": 1
+      },
+      "zero": {
+        "argmin_each_process": [
+          4,
+          4,
+          4,
+          4
+        ],
+        "unanimous": true,
+        "modal": 4
+      }
+    },
+    "prediction_A_zero_differs_from_every_count_gt_0": {
+      "zero_argmins": [
+        4
+      ],
+      "overlaps_with": [],
+      "holds": true
+    },
+    "prediction_B_routes_to_24GiB_still_disagree": {
+      "lo_hi_argmins": [
+        3
+      ],
+      "hi_lo_argmins": [
+        1
+      ],
+      "routes_still_disagree": true
+    },
+    "permutation_p_for_cellwise_argmin_structure": 0.0,
+    "what_the_permutation_shuffles": "cell LABELS across processes, holding the observed multiset of argmin values fixed. A null that instead drew argmins uniformly would let a skewed marginal -- if slot 0 is simply slowest most of the time -- manufacture apparent cell structure. This one cannot: it asks only whether the argmins line up with the cells better than chance relabelling, which is the actual claim.",
+    "why_this_is_the_sharper_test": "it is a prediction about a nominal outcome with five values, fixed in a commit before the data existed. The four-cell grid could not test it: four cells with four distinct argmins is saturated, zero residual df, so some rule fit perfectly whatever the values were. Six cells give df back."
+  },
+  "order_control": {
+    "residual_spearman_vs_position": 0.1939,
+    "permutation_p_two_sided": 0.3524,
+    "corr_RAW_rate_vs_position_DO_NOT_QUOTE_AS_THE_CONTROL": -0.047,
+    "why_that_field_is_named_that": "the four-cell run's first draft correlated the raw rate and got -0.0362, which reads as a clean null. Residualising on cell mean gave +0.4971. Cell means up to 0.064 TB/s apart dominated the raw series, so the raw figure answered a question nobody asked.",
+    "what_this_cannot_do": "it fits drift as MONOTONE in position. Non-monotone or periodic structure passes it untouched, exactly as it passes a linear-trend adjustment."
+  },
+  "monotonicity_REFUTES_THE_FOUR_CELL_HEADLINE": {
+    "rate_by_total_prior_GiB": [
+      [
+        "zero",
+        0.0,
+        4.91798
+      ],
+      [
+        "step",
+        6.5,
+        4.97662
+      ],
+      [
+        "lo_lo",
+        12.0,
+        4.90501
+      ],
+      [
+        "hi_lo",
+        24.0,
+        4.9584
+      ],
+      [
+        "lo_hi",
+        24.0,
+        4.94826
+      ],
+      [
+        "hi_hi",
+        48.0,
+        4.97352
+      ]
+    ],
+    "is_monotone_increasing": false,
+    "sign_changes": 4,
+    "the_refutation": "the four-cell run reported total prior bytes explaining 94.53% of the variance, on a grid whose smallest prefix was 12 GiB. Adding 0 and 6.5 GiB breaks it: the 12 GiB cell is SLOWER than allocating nothing at all, and 6.5 GiB is faster than 12, 24 and 48. A monotone bytes response cannot produce either. The 94.53% was measuring the rising segment of a non-monotone curve and reporting it as the curve.",
+    "what_survives": "the prefix does move the rate -- P1 is emphatic and that was the anchor's declared purpose. What does not survive is 'total prior bytes' as the variable it moves with. The four cells themselves replicated closely across sessions, so the earlier DATA is sound; the interpretation placed on it was not, and no amount of within-grid rigour could have caught that. Only a point outside the grid could.",
+    "and_the_anchors_cannot_be_read_as_bytes_either": "both anchors sit below the measurement's own 12.0 GiB live set, so their process peak is pinned by the measurement rather than the prefix. That is precisely why they refute a bytes story rather than extend one: they show the rate changing while the quantity the story is about does not."
+  },
+  "aggregation_sweep": {
+    "status": "reported on all four bases because the four-cell run showed the headline is a property of the aggregation. The mean stays primary.",
+    "bases": {
+      "mean_PREREGISTERED_PRIMARY": {
+        "hi_hi": 4.97352,
+        "hi_lo": 4.9584,
+        "lo_hi": 4.94826,
+        "lo_lo": 4.90501,
+        "step": 4.97662,
+        "zero": 4.91798,
+        "diagonal_hi_lo_minus_lo_hi": 0.01014,
+        "zero_to_lo_lo_delta": -0.01297
+      },
+      "median": {
+        "hi_hi": 4.99216,
+        "hi_lo": 4.97275,
+        "lo_hi": 4.96481,
+        "lo_lo": 4.91801,
+        "step": 4.92553,
+        "zero": 4.92838,
+        "diagonal_hi_lo_minus_lo_hi": 0.00794,
+        "zero_to_lo_lo_delta": -0.01037
+      },
+      "max_coordinate": {
+        "hi_hi": 5.02572,
+        "hi_lo": 4.99881,
+        "lo_hi": 5.02834,
+        "lo_lo": 5.03342,
+        "step": 5.33586,
+        "zero": 5.03386,
+        "diagonal_hi_lo_minus_lo_hi": -0.02953,
+        "zero_to_lo_lo_delta": -0.00044
+      },
+      "min_coordinate": {
+        "hi_hi": 4.90961,
+        "hi_lo": 4.89234,
+        "lo_hi": 4.86083,
+        "lo_lo": 4.78215,
+        "step": 4.79781,
+        "zero": 4.79231,
+        "diagonal_hi_lo_minus_lo_hi": 0.03151,
+        "zero_to_lo_lo_delta": -0.01015
+      }
+    }
+  },
+  "exploratory_slot_profiles": {
+    "status": "EXPLORATORY -- not declared before the run, do not quote as a test",
+    "per_cell": {
+      "hi_hi": {
+        "mean_profile_by_slot": [
+          4.9096,
+          4.9932,
+          4.9372,
+          5.0018,
+          5.0257
+        ],
+        "mean_spread_max_minus_min": 0.1161
+      },
+      "hi_lo": {
+        "mean_profile_by_slot": [
+          4.9862,
+          4.8923,
+          4.9403,
+          4.9982,
+          4.975
+        ],
+        "mean_spread_max_minus_min": 0.1065
+      },
+      "lo_hi": {
+        "mean_profile_by_slot": [
+          4.9648,
+          5.0263,
+          5.0015,
+          4.8608,
+          4.8879
+        ],
+        "mean_spread_max_minus_min": 0.1675
+      },
+      "lo_lo": {
+        "mean_profile_by_slot": [
+          4.918,
+          4.8311,
+          4.7822,
+          5.0334,
+          4.9604
+        ],
+        "mean_spread_max_minus_min": 0.2513
+      },
+      "step": {
+        "mean_profile_by_slot": [
+          5.3359,
+          4.7978,
+          4.8296,
+          4.9255,
+          4.9943
+        ],
+        "mean_spread_max_minus_min": 0.5381
+      },
+      "zero": {
+        "mean_profile_by_slot": [
+          4.8387,
+          5.0339,
+          4.9284,
+          4.9966,
+          4.7923
+        ],
+        "mean_spread_max_minus_min": 0.2416
+      }
+    },
+    "the_step_cell_slot0": {
+      "step_slot0_TBps_each_process": [
+        5.3279,
+        5.3564,
+        5.3421,
+        5.3171
+      ],
+      "best_single_observation_in_every_other_cell": 5.0588,
+      "margin_TBps": 0.2583,
+      "step_slot0_round_spread_pct_each_process": [
+        0.378,
+        1.211,
+        1.18,
+        0.452
+      ],
+      "it_is_a_state_not_an_outlier": "all seven rounds of every step slot-0 measurement sit within about 1% of each other, and the effect repeats in all four independent processes. This is the check @Reviewer's 23a6f662 asked for, applied to the one observation most likely to be dismissed as noise -- and it survives.",
+      "what_makes_it_interesting": "count=13 does not shift the level; it produces a qualitatively different placement. One slot lands far faster than anything else observed while the other four sit BELOW most cells. A per-process mean averages a bimodal profile into a middling number and reports it as a level. That is the same defect as the aggregation dependence, in its strongest form yet: here the collapse does not merely pick an estimand, it destroys the structure that is the actual finding.",
+      "what_it_does_not_establish": "why. A faster placement is consistent with the buffer landing somewhere with better path characteristics, and consistent with several other mechanisms. Nothing here distinguishes them, and count=13 was chosen because it is the first staircase step, not because anything predicted this."
+    }
+  },
+  "what_this_still_cannot_do": "it identifies no mechanism. Nothing here explains why a slot is slow or why the treatment relabels which one is, and no factorial or ordering control can. Placement past the MALL remains consistent with the pattern and unevidenced against any other mechanism that reorders buffers.",
+  "manifest": {
+    "AI/artifacts/alloc_factorial_anchored.json": {
+      "sha256": "beadc3365d015c2fdd8ac5152a23f6e5f9f4fc139e4a8729d5e3d262837d7025",
+      "bytes": 89709
+    },
+    "AI/probe_alloc_factorial.py": {
+      "sha256": "5b099b65da17db72b60b9b8385be90354cd77614ae6bc915c35ef849aaaed235",
+      "bytes": 13558
+    },
+    "AI/assemble_alloc_anchored.py": {
+      "sha256": "08ebe4b0b973141a4e11f3ec7b3fc54bfae2d043c34671f6e6453d8e14bb1b3f",
+      "bytes": 24219
+    }
+  },
+  "git": {
+    "commit": "0b44767",
+    "worktree_dirty": true,
+    "worktree_dirty_paths": [
+      "AI/artifacts/alloc_anchored_assembled.json",
+      "AI/artifacts/alloc_factorial_anchored.json",
+      "I/assemble_alloc_anchored.py"
+    ]
+  }
+}

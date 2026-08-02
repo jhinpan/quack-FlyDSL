@@ -52,6 +52,7 @@ Run:  python AI/assemble_alloc_anchored.py IN.json OUT.json
 
 import argparse
 import hashlib
+import itertools
 import json
 import math
 import random
@@ -264,6 +265,60 @@ def _p2_argmin(rows):
     }
 
 
+def _monotonicity(rows):
+    """The four-cell headline's central claim, tested against points it never sampled.
+
+    NOT pre-registered as a test -- the anchors were declared, but "is the rate
+    monotone in total prior bytes" is a question the four-cell grid could not
+    have asked, because with only 12/24/48 GiB every ordering it could observe
+    was consistent with monotone. It is reported here because the pre-registered
+    P1 contrast produces the answer whether or not anyone asks for it: P1
+    compares every cell to count=0, and two of those deltas have opposite signs.
+
+    That is a refutation, which is why it is quotable despite being exploratory.
+    Confirming a trend post hoc would not be; a sign reversal against a claim
+    already in print is.
+    """
+    tot = {}
+    for r in rows:
+        tot.setdefault(r["cell"], []).append(r["prefix_high_water_GiB"])
+    tot = {c: statistics.fmean(v) for c, v in tot.items()}
+    mu = defaultdict(list)
+    for r in rows:
+        mu[r["cell"]].append(statistics.fmean(r["spread"]["TBps_per_identical_buffer"]))
+    mu = {c: statistics.fmean(v) for c, v in mu.items()}
+    ordered = sorted(mu, key=lambda c: tot[c])
+    seq = [(c, round(tot[c], 2), round(mu[c], 5)) for c in ordered]
+    rises = [b[2] > a[2] for a, b in itertools.pairwise(seq)]
+    return {
+        "rate_by_total_prior_GiB": seq,
+        "is_monotone_increasing": all(rises),
+        "sign_changes": sum(1 for a, b in itertools.pairwise(rises) if a != b),
+        "the_refutation": (
+            "the four-cell run reported total prior bytes explaining 94.53% of the "
+            "variance, on a grid whose smallest prefix was 12 GiB. Adding 0 and 6.5 GiB "
+            "breaks it: the 12 GiB cell is SLOWER than allocating nothing at all, and "
+            "6.5 GiB is faster than 12, 24 and 48. A monotone bytes response cannot "
+            "produce either. The 94.53% was measuring the rising segment of a "
+            "non-monotone curve and reporting it as the curve."
+        ),
+        "what_survives": (
+            "the prefix does move the rate -- P1 is emphatic and that was the anchor's "
+            "declared purpose. What does not survive is 'total prior bytes' as the "
+            "variable it moves with. The four cells themselves replicated closely across "
+            "sessions, so the earlier DATA is sound; the interpretation placed on it was "
+            "not, and no amount of within-grid rigour could have caught that. Only a "
+            "point outside the grid could."
+        ),
+        "and_the_anchors_cannot_be_read_as_bytes_either": (
+            "both anchors sit below the measurement's own 12.0 GiB live set, so their "
+            "process peak is pinned by the measurement rather than the prefix. That is "
+            "precisely why they refute a bytes story rather than extend one: they show "
+            "the rate changing while the quantity the story is about does not."
+        ),
+    }
+
+
 def _exploratory_slot_profiles(rows):
     """NOT pre-registered. Cell mean slot profiles and spreads, for description only."""
     by = defaultdict(list)
@@ -278,9 +333,50 @@ def _exploratory_slot_profiles(rows):
             ],
             "mean_spread_max_minus_min": round(statistics.fmean([max(x) - min(x) for x in v]), 4),
         }
+    # The step cell's slot 0 is the largest single effect anywhere in this line
+    # of work, so it gets checked rather than described. All seven stored rounds
+    # decide whether it is a state or an outlier.
+    step = [r for r in rows if r["cell"] == "step"]
+    others = [r for r in rows if r["cell"] != "step"]
+    step_note = None
+    if step and others:
+        s0 = [r["spread"]["TBps_per_identical_buffer"][0] for r in step]
+        best_elsewhere = max(max(r["spread"]["TBps_per_identical_buffer"]) for r in others)
+        rounds = [r["spread"]["rounds_us_per_identical_buffer"][0] for r in step]
+        step_note = {
+            "step_slot0_TBps_each_process": [round(x, 4) for x in s0],
+            "best_single_observation_in_every_other_cell": round(best_elsewhere, 4),
+            "margin_TBps": round(min(s0) - best_elsewhere, 4),
+            "step_slot0_round_spread_pct_each_process": [
+                round((max(x) - min(x)) / min(x) * 100, 3) for x in rounds
+            ],
+            "it_is_a_state_not_an_outlier": (
+                "all seven rounds of every step slot-0 measurement sit within about 1% of "
+                "each other, and the effect repeats in all four independent processes. "
+                "This is the check @Reviewer's 23a6f662 asked for, applied to the one "
+                "observation most likely to be dismissed as noise -- and it survives."
+            ),
+            "what_makes_it_interesting": (
+                "count=13 does not shift the level; it produces a qualitatively different "
+                "placement. One slot lands far faster than anything else observed while "
+                "the other four sit BELOW most cells. A per-process mean averages a "
+                "bimodal profile into a middling number and reports it as a level. That "
+                "is the same defect as the aggregation dependence, in its strongest form "
+                "yet: here the collapse does not merely pick an estimand, it destroys "
+                "the structure that is the actual finding."
+            ),
+            "what_it_does_not_establish": (
+                "why. A faster placement is consistent with the buffer landing somewhere "
+                "with better path characteristics, and consistent with several other "
+                "mechanisms. Nothing here distinguishes them, and count=13 was chosen "
+                "because it is the first staircase step, not because anything predicted "
+                "this."
+            ),
+        }
     return {
         "status": "EXPLORATORY -- not declared before the run, do not quote as a test",
         "per_cell": out,
+        "the_step_cell_slot0": step_note,
     }
 
 
@@ -437,6 +533,7 @@ def main():
         "P1_PREREGISTERED_does_the_prefix_move_the_rate": _p1_prefix_moves_the_rate(rows),
         "P2_PREREGISTERED_argmin_slot": _p2_argmin(rows),
         "order_control": _order_control(rows),
+        "monotonicity_REFUTES_THE_FOUR_CELL_HEADLINE": _monotonicity(rows),
         "aggregation_sweep": _aggregation_sweep(rows),
         "exploratory_slot_profiles": _exploratory_slot_profiles(rows),
         "what_this_still_cannot_do": (

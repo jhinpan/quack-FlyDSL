@@ -1148,6 +1148,15 @@ because the high-waters differed, and differing is not the same as crossing.
 
 ##### The real factorial: bytes explains 94.5%, and the route is equivocal
 
+> **WITHDRAWN by the anchored run.** The 94.5% is real arithmetic on sound data —
+> the four cells replicated to within 0.0035 TB/s in an independent session — but
+> "total prior bytes" is not the variable it identifies. Adding count=0 and
+> count=13 shows the response is **not monotone**: 12 GiB is *slower* than
+> allocating nothing, and 6.5 GiB is faster than 12, 24 *and* 48 GiB. The grid
+> sampled only a rising segment and reported it as the curve. See *The anchored
+> run refutes the bytes headline* below. The section is kept as written because
+> the reasoning that produced it is the point.
+
 `AI/probe_alloc_factorial.py` crosses the two factors properly — count {24, 48} ×
 per-buffer size {512 MiB, 1 GiB}, 16 processes, one seeded shuffle, no blocking.
 The cell pair that does the work is **the same 24 GiB of prior peak reached with
@@ -1312,6 +1321,66 @@ pre-registered count=0 / count=13 anchor run — before those numbers exist, wit
 the prediction that count=0 differs from every count>0 cell. Two extra cells give
 back the residual df this grid lacks, and no new probe code is needed, because
 `_measure` already stores the whole dict.
+
+##### The anchored run refutes the bytes headline — and confirms both predictions
+
+Six cells in one shuffle, 24 processes, GPU5. The assembler was committed with
+the data deliberately left untracked, so its absence at that commit is checkable
+the way @Autotune checked the four-cell chronology.
+
+**Both pre-registered predictions held, exactly.**
+
+| cell | prior peak | mean TB/s | sd | argmin slot |
+|---|---|---|---|---|
+| zero | 0 GiB | 4.91798 | 0.00498 | **4** |
+| step | 6.5 GiB | **4.97662** | 0.00513 | 1 |
+| lo_lo | 12 GiB | **4.90501** | 0.00418 | 2 |
+| lo_hi | 24 GiB | 4.94826 | 0.00573 | 3 |
+| hi_lo | 24 GiB | 4.95840 | 0.01045 | 1 |
+| hi_hi | 48 GiB | 4.97352 | 0.00762 | 0 |
+
+**P1 — the prefix moves the rate.** Emphatically: Welch *t* from 3.99 to 16.40
+against count=0. That was the anchor's declared purpose and it succeeded.
+
+**P2 — the argmin.** Every cell unanimous across all four processes; count=0
+gives slot 4, shared with no count>0 cell; the two 24 GiB routes still disagree
+(3 vs 1). Permutation p = 0.0 on 20 000 draws. And all four original cells
+reproduced their *exact* argmin from the previous session (2/3/1/0). A nominal
+outcome with five values, predicted in advance, correct in every cell.
+
+**But P1's own contrasts refute the headline P1 was meant to support.** Two
+deltas have opposite signs, and that is fatal to a monotone bytes response:
+**lo_lo (12 GiB) is slower than zero**, and **step (6.5 GiB) is faster than 12,
+24 and 48 GiB**. The rate is not monotone in total prior bytes. The four-cell
+grid's smallest prefix was 12 GiB, so every ordering it could observe was
+consistent with monotone — the 94.53% measured the rising segment of a
+non-monotone curve and reported it as the curve.
+
+The `lo_lo < zero` reversal holds on **all four aggregation bases**. This is not
+the basis-dependence problem again; it is a fact about the data.
+
+Two things worth separating. The earlier **data** is sound — the four cells
+replicated to within 0.0035 TB/s across independent sessions with different
+seeds, and the diagonal reproduced to four decimals (+0.01019 → +0.01014). The
+**interpretation** was wrong. No amount of within-grid rigour could have caught
+that; only a point outside the grid could. Every control I built — shuffling,
+residualizing, permutation nulls, the aggregation sweep — operated *inside* a
+range that never contained the counterexample.
+
+**And the largest single effect in this whole line of work is in `step`.** Its
+slot 0 reads 5.3171–5.3564 TB/s in all four processes — **0.2583 TB/s above the
+best single observation in every other cell** — while its other four slots sit
+*below* most cells. All seven rounds of every one of those measurements agree
+within ~1%, so by @Reviewer's own `23a6f662` test it is a stable state, not an
+outlier. `count=13` does not shift the level; it produces a **qualitatively
+different placement**, and a per-process mean averages that bimodal profile into
+a middling 4.977 and calls it a level.
+
+That is the aggregation defect in its strongest form yet. Everywhere else the
+collapse merely picked one estimand among several; here it *destroys the
+structure that is the actual finding*. Why a placement is faster remains
+unexplained — `count=13` was chosen because it is the first staircase step, and
+nothing predicted this.
 
 Three corrections found while reading my own output, all one defect:
 
