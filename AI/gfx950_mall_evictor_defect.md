@@ -456,7 +456,13 @@ fine-boundary block measures those exact working sets:
     301989888   288.000000 MiB   5006
 
 Against a ~4935 GB/s HBM reference both variants are firmly on the inflated
-side (6068 and 6398 GB/s, i.e. 1.23x and 1.30x). The decay from 256 to 288 MiB is gradual, not a cliff, which is why a
+side (6068 and 6398 GB/s, i.e. 1.23x and 1.30x). Do **not** read an ordering
+among the four points from 256.000 to 256.008 MiB: their interquartile ranges
+overlap almost completely (e.g. 256.003906 spans p25–p75 of 6019–6191 while
+256.007812 spans 6254–6453, with per-round minima of 5825 and 5583), so the
+fp32-weight cell reading *above* the 16-bit one despite a larger working set is
+noise, not a trend. The only claim these support is that all four sit on the
+inflated side of the reference. The decay from 256 to 288 MiB is gradual, not a cliff, which is why a
 threshold test misclassifies cells sitting a few KiB either side of it — and
 why these were measured rather than classified. Whether this shifts the
 published median depends on how many cells feed it, and should be recomputed
