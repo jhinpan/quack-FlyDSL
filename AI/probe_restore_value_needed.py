@@ -264,9 +264,19 @@ def check_bench_path_gap(M, N, dtype):
         "mall_bytes_assumed": MALL_BYTES,
         "mall_bytes_is_hardcoded": True,
         "one_x_tensor_bytes": one_t,
-        "rotation_working_set_bytes": n_bufs * one_t,
-        "single_set_fits_mall": one_t <= MALL_BYTES,
-        "rotation_set_fits_mall": n_bufs * one_t <= MALL_BYTES,
+        # The working set is NOT just the cloned inputs. rmsnorm allocates its
+        # own output per call, so each rotation slot touches x AND out. An
+        # earlier version of this field counted only the clones and so
+        # understated the set by 2x -- the same counting error @Autotune
+        # corrected in his own transition-point claim (probe buffers vs
+        # src+dst rotation slots). Both figures are reported rather than one,
+        # because "which bytes are in the set" is the question being begged.
+        "cloned_input_bytes": n_bufs * one_t,
+        "rotation_working_set_bytes_incl_outputs": n_bufs * one_t * 2,
+        "single_set_fits_mall_inputs_only": one_t <= MALL_BYTES,
+        "single_set_fits_mall_incl_output": one_t * 2 <= MALL_BYTES,
+        "rotation_set_fits_mall_inputs_only": n_bufs * one_t <= MALL_BYTES,
+        "rotation_set_fits_mall_incl_outputs": n_bufs * one_t * 2 <= MALL_BYTES,
         "cells_ms": {
             "graph_rotate__what_autotune_uses_today": {"median": g_rot, "runs": graph_rot},
             "graph_single__same_mechanism_no_rotation": {"median": g_one, "runs": graph_one},
@@ -301,12 +311,16 @@ def check_bench_path_gap(M, N, dtype):
             "Wiki hw-chiplet-xcd). Reading L2_cache_size and sizing a cache "
             "argument on it is defect 1 of AI/gfx950_mall_evictor_defect.md, "
             "fixed harness-side in 31c1fd4. Against the right cache the claim "
-            "inverts for the small shape: 8192x2048 rotated is 128 MiB, which "
-            "FITS the MALL comfortably -- nearly the same 128 MiB example that "
-            "document uses -- so rotation there produces no cold read at all. "
-            "32768x4096 is the opposite: single sits at 256 MiB (exactly at "
-            "capacity) while rotated is 1024 MiB and does cross it, which is "
-            "where a contrast should have shown. It did not. This probe "
+            "inverts for the small shape: 8192x2048 rotated is 128 MiB of "
+            "cloned inputs (256 MiB counting the per-call outputs), which fits "
+            "or exactly meets the MALL -- close to the 128 MiB example that "
+            "document uses -- so rotation there produces no clearly cold read. "
+            "32768x4096 is the opposite: single is 256 MiB of input (512 MiB "
+            "with output) and rotated is 1024 MiB (2048 MiB), which crosses "
+            "either way, and that is where a contrast should have shown. It "
+            "did not. Note the input-only figures understate the set by 2x: "
+            "rmsnorm allocates an output per call, so a rotation slot is x AND "
+            "out. Both are reported above. This probe "
             "therefore records a ~1.00x within-graph ratio WITHOUT a surviving "
             "explanation. Candidates to separate: rmsnorm at these sizes is "
             "HBM-bound enough that MALL residency moves little; the evictor gap "
@@ -407,8 +421,10 @@ def main():
             f"mechanism {e['mechanism_effect_at_rotate__do_bench_over_graph']:.3f}x"
         )
         print(
-            f"      -> rotation set {g['rotation_working_set_bytes'] / 2**20:.1f} MiB, "
-            f"fits 256 MiB MALL: {g['rotation_set_fits_mall']}"
+            f"      -> rotation set {g['cloned_input_bytes'] / 2**20:.0f} MiB in / "
+            f"{g['rotation_working_set_bytes_incl_outputs'] / 2**20:.0f} MiB in+out, "
+            f"fits MALL: {g['rotation_set_fits_mall_inputs_only']}"
+            f"/{g['rotation_set_fits_mall_incl_outputs']}"
         )
     print(f"wrote {OUT}")
     return 0

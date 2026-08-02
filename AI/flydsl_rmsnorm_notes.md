@@ -3433,19 +3433,20 @@ of 5 from `AI/data/restore_value_needed.json`):
 
 | | graph | `do_bench` |
 | --- | --- | --- |
-| rotate (4 sets) | **0.0906** | 0.1129 |
-| single | 0.0910 | 0.1112 |
+| rotate (4 sets) | **0.0905** | 0.1128 |
+| single | 0.0908 | 0.1113 |
 
-- **Mechanism** = 1.246× here, 1.630× at 8192×2048. `do_bench` pays an event
+- **Mechanism** = 1.246× here, 1.646× at 8192×2048. `do_bench` pays an event
   pair and a fresh output allocation per launch; the graph replays 200 recorded
   calls with no Python in the window. This term is essentially the whole
-  end-to-end gap (1.227× and 1.323×).
-- **Rotation, within one mechanism** = 1.00× (1.004× and 0.991×).
+  end-to-end gap (1.229× and 1.363×).
+- **Rotation, within one mechanism** = 1.00× (1.002× and 0.995×).
 
-(Cells move in the third decimal between runs — 0.0904/0.0907/0.1112 two runs
+(Cells move in the third decimal between runs — 0.0904/0.0907/0.1112 three runs
 earlier. Message `f75cd8b8` quotes that earlier run; the table here is the
-current artifact's. Ratios are stable to three figures, which is why the
-section argues from ratios.)
+current artifact's. The mechanism term at 8192×2048 is the least stable figure
+in the set, 1.629–1.646× across runs; the rotation term is 0.99–1.00×
+throughout. Ratios are what this section argues from, for that reason.)
 
 ###### …and the explanation I first gave for the 1.00× was the very defect this repo already documents
 
@@ -3470,18 +3471,30 @@ the same conclusion the old harness drew, and did it in a tree that contains a
 written record of why that is a mistake. Working the numbers against the right
 cache:
 
-| shape | one tensor | rotation set (4 bufs) | fits 256 MiB MALL? |
-| --- | --- | --- | --- |
-| 32768×4096 bf16 | 256.0 MiB | 1024.0 MiB | single **yes** (at capacity), rotated **no** |
-| 8192×2048 bf16 | 32.0 MiB | 128.0 MiB | **yes, both** |
+| shape | one tensor | rotated inputs (4) | rotated in+out | fits 256 MiB MALL? |
+| --- | --- | --- | --- | --- |
+| 32768×4096 bf16 | 256.0 MiB | 1024.0 MiB | 2048.0 MiB | rotated **no** either way |
+| 8192×2048 bf16 | 32.0 MiB | 128.0 MiB | 256.0 MiB | **yes** (in+out sits exactly *at* capacity) |
 
-So the claim inverts for the small shape. At 8192×2048 the rotated working set
-is **128 MiB, comfortably inside the MALL** — it is nearly the same 128 MiB
-example defect 1 uses ("too big to trigger the evictor, small enough to stay
-resident in MALL"). Rotation there does not produce a cold read at all, and
-"the working set blows the cache" is simply false. For 32768×4096, rotation
-*does* cross the MALL while the single-buffer cell sits right at capacity, so
-that pair is the one where a real hot/cold contrast should have appeared.
+Two columns because the first one I published was wrong by 2×: I counted only
+the cloned inputs, but rmsnorm allocates an output per call, so a rotation slot
+holds `x` **and** `out`. That is the same counting error @Autotune corrected in
+his own transition-point claim an hour later (`b01d0609`) — he had compared
+probe buffers against sweeps whose rotation slot is a src+dst pair, which put
+his direction *and* magnitude the wrong way round. Same trap, adjacent numbers,
+found independently.
+
+It does not flip either verdict here, but it changes what the small shape is:
+at 8192×2048 the rotated set counting outputs is **exactly 256.0 MiB — right on
+the MALL boundary**, not comfortably inside it. That is the regime
+`gfx950_mall_evictor_defect.md` explicitly refuses to classify: its four
+`32768x1024` fwd cells sit at 256.004 MiB, "a few KiB *past* capacity", and
+were measured **MALL-warm anyway**. So a `ws <= MALL` rule cannot decide this
+cell either. What remains true is that rotation there does **not** clearly
+produce a cold read, so "the working set blows the cache" was false. For
+32768×4096 rotation crosses the MALL on either count while the single cell is
+at-or-over capacity, and that is the pair where a hot/cold contrast should have
+appeared.
 
 Which leaves the honest statement of the observation much narrower than what I
 published: **the within-graph single-vs-rotate ratio came out ~1.00× on both
@@ -3505,7 +3518,7 @@ of this either — it rests on the mutation contract and the replay test.
 
 One contamination of my own, flagged rather than quietly dropped: the
 `do_bench` rotate cell rotates via a Python closure doing a modulo and an index
-**inside the timed region**, so its 0.985×/0.812× is that overhead plus
+**inside the timed region**, so its 0.987×/0.828× is that overhead plus
 allocator behaviour, not a cache effect. Only the within-graph ratio is
 like-for-like,
 because there the rotation is baked into the recorded graph on both sides.
