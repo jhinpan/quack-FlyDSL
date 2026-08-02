@@ -71,40 +71,66 @@ from AI.probe_rmsnorm_roofline import (
 
 SIZES_MIB = (512, 2048)
 
-# Allocation prefixes, expressed as the peak number of simultaneously-live
-# 512 MiB buffers -- then all freed and `empty_cache()`d before anything is
-# measured. Peak, not total: churn at a low water mark does nothing, while
-# crossing certain thresholds shifts the 2 GiB slot values to a different,
-# reproducible set. A staircase, and reversible -- coming back down restores the
-# earlier values.
+# Allocation prefixes: N simultaneously-live 512 MiB buffers, then all freed and
+# `empty_cache()`d before anything is measured. Crossing certain N shifts the
+# 2 GiB slot values to a different, reproducible set -- a staircase.
 #
-# This is the mechanism behind what was published as a cross-process spread.
-# `_copy_variability` in the current generator peaks at 5x2048 MiB = 20 units;
-# at 7de8da4 the size sweep did not exist and it peaked below the first step.
-# Prefix 20 reproduces the current generator's 2 GiB slot means and prefix 0
-# reproduces the old one's, so the "13.35% across 3 processes" was the
-# allocator's high-water mark moving under an edit to the harness.
+# THIS AXIS WAS MISNAMED, and the retraction belongs here rather than only in the
+# notes. It was called "allocator peak high-water mark", and that named a
+# quantity the experiment never varied. @Reviewer worked it out from the code;
+# measuring `torch.cuda.max_memory_allocated` confirms it exactly:
 #
-# The default set brackets the two generator versions. `--sweep-steps` walks a
-# fine grid instead, so the step *locations* are a measured artifact field
-# rather than a remembered pair of integers: the first draft of the notes
-# asserted steps "at 13 and again at 17" from an exploratory script in /tmp,
-# which is a number living only in prose -- the defect this whole line of work
-# is about.
+#     prefix   prefix high-water   measurement high-water   pattern probe
+#       0           0.0 GiB              12.0 GiB              22.0 GiB
+#       6           3.0 GiB              12.0 GiB              22.0 GiB
+#      14           7.0 GiB              12.0 GiB              22.0 GiB
+#      20          10.0 GiB              12.0 GiB              22.0 GiB
+#
+# Every prefix is strictly below the live set the measurement itself allocates,
+# so the process high-water is 12 GiB in all four conditions -- constant across
+# the entire treatment. What varies is prior allocation *count and history*.
+# `n_prior_512mib_allocs` is now the name, because it describes what the loop
+# below does rather than what I inferred it was doing.
+#
+# The general form, and the reason this is in the source: I named the axis after
+# the mechanism I believed rather than after the operation the code performs.
+# A field name is not a hypothesis -- once written it is read as fact by every
+# consumer, and the belief stops being checked. Third axis name retracted in
+# this file for the same reason. `high_water_GiB` is now recorded in every run
+# so the next such claim can be falsified from the data instead of from a review.
+#
+# What survives: prefix 20 reproduces the current generator's 2 GiB slot means
+# and prefix 0 reproduces the old one's, so the "13.35% across 3 processes" was
+# still the harness edit moving this axis. Only its name was wrong.
+#
+# The prefixes here are all below the measurement's own live set, which is the
+# design flaw; separating peak bytes from allocation count needs prefixes above
+# 12 GiB and is not done here. `--sweep-steps` walks a fine grid, so the step
+# locations are a measured artifact field rather than a remembered pair of
+# integers -- the first draft of the notes asserted steps "at 13 and again at 17"
+# from an exploratory script in /tmp, a number living only in prose.
 PREFIX_PEAK_LIVE_512MIB = (0, 6, 14, 20)
 SWEEP_STEPS = tuple(range(22))
 SWEEP_REPS = 2
 
 
 def _run_prefix(peak):
-    if not peak:
-        return
-    live = [
-        torch.empty((512 * 1024 * 1024) // 4, device="cuda", dtype=torch.float32).fill_(1.0)
-        for _ in range(peak)
-    ]
-    del live
-    torch.cuda.empty_cache()
+    """Allocate and free `peak` 512 MiB buffers. Returns the high-water it reached.
+
+    The return value exists because this function's effect was mislabelled for
+    two commits (see the module comment). Recording what the prefix actually
+    reached, next to what the measurement then reaches, puts the constancy of
+    the process high-water into every run's data where a reader can check it.
+    """
+    torch.cuda.reset_peak_memory_stats()
+    if peak:
+        live = [
+            torch.empty((512 * 1024 * 1024) // 4, device="cuda", dtype=torch.float32).fill_(1.0)
+            for _ in range(peak)
+        ]
+        del live
+        torch.cuda.empty_cache()
+    return torch.cuda.max_memory_allocated()
 
 
 def _pattern_rates(mib):
@@ -189,8 +215,19 @@ def _sweep_steps(out_path):
     """
     import sys as _sys
 
+    # Ascending pass, then descending. The first version ran 0..21 monotonically
+    # in adjacent batches, which leaves level perfectly confounded with wall-clock
+    # order: any drift in the box over the ~6 minutes of collection reproduces as
+    # a "staircase" with no allocator involved. @Reviewer, 5c2e0083. The descending
+    # pass revisits every level in the opposite time order, so a step that is real
+    # appears at the same level in both directions and a drift artifact does not.
+    #
+    # This is NOT the within-process A-B-A that was tried and shown invalid: each
+    # row is still its own fresh process. The order of *processes* is what varies.
+    order = [(p, "up") for p in SWEEP_STEPS] + [(p, "down") for p in reversed(SWEEP_STEPS)]
+
     rows = []
-    for peak in SWEEP_STEPS:
+    for seq, (peak, direction) in enumerate(order):
         for rep in range(SWEEP_REPS):
             proc = subprocess.run(
                 [_sys.executable, __file__, "-", "--peak-live-512mib-any", str(peak)],
@@ -202,10 +239,14 @@ def _sweep_steps(out_path):
             row = json.loads(proc.stdout)
             rows.append(
                 {
+                    "n_prior_512mib_allocs": peak,
                     "peak_live_512mib": peak,
+                    "direction": direction,
+                    "seq": seq,
                     "rep": rep,
                     "draws_2GiB": row["draws_2GiB"],
                     "rounds_us_2GiB": row["rounds_us_2GiB"],
+                    "high_water_bytes": row.get("high_water_bytes"),
                 }
             )
     out_path.write_text(
@@ -255,7 +296,8 @@ def main():
     args = ap.parse_args()
 
     if args.peak_live_512mib_any is not None:
-        _run_prefix(args.peak_live_512mib_any)
+        pre_hw = _run_prefix(args.peak_live_512mib_any)
+        torch.cuda.reset_peak_memory_stats()
         block = _identical_buffer_spread(2048)
         # Rounds, not just the derived rates: a "step" in the staircase is only a
         # step if it clears the round-to-round noise of a single draw, and the
@@ -265,6 +307,10 @@ def main():
                 {
                     "draws_2GiB": block["TBps_per_identical_buffer"],
                     "rounds_us_2GiB": block["rounds_us_per_identical_buffer"],
+                    "high_water_bytes": {
+                        "after_prefix": pre_hw,
+                        "during_identical_buffers_2048MiB": torch.cuda.max_memory_allocated(),
+                    },
                 }
             )
         )
@@ -273,18 +319,41 @@ def main():
     if args.sweep_steps:
         return _sweep_steps(Path(args.out))
 
-    _run_prefix(args.peak_live_512mib)
+    prefix_hw = _run_prefix(args.peak_live_512mib)
     payload = {
         "device_name": torch.cuda.get_device_name(0),
         "hip_visible_devices": os.environ.get("HIP_VISIBLE_DEVICES"),
+        # The treatment, named for the operation performed rather than for the
+        # mechanism inferred from it. `peak_live_512mib` is retained under its old
+        # key so committed runs and readers of the previous artifact still parse,
+        # but it is an alias, and `treatment_axis` says which reading is correct.
+        "n_prior_512mib_allocs": args.peak_live_512mib,
         "peak_live_512mib": args.peak_live_512mib,
+        "treatment_axis": (
+            "prior allocation count and history, NOT allocator peak high-water. See "
+            "high_water_bytes: the prefix never exceeds the live set the measurement "
+            "itself allocates, so the process high-water is identical at every level. "
+            "The old name asserted a mechanism this design cannot separate from "
+            "allocation count, churn, fill time and placement. @Reviewer, 5c2e0083."
+        ),
         "identical_buffers_by_size": {},
         "roofline_patterns_by_size": {},
     }
+    hw = {"after_prefix": prefix_hw}
     for mib in SIZES_MIB:
+        torch.cuda.reset_peak_memory_stats()
         payload["identical_buffers_by_size"][f"{mib}MiB"] = _identical_buffer_spread(mib)
+        hw[f"during_identical_buffers_{mib}MiB"] = torch.cuda.max_memory_allocated()
         torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
         payload["roofline_patterns_by_size"][f"{mib}MiB"] = _pattern_rates(mib)
+        hw[f"during_patterns_{mib}MiB"] = torch.cuda.max_memory_allocated()
+    payload["high_water_bytes"] = hw
+    payload["high_water_note"] = (
+        "measured, not asserted. If after_prefix is below every during_* value then "
+        "this run's process high-water was set by the measurement and not by the "
+        "treatment, and any claim about a peak-bytes threshold is unsupported."
+    )
     Path(args.out).write_text(json.dumps(payload) + "\n")
 
 

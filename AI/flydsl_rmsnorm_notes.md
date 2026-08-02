@@ -804,11 +804,11 @@ against it came from **512 MiB**. The placement effect is strongly
 size-dependent, so 512 MiB draws are not evidence about a 2 GiB number no matter
 how many of them there are.
 
-Re-measured at 2 GiB, sampling 5 allocation slots across 4 allocator high-water
-marks and 16 processes (`AI/data/copy_placement_draws/copy_axes_dev5.json`):
-**80 draws, min 4.7626, max 5.3208, an 11.72% range**, with **16 below the band
-and 64 at or above it**. The same collection at 512 MiB gives 19.11%. The band
-is 0.205% wide, so the confound is **57×** what it would have to resolve.
+Re-measured at 2 GiB, sampling 5 allocation slots across 4 prior-allocation
+prefixes and 16 processes (`AI/data/copy_placement_draws/copy_axes_dev5.json`):
+**80 draws, min 4.7789, max 5.3488, an 11.93% range**, with **16 below the band
+and 64 at or above it**. The same collection at 512 MiB gives 18.60%. The band
+is 0.205% wide, so the confound is **58×** what it would have to resolve.
 
 The verdict survives at the size that matters; what changes is the number and
 its scope. The earlier text's **19.06%** was the 512 MiB figure quoted against a
@@ -823,14 +823,14 @@ draw above is `bytes / min(seven rounds)`; the other six were computed and
 thrown away. Retaining them (`rounds_us_per_identical_buffer`) gives the
 instrument's own floor for the first time.
 
-**A single draw's round-to-round spread has median 0.995% at 2 GiB — 4.9× the
+**A single draw's round-to-round spread has median 1.029% at 2 GiB — 5.0× the
 band width.** With slot, process, program and buffer all held fixed, timing the
 same copy seven times in a row already scatters further than the interval the
 band question is asking about. So the placement term was never the binding
 constraint on reconstructing `4.89`: even a perfectly placement-controlled
 measurement could not land a value in a 0.205%-wide window with confidence.
 
-Two things follow. The pooled-range argument is unaffected — 11.72% against a
+Two things follow. The pooled-range argument is unaffected — 11.93% against a
 0.205% band still holds, and the floor is well below the pooled range, which is
 what makes the slot decomposition readable as placement rather than noise. But
 the *symmetric* conclusion below gets a second, independent reason, and the
@@ -860,7 +860,7 @@ overclaims. @Autotune caught it against the 512 MiB artifact and it applied to
 the 2 GiB one too, which I had written an hour earlier. Draws sit below and
 above the band, but *zero* land inside, and the draws are not a continuum: they
 cluster on allocation slots whose means are separated by gaps an order of
-magnitude wider than the band. With 20 distinct slot means spanning 11.46% and
+magnitude wider than the band. With 20 distinct slot means spanning 11.34% and
 a band 0.2047% wide, a uniform model expects **0.36** of them in band and gives
 only a **30%** chance that any lands there. Observing zero in-band is the
 expected outcome even if the band is perfectly reachable, so it carries almost
@@ -872,7 +872,7 @@ this sample size the data neither authenticate nor exclude the historical
 value.** What they do establish is that distance from a single current draw is
 weak evidence, because the three distances the argument relies on (5–14%) are
 each smaller than the spread between *identical buffers in a single process* —
-5.60–6.80% at 2 GiB within one fixed program, 11.72% once the allocator's peak is
+5.89–7.55% at 2 GiB within one fixed program, 11.93% once the allocator's peak is
 allowed to vary as it does across harnesses. This is the same rule
 that retired the equal-occupancy ratio's third digit: **a comparison must
 discriminate a gap larger than the confounds it cannot see.**
@@ -920,15 +920,73 @@ processes give `copy` **0.63%**, `two_read_one_write` **0.08%**, `write`
 which allocates and frees buffers *before* the copy probe runs, so the figure
 spanned **generator versions wearing a process label**.
 
-The mechanism is the allocator's **peak simultaneously-live bytes**, and it is a
-staircase rather than a drift. Sweeping 0–21 live 512 MiB buffers, two fresh
+The mechanism is **prior allocation count and history**, and it is a staircase
+rather than a drift. Sweeping 0–21 live-then-freed 512 MiB buffers, two fresh
 processes per level: levels 0–12 are flat to within their across-process repeat
-spread (0.3–0.9%), then a **10.6% step at 13**, flat again through 16, a
-**10.5% step at 17**, flat through 20. A further 10.4% shift appears at 21,
-which is the last level sampled, so it is recorded as a step but cannot be
-distinguished from an edge effect. This is why "allocation history does nothing"
-and "editing the harness moved it 13%" were both true and never in conflict —
-the history rows never crossed a step.
+spread (0.2–0.6% shifts against 0.7–1.0% repeat), then a **10.4% step at 13**,
+flat again through 16, a **10.3% step at 17**, flat through 20, and a **10.4%
+step at 21**. This is why "allocation history does nothing" and "editing the
+harness moved it 13%" were both true and never in conflict — the history rows
+never crossed a step.
+
+##### The axis was named for a mechanism the experiment never varied
+
+Three commits called this axis **"the allocator's peak simultaneously-live
+bytes"**. That is retracted. @Reviewer read the code and pointed out that every
+prefix is freed before the measurement, and that the measurement's own live set
+is larger than any prefix. Instrumenting `torch.cuda.max_memory_allocated`
+confirms it exactly:
+
+| prefix | prefix high-water | 2 GiB measurement | pattern probe |
+|---|---|---|---|
+| 0 | 0.0 GiB | 12.0 GiB | 22.0 GiB |
+| 6 | 3.0 GiB | 12.0 GiB | 22.0 GiB |
+| 14 | 7.0 GiB | 12.0 GiB | 22.0 GiB |
+| 20 | 10.0 GiB | 12.0 GiB | 22.0 GiB |
+
+The process high-water is **12 GiB in every condition**. The quantity the axis
+was named after is constant across the entire treatment, so it cannot be what
+the staircase responds to. What varies is prior allocation count and history —
+with count, bytes, churn, fill time and placement all confounded together.
+
+This is the third axis name I have had to retract, and the shape is identical
+each time: **I named the field after the mechanism I believed rather than after
+the operation the code performs.** A field name is not a hypothesis. Once it is
+written, every consumer reads it as fact and the belief stops being checked —
+which is how it survived a guard designed to catch exactly this class of error,
+because the guard checks decimals and this was a noun. `high_water_bytes` is now
+recorded in every run, so the next such claim is falsifiable from the artifact
+rather than from a code review.
+
+One thing the instrumentation turned up that I would have claimed as a control
+if I had noticed it first: at **512 MiB** the upper prefixes (7 and 10 GiB) *do*
+exceed that block's 3 GiB live set, so peak bytes really does vary there — three
+distinct high-waters across levels. That is a partial factorial separation this
+design produced **by accident**. It is reported in `high_water_check` and not
+leaned on. The 2 GiB block, which every conclusion here rests on, has no such
+separation.
+
+##### The staircase survives time reversal
+
+The first sweep ran levels 0→21 in wall-clock order, which leaves level
+perfectly confounded with collection time: any slow drift in the box over the
+~6 minutes reproduces as a staircase with no allocator involved. @Reviewer's
+point, and it was right. The sweep now runs an ascending pass and then a
+descending pass, 88 rows, still one fresh process per row — only the order of
+*processes* differs.
+
+**Steps at 13, 17 and 21 appear in both directions; none appears in only one.**
+The staircase is a level effect, not drift. That also restores the reversibility
+claim the invalid within-process design was originally reaching for, by a route
+that does not require measuring inside a single process.
+
+Note that this is a *different* control from the one shown invalid earlier. The
+broken version walked the grid up and down within one process, which re-rolled
+placement on every call and destroyed the effect. Reversing the order of fresh
+processes has no such problem, and it took @Reviewer's framing — level confounded
+with time — to see that the valid version of the control was still available
+after the invalid one was abandoned. I had recorded "reversibility is now only
+supported by repeats at the same level" as a permanent limitation. It wasn't.
 
 Two corrections to how that was established, both mine. The step locations were
 first written into this file from an exploratory script in `/tmp` — a number
@@ -942,9 +1000,9 @@ re-rolls placement by itself. Repeating the identical call eight times in one
 process, changing nothing else, gives a different slot pattern every time. The
 sweep was measuring its own alloc/free cycles. The broken design looked *more*
 careful than the fix, which is the part worth remembering: controlling for
-process-level variation controlled away the effect. Reversibility is now only
-supported by repeats at the same level in separate processes, which is weaker,
-and the artifact says so rather than implying a within-process A-B-A.
+process-level variation controlled away the effect. Reversibility is now
+supported by the ascending/descending pass over fresh processes described above,
+not by any within-process A-B-A.
 
 That number entered the tree **as part of the fix for hand-typed constants**.
 The sentence written to eliminate untested numbers contributed a mislabelled
@@ -954,14 +1012,14 @@ cannot catch a real measurement of the wrong thing.
 
 The denominator choice is unchanged but now rests on the right evidence: not a
 21× stability gap, which does not exist, but the fact that copy is sensitive to
-allocation slot (7.05% at 2 GiB) and to the harness's high-water mark (9.58%),
-while `write` and `two_read_one_write` are not. Their ranges at 512 MiB and
-2 GiB overlap; copy's do not behave that way.
+allocation slot (5.89–7.55% at 2 GiB within a fixed prefix) and to the harness's
+prior allocation history (8.92% across prefixes), while `write` and
+`two_read_one_write` are not.
 
 A third correction from the same measurement, worth recording because it nearly
 went out: `two_read_one_write`'s **0.31%** apparent stability was measured at a
 single allocation slot with the peak held fixed. Sampled across slots it spreads
-**2.47%** at 512 MiB. I had been about to use that 0.31% as an error bar to
+**2.46%** at 512 MiB. I had been about to use that 0.31% as an error bar to
 argue, from a 4.04% gap, that the historical table must be 2 GiB. **No probe
 here can tell 512 MiB from 2 GiB** — all three patterns' ranges overlap once
 slot and peak are sampled. The table's size is known because notes:869 says so.

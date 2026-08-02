@@ -1,15 +1,143 @@
 {
-  "what": "Copy-rate draws at both 512 MiB and the 2 GiB size the historical roofline table was measured at, decomposed across three axes: allocation slot, process, and allocator peak high-water mark.",
+  "what": "Copy-rate draws at both 512 MiB and the 2 GiB size the historical roofline table was measured at, decomposed across three axes: allocation slot, process, and prior allocation count/history.",
+  "retracted_axis_name": "the third axis was published in 9879dda and be86f90 as 'allocator peak high-water mark'. That name is withdrawn: see high_water_check, which measures that the process high-water is identical at every level because the prefix never exceeds the live set the measurement itself allocates. Raised by @Reviewer in 5c2e0083 and confirmed by instrumenting torch.cuda.max_memory_allocated. The staircase is real and reproducible; the mechanism named for it was not measured. Field keys carrying 'peak' are retained as aliases so prior runs and readers still parse.",
   "supersedes": "AI/data/copy_placement_draws/copy_512MiB_draws_dev5.json, whose argument was correct but measured entirely at 512 MiB while the cell it retires was measured at 2 GiB (notes:869). Scope gap raised by @Reviewer in f9014a94.",
   "device_name": "AMD Instinct MI355X",
   "hip_visible_devices": "5",
   "n_processes": 16,
+  "n_prior_512mib_alloc_levels": [
+    0,
+    6,
+    14,
+    20
+  ],
   "peak_levels_512mib": [
     0,
     6,
     14,
     20
   ],
+  "high_water_check": {
+    "recorded": true,
+    "by_level": {
+      "0": {
+        "prefix_high_water_GiB": 0.0,
+        "during_identical_buffers_2048MiB": {
+          "measurement_live_set_GiB": 12.0,
+          "high_water_set_by": "measurement"
+        },
+        "during_identical_buffers_512MiB": {
+          "measurement_live_set_GiB": 3.0,
+          "high_water_set_by": "measurement"
+        },
+        "during_patterns_2048MiB": {
+          "measurement_live_set_GiB": 22.0,
+          "high_water_set_by": "measurement"
+        },
+        "during_patterns_512MiB": {
+          "measurement_live_set_GiB": 5.5,
+          "high_water_set_by": "measurement"
+        }
+      },
+      "6": {
+        "prefix_high_water_GiB": 3.0,
+        "during_identical_buffers_2048MiB": {
+          "measurement_live_set_GiB": 12.0,
+          "high_water_set_by": "measurement"
+        },
+        "during_identical_buffers_512MiB": {
+          "measurement_live_set_GiB": 3.0,
+          "high_water_set_by": "measurement"
+        },
+        "during_patterns_2048MiB": {
+          "measurement_live_set_GiB": 22.0,
+          "high_water_set_by": "measurement"
+        },
+        "during_patterns_512MiB": {
+          "measurement_live_set_GiB": 5.5,
+          "high_water_set_by": "measurement"
+        }
+      },
+      "14": {
+        "prefix_high_water_GiB": 7.0,
+        "during_identical_buffers_2048MiB": {
+          "measurement_live_set_GiB": 12.0,
+          "high_water_set_by": "measurement"
+        },
+        "during_identical_buffers_512MiB": {
+          "measurement_live_set_GiB": 3.0,
+          "high_water_set_by": "prefix"
+        },
+        "during_patterns_2048MiB": {
+          "measurement_live_set_GiB": 22.0,
+          "high_water_set_by": "measurement"
+        },
+        "during_patterns_512MiB": {
+          "measurement_live_set_GiB": 5.5,
+          "high_water_set_by": "prefix"
+        }
+      },
+      "20": {
+        "prefix_high_water_GiB": 10.0,
+        "during_identical_buffers_2048MiB": {
+          "measurement_live_set_GiB": 12.0,
+          "high_water_set_by": "measurement"
+        },
+        "during_identical_buffers_512MiB": {
+          "measurement_live_set_GiB": 3.0,
+          "high_water_set_by": "prefix"
+        },
+        "during_patterns_2048MiB": {
+          "measurement_live_set_GiB": 22.0,
+          "high_water_set_by": "measurement"
+        },
+        "during_patterns_512MiB": {
+          "measurement_live_set_GiB": 5.5,
+          "high_water_set_by": "prefix"
+        }
+      }
+    },
+    "per_measurement_block": {
+      "during_identical_buffers_2048MiB": {
+        "high_water_varies_across_levels": false,
+        "distinct_high_waters_GiB": [
+          12.0
+        ],
+        "peak_bytes_separable_from_alloc_count": false
+      },
+      "during_identical_buffers_512MiB": {
+        "high_water_varies_across_levels": true,
+        "distinct_high_waters_GiB": [
+          3.0,
+          7.0,
+          10.0
+        ],
+        "peak_bytes_separable_from_alloc_count": true
+      },
+      "during_patterns_2048MiB": {
+        "high_water_varies_across_levels": false,
+        "distinct_high_waters_GiB": [
+          22.0
+        ],
+        "peak_bytes_separable_from_alloc_count": false
+      },
+      "during_patterns_512MiB": {
+        "high_water_varies_across_levels": true,
+        "distinct_high_waters_GiB": [
+          5.5,
+          7.0,
+          10.0
+        ],
+        "peak_bytes_separable_from_alloc_count": true
+      }
+    },
+    "blocks_where_peak_bytes_varies": [
+      "during_identical_buffers_512MiB",
+      "during_patterns_512MiB"
+    ],
+    "load_bearing_block": "during_identical_buffers_2048MiB",
+    "verdict": "For the 2 GiB identical-buffer draws -- the block every conclusion in this artifact rests on -- the prefix never sets the process high-water: it tops out below the during_identical_buffers_2048MiB live set at every level, so peak bytes is constant and cannot be the axis. The treatment there is prior allocation count and history, with count, bytes, churn, fill time and placement mutually confounded. At 512 MiB the upper prefixes do exceed that block's smaller live set, so peak bytes varies there; that is a partial separation this design produced by accident, not by intent, and it is reported rather than claimed as a control. A real factorial needs prefixes above the 2 GiB block's own live set."
+  },
   "generator": "AI/probe_copy_size_draws.py",
   "assembler": "AI/assemble_copy_axes.py",
   "input_manifest": {
@@ -17,103 +145,103 @@
     "entries": [
       {
         "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/_peak_sweep.json",
-        "sha256": "14a3a2d2d8ef2191f9ef4d76f352217f0a020fc65b425068091c1bc11d6845fc",
-        "bytes": 37274
+        "sha256": "279eeed537f3b77177b1765e14a25331dc14fddf6c209c4d7c80d48a6473127a",
+        "bytes": 87935
       },
       {
         "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak0_1.json",
-        "sha256": "4c995ef6d429403e261aad3593cd6b5c3a8571e0db28f2274c8f997eee3a018c",
-        "bytes": 10544
+        "sha256": "8630f4c8a7c067fc2df0708e3690dc0c886a204318cab99c49e4817d7d97c83d",
+        "bytes": 11412
       },
       {
         "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak0_2.json",
-        "sha256": "d8a3d41f2609c6fa348a86c6d0b81a5363c92dbe3b109de167eda6293462bab9",
-        "bytes": 10548
+        "sha256": "eab6edac2918749d1daec98439316eefa4ec41a130610a7c6e496d8af2c79cbe",
+        "bytes": 11409
       },
       {
         "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak0_3.json",
-        "sha256": "dd009b1591fd0675cec39c49a1570e670c893a2d1244cb4f6fa06cef036b1dec",
-        "bytes": 10539
+        "sha256": "69b2ded0d1e3851ce42b79f8fc4ca85481116772a2bf173486c339db4915d9f6",
+        "bytes": 11381
       },
       {
         "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak0_4.json",
-        "sha256": "f18effb645c37cc223c5f5e5c897cc7935b31a942e8bec2708d77d8ee08cb53a",
-        "bytes": 10559
+        "sha256": "0a1841315419946514345406736327b6390af1aa47de0afc6cb40301bdbc14a1",
+        "bytes": 11402
       },
       {
         "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak14_1.json",
-        "sha256": "a7791c66e0d377ab5c372be749f6c2f39a12530e96c6f2201ba570b03ec412fa",
-        "bytes": 10550
+        "sha256": "c78bd29ea7ccde15d024e63401bd78cd91b657a696ab99af34443a0a5362f743",
+        "bytes": 11426
       },
       {
         "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak14_2.json",
-        "sha256": "2a52bcea3da634e903bb972599322deedf3137c49d07826b722d00560e81acdc",
-        "bytes": 10554
+        "sha256": "4121703e1900ac49c288b3b4a7c02f2239ee493a227c24ee83cb7dd4094d3ae3",
+        "bytes": 11418
       },
       {
         "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak14_3.json",
-        "sha256": "c0d415dbd971077a7104a47b90ab5cb685de6c7bbb3b2a8d60d856f296e76670",
-        "bytes": 10548
+        "sha256": "c324d8582282733136bc4ce8da3a0135900a105779923ef3666ec64534674c55",
+        "bytes": 11425
       },
       {
         "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak14_4.json",
-        "sha256": "51ff4f1ed51a28a93dbb1331b26d4673b93f21ad94b6902cdf8d68e12b5f6626",
-        "bytes": 10561
+        "sha256": "a46548f25ef7cf50cb3792223a1601e1f5172ca12307bd0d445d5476ff0d3756",
+        "bytes": 11406
       },
       {
         "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak20_1.json",
-        "sha256": "150bed19f2ecbce64906f245054b3f9c8c01fcf796598d8df1a5818d364d8231",
-        "bytes": 10547
+        "sha256": "8eb5757ad1d1553c877b44413201e8d2a8bfd4a19cdc7b32884b2c89fcfecf98",
+        "bytes": 11435
       },
       {
         "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak20_2.json",
-        "sha256": "7608aca8e2903851261e168f65c535af1bf8fb58c70957c7472072d7ebc8b652",
-        "bytes": 10568
+        "sha256": "30e52ec1fce7afdc3a3fdc64f23569d6443cf0b6f3a0382d1d8f1512f36556ee",
+        "bytes": 11430
       },
       {
         "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak20_3.json",
-        "sha256": "94992d4a8c0708554de5e51ed64f0e07cdd3f369ff0c12c3b65824624feedd94",
-        "bytes": 10565
+        "sha256": "96d88c2c269f173818247463a74b7db52b4129b4e097bfc50668fddb3cfa1a55",
+        "bytes": 11426
       },
       {
         "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak20_4.json",
-        "sha256": "975dde10e7e06792b86fa837361f857a5060ceb8bf42fbfcd0752bb3d4d5aca2",
-        "bytes": 10578
+        "sha256": "57dc7b5766aaafd83aeafb24d0b9848df7d528a5d6967f5a4ad01ec28e1ddfbf",
+        "bytes": 11398
       },
       {
         "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak6_1.json",
-        "sha256": "4f779af4deea3413d0dedc6a97358021e700c41761cbc702680e3fd882ca8b19",
-        "bytes": 10564
+        "sha256": "65f17ad2fdc11c35e25ac6a7a92f285dadf37fcb4e01a2e5a79ffd5ba9553939",
+        "bytes": 11413
       },
       {
         "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak6_2.json",
-        "sha256": "86c5e9729350c6eab19fa749fe79bb194741b564d6a00a1ac0ee4f7a411e1571",
-        "bytes": 10552
+        "sha256": "922fc3e8f8b32165ba756b3da60e20907f46a718baff6c4341be3dd14a0dfe48",
+        "bytes": 11401
       },
       {
         "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak6_3.json",
-        "sha256": "db6f51465258e5a2bcb3e07172f5e5b7f09a6ce1f424171782b2b88cfb4adad5",
-        "bytes": 10564
+        "sha256": "04c5a5ab9ef245d56801de1b258a84a311eb156402b34f634d81b2df28bb69b1",
+        "bytes": 11426
       },
       {
         "path": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_dev5/peak6_4.json",
-        "sha256": "580ec9a9ef7225811962d749ca41d64a382e7e57e8eb0a34efc020d36b3fd675",
-        "bytes": 10548
+        "sha256": "b65fecbba5ec753011d1521297999e73a9e7abd91328b6f42e7295ecef32ce69",
+        "bytes": 11403
       },
       {
         "path": "AI/probe_copy_size_draws.py",
-        "sha256": "42a99e27cc39430795a3943e56c3b1de121ff336ccb1aea719979efddb41166c",
-        "bytes": 12871
+        "sha256": "dafeba4a46b12444a484ce0e98316a0682c300098e4f98a2def9beaf77823a4a",
+        "bytes": 17274
       },
       {
         "path": "AI/assemble_copy_axes.py",
-        "sha256": "cd527b61d8bafd0049608e84073e4c124f56ea1bf1cdbaa1a9ecba2bc798d043",
-        "bytes": 32317
+        "sha256": "ee075d2d9a5c87e3959ec236a7ceff64029107a5908861d661ce3449e95f8a86",
+        "bytes": 40363
       }
     ],
     "what_this_proves": "the assembler read exactly these bytes. It does not prove they came from a GPU, and a manifest cannot: it is a binding between artifact and raw runs, not an attestation."
   },
-  "commit": "9d217c8",
+  "commit": "be86f90",
   "worktree_dirty": true,
   "historical_table": {
     "source": "AI/flydsl_rmsnorm_notes.md:869",
@@ -128,481 +256,481 @@
   "axes": {
     "512MiB": {
       "n_draws": 80,
-      "min_TBps": 4.707747520718331,
-      "max_TBps": 5.607497955235956,
-      "pooled_range_pct_of_min": 19.11,
+      "min_TBps": 4.7273162774399715,
+      "max_TBps": 5.606794260177107,
+      "pooled_range_pct_of_min": 18.6,
       "within_draw_instrument_floor": {
         "n_draws_with_rounds": 80,
-        "round_spread_pct_median": 0.597,
-        "round_spread_pct_max": 5.428,
+        "round_spread_pct_median": 0.612,
+        "round_spread_pct_max": 5.986,
         "note": "spread over the seven timing rounds behind one draw, in us. Compare against pooled_range_pct_of_min: the placement claim requires the pooled range to be large against this, not merely nonzero."
       },
-      "variance_explained_by_slot_and_peak_pct": 99.78,
-      "worst_across_process_range_pct": 2.26,
-      "worst_cross_program_range_pct": 18.1,
+      "variance_explained_by_slot_and_peak_pct": 99.59,
+      "worst_across_process_range_pct": 3.76,
+      "worst_cross_program_range_pct": 18.07,
       "by_peak": {
         "peak_live_512mib_0": {
           "n_processes": 4,
           "slot_means": [
-            4.7853545566488735,
-            5.015542068914492,
-            4.988287633897087,
-            5.599691782966934,
-            5.59146975218422
+            4.769599371031723,
+            5.016832212403908,
+            4.994735388658081,
+            5.600761042253005,
+            5.59341760543319
           ],
           "slot_draws": [
             [
-              4.793916119458593,
-              4.7792694166914735,
-              4.782623222722115,
-              4.7856094677233125
+              4.777265876370272,
+              4.761521736810021,
+              4.763990587119784,
+              4.775619283826814
             ],
             [
-              5.030817645077703,
-              5.00285448816215,
-              5.02095210550281,
-              5.007544036915303
+              5.018854055610744,
+              5.0152904536400476,
+              5.001684139656167,
+              5.031500200708674
             ],
             [
-              4.975945866630603,
-              4.999630131438124,
-              4.991297288955414,
-              4.98627724856421
+              4.978770716435499,
+              5.008233212442803,
+              4.994740890276034,
+              4.997196735477988
             ],
             [
-              5.607497955235956,
-              5.592143456707966,
-              5.603300741267251,
-              5.5958249786565615
+              5.59727824228359,
+              5.598025197343576,
+              5.600946469207746,
+              5.606794260177107
             ],
             [
-              5.595597487714306,
-              5.588673159051616,
-              5.590770033880417,
-              5.590838328090541
+              5.592869594093563,
+              5.590445797957747,
+              5.597230381617021,
+              5.593124648064434
             ]
           ],
-          "pooled_range_pct_of_min": 17.33,
-          "worst_across_process_range_pct": 0.56
+          "pooled_range_pct_of_min": 17.75,
+          "worst_across_process_range_pct": 0.6
         },
         "peak_live_512mib_6": {
           "n_processes": 4,
           "slot_means": [
-            5.342478809314409,
-            5.016526566911052,
-            5.014892768170755,
-            5.334018830735887,
-            5.36435152527024
+            5.337499444043216,
+            5.005610825925329,
+            5.025133546234452,
+            5.350903787889996,
+            5.382215594407571
           ],
           "slot_draws": [
             [
-              5.3546965093531185,
-              5.34561275066968,
-              5.3438275954664,
-              5.325778381768439
+              5.347834950014311,
+              5.335333772531109,
+              5.3338253277591825,
+              5.333003725868258
             ],
             [
-              5.023731911808908,
-              5.00455342321272,
-              5.023546764600139,
-              5.014274168022441
+              5.01094810066681,
+              5.009842621081104,
+              5.002130789904109,
+              4.99952179204929
             ],
             [
-              5.017926674187202,
-              5.009929115404694,
-              5.0185668125685,
-              5.013148470522623
+              5.025842567879565,
+              5.025767637493632,
+              5.028063675247455,
+              5.020860304317155
             ],
             [
-              5.323389719831589,
-              5.333118411545419,
-              5.3350450597527175,
-              5.3445221318138225
+              5.349981206128981,
+              5.3504286656147855,
+              5.349510945866328,
+              5.353694333949891
             ],
             [
-              5.362117542934683,
-              5.361731959299713,
-              5.366938184357961,
-              5.366618414488603
+              5.382053180763692,
+              5.380196302122413,
+              5.38758201644509,
+              5.379030878299089
             ]
           ],
-          "pooled_range_pct_of_min": 7.24,
-          "worst_across_process_range_pct": 0.54
+          "pooled_range_pct_of_min": 7.76,
+          "worst_across_process_range_pct": 0.28
         },
         "peak_live_512mib_14": {
           "n_processes": 4,
           "slot_means": [
-            5.3452718446652145,
-            5.324230159180114,
-            5.27557513862585,
-            4.752233827767926,
-            4.734335820068562
+            5.360792603886639,
+            5.334326486204738,
+            5.208419471810919,
+            4.7981429602621235,
+            4.738566450248099
           ],
           "slot_draws": [
             [
-              5.340487820767844,
-              5.3448255725008105,
-              5.349485020407886,
-              5.346288964984317
+              5.362701897205985,
+              5.360449973331647,
+              5.359719143089537,
+              5.360299401919387
             ],
             [
-              5.336830928208712,
-              5.314896462384153,
-              5.3217597307887194,
-              5.323433515338875
+              5.332463708518406,
+              5.333272007138997,
+              5.335988168989675,
+              5.335582060171874
             ],
             [
-              5.3097220544557295,
-              5.192588875151245,
-              5.304556712319548,
-              5.295432912576878
+              5.322462632341251,
+              5.234125229455553,
+              5.129346684742572,
+              5.147743340704301
             ],
             [
-              4.746675353275628,
-              4.7589431993839035,
-              4.763113886458524,
-              4.740202871953651
+              4.7800473565755315,
+              4.813526831695352,
+              4.783812395180684,
+              4.815185257596926
             ],
             [
-              4.760292900066836,
-              4.711896356361785,
-              4.757406503127297,
-              4.707747520718331
+              4.747701363624888,
+              4.7273162774399715,
+              4.74975070806527,
+              4.729497451862264
             ]
           ],
-          "pooled_range_pct_of_min": 13.63,
-          "worst_across_process_range_pct": 2.26
+          "pooled_range_pct_of_min": 13.44,
+          "worst_across_process_range_pct": 3.76
         },
         "peak_live_512mib_20": {
           "n_processes": 4,
           "slot_means": [
-            5.324940275848093,
-            5.5379485789689635,
-            5.538237134666047,
-            5.584337336879575,
-            5.586243376353809
+            5.33605140905759,
+            5.554347440655286,
+            5.550480886848077,
+            5.593907156559898,
+            5.594609803955468
           ],
           "slot_draws": [
             [
-              5.323854391660684,
-              5.323308171496796,
-              5.330387504586975,
-              5.322211035647917
+              5.331049270483911,
+              5.3414217056468125,
+              5.336325038398528,
+              5.335409621701107
             ],
             [
-              5.536930908512249,
-              5.53483449247114,
-              5.537259859474003,
-              5.54276905541846
+              5.559324185025543,
+              5.558955828849438,
+              5.549347533118523,
+              5.549762215627647
             ],
             [
-              5.536409786423222,
-              5.539333585705163,
-              5.540040075088604,
-              5.537165091447201
+              5.546319713572755,
+              5.558562823034403,
+              5.549668113369116,
+              5.547372897416035
             ],
             [
-              5.580420295753994,
-              5.583229635256856,
-              5.591929596029238,
-              5.581769820478211
+              5.5930035084196295,
+              5.59342362982782,
+              5.595125322283142,
+              5.594076165709001
             ],
             [
-              5.58608725709461,
-              5.58522489792478,
-              5.586924376998205,
-              5.586736973397643
+              5.592326778881219,
+              5.601242943933857,
+              5.5963139521085115,
+              5.588555540898283
             ]
           ],
           "pooled_range_pct_of_min": 5.07,
-          "worst_across_process_range_pct": 0.21
+          "worst_across_process_range_pct": 0.23
         }
       },
       "by_slot_across_programs": {
         "slot0": {
           "mean_by_peak_live_512mib": {
-            "0": 4.7853545566488735,
-            "6": 5.342478809314409,
-            "14": 5.3452718446652145,
-            "20": 5.324940275848093
+            "0": 4.769599371031723,
+            "6": 5.337499444043216,
+            "14": 5.360792603886639,
+            "20": 5.33605140905759
           },
-          "range_pct_of_min": 11.7
+          "range_pct_of_min": 12.4
         },
         "slot1": {
           "mean_by_peak_live_512mib": {
-            "0": 5.015542068914492,
-            "6": 5.016526566911052,
-            "14": 5.324230159180114,
-            "20": 5.5379485789689635
+            "0": 5.016832212403908,
+            "6": 5.005610825925329,
+            "14": 5.334326486204738,
+            "20": 5.554347440655286
           },
-          "range_pct_of_min": 10.42
+          "range_pct_of_min": 10.96
         },
         "slot2": {
           "mean_by_peak_live_512mib": {
-            "0": 4.988287633897087,
-            "6": 5.014892768170755,
-            "14": 5.27557513862585,
-            "20": 5.538237134666047
+            "0": 4.994735388658081,
+            "6": 5.025133546234452,
+            "14": 5.208419471810919,
+            "20": 5.550480886848077
           },
-          "range_pct_of_min": 11.02
+          "range_pct_of_min": 11.13
         },
         "slot3": {
           "mean_by_peak_live_512mib": {
-            "0": 5.599691782966934,
-            "6": 5.334018830735887,
-            "14": 4.752233827767926,
-            "20": 5.584337336879575
+            "0": 5.600761042253005,
+            "6": 5.350903787889996,
+            "14": 4.7981429602621235,
+            "20": 5.593907156559898
           },
-          "range_pct_of_min": 17.83
+          "range_pct_of_min": 16.73
         },
         "slot4": {
           "mean_by_peak_live_512mib": {
-            "0": 5.59146975218422,
-            "6": 5.36435152527024,
-            "14": 4.734335820068562,
-            "20": 5.586243376353809
+            "0": 5.59341760543319,
+            "6": 5.382215594407571,
+            "14": 4.738566450248099,
+            "20": 5.594609803955468
           },
-          "range_pct_of_min": 18.1
+          "range_pct_of_min": 18.07
         }
       }
     },
     "2048MiB": {
       "n_draws": 80,
-      "min_TBps": 4.762561428514002,
-      "max_TBps": 5.320751237976793,
-      "pooled_range_pct_of_min": 11.72,
+      "min_TBps": 4.778892103577833,
+      "max_TBps": 5.34882426021761,
+      "pooled_range_pct_of_min": 11.93,
       "within_draw_instrument_floor": {
         "n_draws_with_rounds": 80,
-        "round_spread_pct_median": 0.995,
-        "round_spread_pct_max": 1.79,
+        "round_spread_pct_median": 1.029,
+        "round_spread_pct_max": 2.168,
         "note": "spread over the seven timing rounds behind one draw, in us. Compare against pooled_range_pct_of_min: the placement claim requires the pooled range to be large against this, not merely nonzero."
       },
-      "variance_explained_by_slot_and_peak_pct": 99.6,
-      "worst_across_process_range_pct": 0.97,
-      "worst_cross_program_range_pct": 9.65,
+      "variance_explained_by_slot_and_peak_pct": 99.54,
+      "worst_across_process_range_pct": 0.96,
+      "worst_cross_program_range_pct": 8.92,
       "by_peak": {
         "peak_live_512mib_0": {
           "n_processes": 4,
           "slot_means": [
-            5.084674561950349,
-            5.129563395254399,
-            5.314607060205813,
-            5.228029430899118,
-            4.990383482346868
+            5.080983728255817,
+            5.12719019381146,
+            5.318668594116579,
+            5.218618914872009,
+            5.001541707268483
           ],
           "slot_draws": [
             [
-              5.083913279886198,
-              5.083985362792775,
-              5.082045346899948,
-              5.088754258222477
+              5.078994895935063,
+              5.084507910195381,
+              5.0793940476959785,
+              5.081038059196847
             ],
             [
-              5.141860874461787,
-              5.115023326955299,
-              5.12753489125255,
-              5.13383448834796
+              5.1181372308335265,
+              5.136259407090785,
+              5.135070784270838,
+              5.119293353050688
             ],
             [
-              5.307634994409159,
-              5.318186711412483,
-              5.3128975912721055,
-              5.319708943729505
+              5.310808535608335,
+              5.313257628140759,
+              5.320787949464013,
+              5.329820263253209
             ],
             [
-              5.24796414418802,
-              5.239247381947187,
-              5.209839173989505,
-              5.21506702347176
+              5.204953831480714,
+              5.229665947187495,
+              5.212599476872493,
+              5.2272564039473295
             ],
             [
-              4.985381733277424,
-              4.993941565700937,
-              4.993036209926542,
-              4.989174420482568
+              5.022034717043063,
+              4.989577268312908,
+              4.998207884812869,
+              4.996346958905094
             ]
           ],
-          "pooled_range_pct_of_min": 6.71,
-          "worst_across_process_range_pct": 0.73
+          "pooled_range_pct_of_min": 6.82,
+          "worst_across_process_range_pct": 0.65
         },
         "peak_live_512mib_6": {
           "n_processes": 4,
           "slot_means": [
-            5.077230264465551,
-            5.123565729487742,
-            5.31162305985638,
-            5.217964456347765,
-            4.989703169457612
+            5.098464364459629,
+            5.142278533612592,
+            5.3345780354681755,
+            5.213027848778012,
+            4.989124839813013
           ],
           "slot_draws": [
             [
-              5.079577834408835,
-              5.068250587053835,
-              5.097585362682993,
-              5.063507273716541
+              5.10229935142752,
+              5.088602464379889,
+              5.089412136201812,
+              5.113543505829295
             ],
             [
-              5.124880716867154,
-              5.12797814377389,
-              5.124018212009327,
-              5.1173858453006
+              5.147329139163986,
+              5.133851342925266,
+              5.1520894121768155,
+              5.1358442401843005
             ],
             [
-              5.3174904637614535,
-              5.298309118987092,
-              5.320751237976793,
-              5.309941418700182
+              5.327756705443616,
+              5.34882426021761,
+              5.342069485543454,
+              5.319661690668021
             ],
             [
-              5.213188385366401,
-              5.230751015128267,
-              5.20992885474669,
-              5.217989570149705
+              5.196242066915752,
+              5.226608993271299,
+              5.209324774672621,
+              5.219935560252378
             ],
             [
-              4.992988825099494,
-              4.988297754847692,
-              4.995580367853928,
-              4.981945730029334
+              5.000185666571231,
+              4.974264537951464,
+              5.008716684035428,
+              4.973332470693928
             ]
           ],
-          "pooled_range_pct_of_min": 6.8,
-          "worst_across_process_range_pct": 0.67
+          "pooled_range_pct_of_min": 7.55,
+          "worst_across_process_range_pct": 0.71
         },
         "peak_live_512mib_14": {
           "n_processes": 4,
           "slot_means": [
-            5.012995506646915,
-            4.935058144550522,
-            4.979242076598769,
-            4.768063456263778,
-            4.802517110742368
+            5.038277517809386,
+            4.929714950537273,
+            4.994562149225198,
+            4.796275938190522,
+            4.824231304110901
           ],
           "slot_draws": [
             [
-              5.0095920719077585,
-              5.031417906516275,
-              4.983281537604831,
-              5.027690510558794
+              5.032704342128731,
+              5.018670162586491,
+              5.067050357378628,
+              5.034685209143694
             ],
             [
-              4.94971115402982,
-              4.923988493297987,
-              4.938455093050889,
-              4.928077837823393
+              4.93108786334147,
+              4.916392959530053,
+              4.9545274185859345,
+              4.916851560691631
             ],
             [
-              4.983906689265738,
-              4.976505388994103,
-              4.970146921257151,
-              4.986409306878084
+              4.9912211724375695,
+              4.984047888486508,
+              5.014408160132143,
+              4.9885713758445736
             ],
             [
-              4.763575776792606,
-              4.762561428514002,
-              4.763164665829741,
-              4.782951953918762
+              4.802874416885712,
+              4.785023308631283,
+              4.793525061476779,
+              4.803680965768315
             ],
             [
-              4.790503250269389,
-              4.8015180749413195,
-              4.8273441083399655,
-              4.790703009418798
+              4.835517269582253,
+              4.818041595987747,
+              4.819684978799737,
+              4.823681372073869
             ]
           ],
-          "pooled_range_pct_of_min": 5.65,
-          "worst_across_process_range_pct": 0.97
+          "pooled_range_pct_of_min": 5.89,
+          "worst_across_process_range_pct": 0.96
         },
         "peak_live_512mib_20": {
           "n_processes": 4,
           "slot_means": [
-            5.025791991577235,
-            4.923576383125854,
-            4.984200963050762,
-            4.787103886029185,
-            4.8135909580847756
+            5.051690644831327,
+            4.926488420057837,
+            4.9913158706573055,
+            4.791045347274599,
+            4.825146362259459
           ],
           "slot_draws": [
             [
-              5.004472008124785,
-              5.050976359968988,
-              5.0276132800208195,
-              5.020106318194348
+              5.053865288613141,
+              5.068790898751418,
+              5.042155029699519,
+              5.041951362261231
             ],
             [
-              4.919006155519703,
-              4.943155276302268,
-              4.921318375111687,
-              4.910825725569759
+              4.924613503067502,
+              4.92807999485011,
+              4.9192520239000075,
+              4.934008158413728
             ],
             [
-              4.989319455895255,
-              4.9811994186017525,
-              4.98026122616892,
-              4.986023751537121
+              4.98508285821458,
+              4.9969798287038545,
+              5.000986991403597,
+              4.982213804307192
             ],
             [
-              4.78290928538947,
-              4.786546562880169,
-              4.789471290831423,
-              4.789488405015677
+              4.790970468158678,
+              4.781548355615337,
+              4.778892103577833,
+              4.812770461746547
             ],
             [
-              4.812280882171317,
-              4.824189810450862,
-              4.815461635718334,
-              4.802431503998589
+              4.824955977330394,
+              4.834418498467121,
+              4.821921680244869,
+              4.819289292995452
             ]
           ],
-          "pooled_range_pct_of_min": 5.6,
-          "worst_across_process_range_pct": 0.93
+          "pooled_range_pct_of_min": 6.07,
+          "worst_across_process_range_pct": 0.71
         }
       },
       "by_slot_across_programs": {
         "slot0": {
           "mean_by_peak_live_512mib": {
-            "0": 5.084674561950349,
-            "6": 5.077230264465551,
-            "14": 5.012995506646915,
-            "20": 5.025791991577235
+            "0": 5.080983728255817,
+            "6": 5.098464364459629,
+            "14": 5.038277517809386,
+            "20": 5.051690644831327
           },
-          "range_pct_of_min": 1.43
+          "range_pct_of_min": 1.19
         },
         "slot1": {
           "mean_by_peak_live_512mib": {
-            "0": 5.129563395254399,
-            "6": 5.123565729487742,
-            "14": 4.935058144550522,
-            "20": 4.923576383125854
+            "0": 5.12719019381146,
+            "6": 5.142278533612592,
+            "14": 4.929714950537273,
+            "20": 4.926488420057837
           },
-          "range_pct_of_min": 4.18
+          "range_pct_of_min": 4.38
         },
         "slot2": {
           "mean_by_peak_live_512mib": {
-            "0": 5.314607060205813,
-            "6": 5.31162305985638,
-            "14": 4.979242076598769,
-            "20": 4.984200963050762
+            "0": 5.318668594116579,
+            "6": 5.3345780354681755,
+            "14": 4.994562149225198,
+            "20": 4.9913158706573055
           },
-          "range_pct_of_min": 6.74
+          "range_pct_of_min": 6.88
         },
         "slot3": {
           "mean_by_peak_live_512mib": {
-            "0": 5.228029430899118,
-            "6": 5.217964456347765,
-            "14": 4.768063456263778,
-            "20": 4.787103886029185
+            "0": 5.218618914872009,
+            "6": 5.213027848778012,
+            "14": 4.796275938190522,
+            "20": 4.791045347274599
           },
-          "range_pct_of_min": 9.65
+          "range_pct_of_min": 8.92
         },
         "slot4": {
           "mean_by_peak_live_512mib": {
-            "0": 4.990383482346868,
-            "6": 4.989703169457612,
-            "14": 4.802517110742368,
-            "20": 4.8135909580847756
+            "0": 5.001541707268483,
+            "6": 4.989124839813013,
+            "14": 4.824231304110901,
+            "20": 4.825146362259459
           },
-          "range_pct_of_min": 3.91
+          "range_pct_of_min": 3.68
         }
       }
     }
@@ -646,376 +774,402 @@
   "size_discrimination": {
     "write": {
       "range_512MiB": [
-        6.883623869336862,
-        6.940502504028124
+        6.891187394362961,
+        6.932336516186438
       ],
       "range_2048MiB": [
-        6.913226607055913,
-        6.951932233768105
+        6.909720870590682,
+        6.9688691437811325
       ],
-      "spread_512MiB_pct": 0.83,
-      "spread_2048MiB_pct": 0.56,
+      "spread_512MiB_pct": 0.6,
+      "spread_2048MiB_pct": 0.86,
       "n_per_size": 80,
       "ranges_overlap": true,
       "historical_TBps": 6.84,
-      "within_slot_spread_pct_max": 1.142,
-      "within_slot_spread_pct_median": 0.566,
+      "within_slot_spread_pct_max": 1.432,
+      "within_slot_spread_pct_median": 0.605,
       "n_slots_with_rounds": 160
     },
     "two_read_one_write": {
       "range_512MiB": [
-        5.963622202635753,
-        6.111692516335976
+        5.969478444110061,
+        6.116041213918436
       ],
       "range_2048MiB": [
-        6.00389054081674,
-        6.083943331743716
+        6.007255375954003,
+        6.082436260247461
       ],
-      "spread_512MiB_pct": 2.48,
-      "spread_2048MiB_pct": 1.33,
+      "spread_512MiB_pct": 2.46,
+      "spread_2048MiB_pct": 1.25,
       "n_per_size": 80,
       "ranges_overlap": true,
       "historical_TBps": 6.09,
-      "within_slot_spread_pct_max": 3.0,
-      "within_slot_spread_pct_median": 0.248,
+      "within_slot_spread_pct_max": 1.738,
+      "within_slot_spread_pct_median": 0.262,
       "n_slots_with_rounds": 160
     },
     "copy": {
       "range_512MiB": [
-        4.729596788472134,
-        5.596989421160311
+        4.717395777943518,
+        5.608987467046132
       ],
       "range_2048MiB": [
-        4.763671712895416,
-        4.994869851854889
+        4.772760404960314,
+        5.028899567532576
       ],
-      "spread_512MiB_pct": 18.34,
-      "spread_2048MiB_pct": 4.85,
+      "spread_512MiB_pct": 18.9,
+      "spread_2048MiB_pct": 5.37,
       "n_per_size": 80,
       "ranges_overlap": true,
       "historical_TBps": 4.89,
-      "within_slot_spread_pct_max": 2.62,
-      "within_slot_spread_pct_median": 0.942,
+      "within_slot_spread_pct_max": 5.296,
+      "within_slot_spread_pct_median": 0.98,
       "n_slots_with_rounds": 160
     },
-    "verdict": "No pattern separates 512 MiB from 2 GiB once allocation slot and allocator peak are sampled -- all three overlap. An earlier draft of this argument used two_read_one_write's 0.31% single-slot spread as an error bar and concluded from a 4.04% gap that the historical table must be 2 GiB. That spread was measured with slot and peak both held fixed, the one condition under which neither confound is visible; sampled properly the same probe spreads 2.48%. The table's size is known from notes:869 stating it, which is documentary evidence. Nothing in this artifact measures it. The spread in this sentence was hand-carried from a previous collection and the prose guard caught it when fresh runs moved the value; it is now interpolated from the field above."
+    "verdict": "No pattern separates 512 MiB from 2 GiB once allocation slot and allocator peak are sampled -- all three overlap. An earlier draft of this argument used two_read_one_write's 0.31% single-slot spread as an error bar and concluded from a 4.04% gap that the historical table must be 2 GiB. That spread was measured with slot and peak both held fixed, the one condition under which neither confound is visible; sampled properly the same probe spreads 2.46%. The table's size is known from notes:869 stating it, which is documentary evidence. Nothing in this artifact measures it. The spread in this sentence was hand-carried from a previous collection and the prose guard caught it when fresh runs moved the value; it is now interpolated from the field above."
   },
   "band_reachability_power": {
     "512MiB": {
       "n_slot_means": 20,
-      "slot_mean_span_pct": 18.28,
+      "slot_mean_span_pct": 18.2,
       "band_width_pct": 0.2047,
-      "p_single_slot_in_band_uniform_model": 0.0112,
-      "expected_slot_means_in_band": 0.224,
-      "p_at_least_one_in_band_pct": 20.2,
+      "p_single_slot_in_band_uniform_model": 0.0113,
+      "expected_slot_means_in_band": 0.225,
+      "p_at_least_one_in_band_pct": 20.3,
       "band_width_vs_single_draw_noise": {
-        "median_round_spread_pct": 0.597,
+        "median_round_spread_pct": 0.612,
         "band_width_pct": 0.2047,
-        "ratio_noise_to_band": 2.9,
+        "ratio_noise_to_band": 3.0,
         "band_resolvable_by_one_draw": false
       },
-      "conclusion": "with 20 slot means spanning 18.28% and a band 0.2047% wide, a uniform model expects 0.22 of them in band and gives only a 20% chance that any lands there. Zero in-band is therefore not evidence against the historical value -- this protocol has almost no power in that direction. The defensible statement is symmetric: at this size and sample size the data neither authenticate nor exclude a value in the band. A second limit, visible only once the timing rounds were retained: a single draw's own round-to-round spread has median 0.597%, which is 2.9x the band width. Even with slot, process and program all held fixed, one measurement cannot resolve an interval this narrow. The placement argument was never the binding constraint."
+      "conclusion": "with 20 slot means spanning 18.20% and a band 0.2047% wide, a uniform model expects 0.23 of them in band and gives only a 20% chance that any lands there. Zero in-band is therefore not evidence against the historical value -- this protocol has almost no power in that direction. The defensible statement is symmetric: at this size and sample size the data neither authenticate nor exclude a value in the band. A second limit, visible only once the timing rounds were retained: a single draw's own round-to-round spread has median 0.612%, which is 3.0x the band width. Even with slot, process and program all held fixed, one measurement cannot resolve an interval this narrow. The placement argument was never the binding constraint."
     },
     "2048MiB": {
       "n_slot_means": 20,
-      "slot_mean_span_pct": 11.46,
+      "slot_mean_span_pct": 11.34,
       "band_width_pct": 0.2047,
-      "p_single_slot_in_band_uniform_model": 0.0179,
-      "expected_slot_means_in_band": 0.357,
-      "p_at_least_one_in_band_pct": 30.3,
+      "p_single_slot_in_band_uniform_model": 0.018,
+      "expected_slot_means_in_band": 0.361,
+      "p_at_least_one_in_band_pct": 30.5,
       "band_width_vs_single_draw_noise": {
-        "median_round_spread_pct": 0.995,
+        "median_round_spread_pct": 1.029,
         "band_width_pct": 0.2047,
-        "ratio_noise_to_band": 4.9,
+        "ratio_noise_to_band": 5.0,
         "band_resolvable_by_one_draw": false
       },
-      "conclusion": "with 20 slot means spanning 11.46% and a band 0.2047% wide, a uniform model expects 0.36 of them in band and gives only a 30% chance that any lands there. Zero in-band is therefore not evidence against the historical value -- this protocol has almost no power in that direction. The defensible statement is symmetric: at this size and sample size the data neither authenticate nor exclude a value in the band. A second limit, visible only once the timing rounds were retained: a single draw's own round-to-round spread has median 0.995%, which is 4.9x the band width. Even with slot, process and program all held fixed, one measurement cannot resolve an interval this narrow. The placement argument was never the binding constraint."
+      "conclusion": "with 20 slot means spanning 11.34% and a band 0.2047% wide, a uniform model expects 0.36 of them in band and gives only a 31% chance that any lands there. Zero in-band is therefore not evidence against the historical value -- this protocol has almost no power in that direction. The defensible statement is symmetric: at this size and sample size the data neither authenticate nor exclude a value in the band. A second limit, visible only once the timing rounds were retained: a single draw's own round-to-round spread has median 1.029%, which is 5.0x the band width. Even with slot, process and program all held fixed, one measurement cannot resolve an interval this narrow. The placement argument was never the binding constraint."
     }
   },
   "peak_staircase": {
     "collected": true,
     "reps_per_level": 2,
     "one_process_per_row": true,
+    "step_at_n_prior_512mib_allocs": [
+      13,
+      17,
+      21
+    ],
     "step_at_peak_live_512mib": [
       13,
       17,
       21
     ],
+    "axis_name_retracted": "'peak_live_512mib' named a quantity this design holds constant; see high_water_check. The level is a prior-allocation count.",
     "criterion": "level-to-level shift exceeds 3x the across-process repeat spread",
-    "criterion_floor_pct": 1.104,
-    "criterion_floor_source": "median round-to-round spread of a single draw over 220 draws",
+    "criterion_floor_pct": 1.072,
+    "criterion_floor_source": "median round-to-round spread of a single draw over 440 draws",
+    "direction_control": {
+      "present": true,
+      "steps_ascending": [
+        13,
+        17,
+        21
+      ],
+      "steps_descending": [
+        13,
+        17,
+        21
+      ],
+      "steps_in_both_directions": [
+        13,
+        17,
+        21
+      ],
+      "steps_in_one_direction_only": [],
+      "note": "each row is still its own fresh process; only the order of processes differs. Steps appearing in one direction only are not established -- they are consistent with drift over the collection window, which the monotonic first design could not distinguish from a level effect."
+    },
     "levels": [
       {
         "peak_live_512mib": 0,
         "slot_means": [
-          4.813083261256265,
-          5.02818800979307,
-          4.9490680637523266,
-          4.983963405048496,
-          4.794748390773782
+          4.84078979914865,
+          5.037454260033962,
+          4.916067323899769,
+          4.996834303889132,
+          4.780933665561711
         ],
-        "across_process_repeat_spread_pct": 1.14,
+        "across_process_repeat_spread_pct": 0.8,
         "shift_vs_previous_level_pct": null
       },
       {
         "peak_live_512mib": 1,
         "slot_means": [
-          4.8199042214290575,
-          5.034678273739098,
-          4.93644560016293,
-          4.99309588630114,
-          4.771263126488055
+          4.837444811839525,
+          5.042971454738828,
+          4.918757239345588,
+          4.988218302787905,
+          4.78036228369217
         ],
-        "across_process_repeat_spread_pct": 0.23,
-        "shift_vs_previous_level_pct": 0.49
+        "across_process_repeat_spread_pct": 0.69,
+        "shift_vs_previous_level_pct": 0.17
       },
       {
         "peak_live_512mib": 2,
         "slot_means": [
-          4.838732152766724,
-          5.0259577405139275,
-          4.9227869797892865,
-          4.988451330717947,
-          4.781736756367586
+          4.8399764866636055,
+          5.0382576358284235,
+          4.9286561430562745,
+          4.98823951647363,
+          4.801501840576884
         ],
-        "across_process_repeat_spread_pct": 0.57,
-        "shift_vs_previous_level_pct": 0.39
+        "across_process_repeat_spread_pct": 0.88,
+        "shift_vs_previous_level_pct": 0.44
       },
       {
         "peak_live_512mib": 3,
         "slot_means": [
-          4.8342058588642605,
-          5.028095344634879,
-          4.930713043225197,
-          4.986962370587332,
-          4.787450500733442
+          4.834617116527352,
+          5.050118202296098,
+          4.925305612001214,
+          4.985582721523521,
+          4.788522027119114
         ],
-        "across_process_repeat_spread_pct": 0.84,
-        "shift_vs_previous_level_pct": 0.16
+        "across_process_repeat_spread_pct": 0.98,
+        "shift_vs_previous_level_pct": 0.27
       },
       {
         "peak_live_512mib": 4,
         "slot_means": [
-          4.835321875614195,
-          5.031105209786707,
-          4.938663285223933,
-          4.9850747507821245,
-          4.7816907251408844
+          4.846518652056578,
+          5.0352105902457405,
+          4.928729949597351,
+          4.992634887920003,
+          4.786754039741269
         ],
-        "across_process_repeat_spread_pct": 0.26,
-        "shift_vs_previous_level_pct": 0.16
+        "across_process_repeat_spread_pct": 0.67,
+        "shift_vs_previous_level_pct": 0.3
       },
       {
         "peak_live_512mib": 5,
         "slot_means": [
-          4.82505122634158,
-          5.024105476910279,
-          4.921942203397066,
-          4.995292913787775,
-          4.784527206198492
+          4.8236564975879,
+          5.028209267299165,
+          4.938359270027959,
+          4.993040407256187,
+          4.782690639551518
         ],
-        "across_process_repeat_spread_pct": 0.38,
-        "shift_vs_previous_level_pct": 0.34
+        "across_process_repeat_spread_pct": 0.82,
+        "shift_vs_previous_level_pct": 0.47
       },
       {
         "peak_live_512mib": 6,
         "slot_means": [
-          4.813296176216287,
-          5.018614252838859,
-          4.927332603144425,
-          4.989677644935822,
-          4.782423974364839
+          4.843635950833747,
+          5.043105587601233,
+          4.926684236843141,
+          4.9849483497461975,
+          4.789767370769397
         ],
-        "across_process_repeat_spread_pct": 0.08,
-        "shift_vs_previous_level_pct": 0.24
+        "across_process_repeat_spread_pct": 0.94,
+        "shift_vs_previous_level_pct": 0.41
       },
       {
         "peak_live_512mib": 7,
         "slot_means": [
-          4.835809750501857,
-          5.037221085697032,
-          4.912350761008445,
-          4.9900092741429205,
-          4.785197703654882
+          4.837883134039016,
+          5.045283185717507,
+          4.9354336296271,
+          4.9868544906341405,
+          4.799773446522911
         ],
-        "across_process_repeat_spread_pct": 0.72,
-        "shift_vs_previous_level_pct": 0.47
+        "across_process_repeat_spread_pct": 0.89,
+        "shift_vs_previous_level_pct": 0.21
       },
       {
         "peak_live_512mib": 8,
         "slot_means": [
-          4.82074401882279,
-          5.039029404950055,
-          4.937056636016402,
-          4.999165087646382,
-          4.784737164125165
+          4.825281839585706,
+          5.035885756249659,
+          4.93426200404007,
+          4.992217588985688,
+          4.801027829030062
         ],
-        "across_process_repeat_spread_pct": 0.19,
-        "shift_vs_previous_level_pct": 0.5
+        "across_process_repeat_spread_pct": 0.66,
+        "shift_vs_previous_level_pct": 0.26
       },
       {
         "peak_live_512mib": 9,
         "slot_means": [
-          4.838633401166321,
-          5.0289765808391795,
-          4.921130579668635,
-          4.99142122977136,
-          4.791012695928889
+          4.81900987540202,
+          5.044860567185276,
+          4.9177262184388235,
+          4.990140098199248,
+          4.794456174101327
         ],
-        "across_process_repeat_spread_pct": 0.57,
-        "shift_vs_previous_level_pct": 0.37
+        "across_process_repeat_spread_pct": 0.98,
+        "shift_vs_previous_level_pct": 0.34
       },
       {
         "peak_live_512mib": 10,
         "slot_means": [
-          4.844924873254076,
-          5.031647121221619,
-          4.935857473351409,
-          4.992184362246118,
-          4.789051020382013
+          4.836462431147871,
+          5.035228104711352,
+          4.93825948856555,
+          4.992110395433629,
+          4.7933125970034975
         ],
-        "across_process_repeat_spread_pct": 0.74,
-        "shift_vs_previous_level_pct": 0.3
+        "across_process_repeat_spread_pct": 0.82,
+        "shift_vs_previous_level_pct": 0.42
       },
       {
         "peak_live_512mib": 11,
         "slot_means": [
-          4.83534410096839,
-          5.022634219226708,
-          4.919097197372924,
-          4.999041104515345,
-          4.778419986583499
+          4.837965938581894,
+          5.047986315359921,
+          4.926411140531332,
+          4.99827985575144,
+          4.795427680439643
         ],
-        "across_process_repeat_spread_pct": 0.64,
-        "shift_vs_previous_level_pct": 0.34
+        "across_process_repeat_spread_pct": 0.75,
+        "shift_vs_previous_level_pct": 0.25
       },
       {
         "peak_live_512mib": 12,
         "slot_means": [
-          4.825669586185038,
-          5.048608608583712,
-          4.916641824058292,
-          4.987269074049359,
-          4.786375679285767
+          4.833408611907261,
+          5.049986821080818,
+          4.931780220969486,
+          4.983519503790597,
+          4.796212453587256
         ],
-        "across_process_repeat_spread_pct": 0.44,
-        "shift_vs_previous_level_pct": 0.52
+        "across_process_repeat_spread_pct": 0.86,
+        "shift_vs_previous_level_pct": 0.3
       },
       {
         "peak_live_512mib": 13,
         "slot_means": [
-          5.332214994047488,
-          4.7956827846797045,
-          4.828738555048568,
-          4.94676183683479,
-          4.98360214119
+          5.334950465585678,
+          4.7953271966828055,
+          4.8297261794240685,
+          4.93191031615594,
+          4.997410073502633
         ],
-        "across_process_repeat_spread_pct": 0.35,
-        "shift_vs_previous_level_pct": 10.5
+        "across_process_repeat_spread_pct": 0.71,
+        "shift_vs_previous_level_pct": 10.38
       },
       {
         "peak_live_512mib": 14,
         "slot_means": [
-          5.333054983225798,
-          4.797952493294341,
-          4.809530938786143,
-          4.938083991701453,
-          4.979560199273365
+          5.323738532900908,
+          4.802707226023012,
+          4.839402953013961,
+          4.932752034956279,
+          4.989196104340493
         ],
-        "across_process_repeat_spread_pct": 0.46,
-        "shift_vs_previous_level_pct": 0.4
+        "across_process_repeat_spread_pct": 1.0,
+        "shift_vs_previous_level_pct": 0.21
       },
       {
         "peak_live_512mib": 15,
         "slot_means": [
-          5.324259408723659,
-          4.77587877543717,
-          4.833536796661374,
-          4.921291081754591,
-          4.9847342640634
+          5.331446569931379,
+          4.796941565077966,
+          4.828643399142255,
+          4.94212470775353,
+          4.987645728002162
         ],
-        "across_process_repeat_spread_pct": 0.55,
-        "shift_vs_previous_level_pct": 0.5
+        "across_process_repeat_spread_pct": 1.12,
+        "shift_vs_previous_level_pct": 0.22
       },
       {
         "peak_live_512mib": 16,
         "slot_means": [
-          5.338479402767005,
-          4.793737944669248,
-          4.8251520190832355,
-          4.954603511938443,
-          4.9886492032019385
+          5.318029484185132,
+          4.792132710802825,
+          4.834437818597463,
+          4.935489956579603,
+          4.991968264864075
         ],
-        "across_process_repeat_spread_pct": 0.23,
-        "shift_vs_previous_level_pct": 0.68
+        "across_process_repeat_spread_pct": 0.64,
+        "shift_vs_previous_level_pct": 0.25
       },
       {
         "peak_live_512mib": 17,
         "slot_means": [
-          5.064766710668017,
-          5.130232287542027,
-          5.314031383907592,
-          5.256240629790465,
-          4.977773639396844
+          5.0849055957332405,
+          5.141180658593504,
+          5.331624185931872,
+          5.222815841247415,
+          5.005955987064578
         ],
-        "across_process_repeat_spread_pct": 0.59,
-        "shift_vs_previous_level_pct": 10.13
+        "across_process_repeat_spread_pct": 0.76,
+        "shift_vs_previous_level_pct": 10.28
       },
       {
         "peak_live_512mib": 18,
         "slot_means": [
-          5.058226011036259,
-          5.14222869984447,
-          5.321508892153402,
-          5.229996942892109,
-          5.004355278244184
+          5.053787608402047,
+          5.138094460061095,
+          5.324478222392715,
+          5.220284349255047,
+          4.995304211576252
         ],
-        "across_process_repeat_spread_pct": 0.31,
-        "shift_vs_previous_level_pct": 0.53
+        "across_process_repeat_spread_pct": 1.11,
+        "shift_vs_previous_level_pct": 0.61
       },
       {
         "peak_live_512mib": 19,
         "slot_means": [
-          5.035179384750734,
-          5.141278538539339,
-          5.3211099798924195,
-          5.246913320149165,
-          4.9953799668378345
+          5.042219673683685,
+          5.135113810664676,
+          5.3344817340044735,
+          5.2476712891805715,
+          4.998493066251324
         ],
-        "across_process_repeat_spread_pct": 0.57,
-        "shift_vs_previous_level_pct": 0.46
+        "across_process_repeat_spread_pct": 1.25,
+        "shift_vs_previous_level_pct": 0.52
       },
       {
         "peak_live_512mib": 20,
         "slot_means": [
-          5.00922088142027,
-          5.129448550271324,
-          5.313276736622303,
-          5.230046862583363,
-          4.99078687987525
+          5.023666346961134,
+          5.134259981528773,
+          5.327931459168281,
+          5.221588312793106,
+          5.006052214520132
         ],
-        "across_process_repeat_spread_pct": 0.45,
-        "shift_vs_previous_level_pct": 0.52
+        "across_process_repeat_spread_pct": 1.01,
+        "shift_vs_previous_level_pct": 0.5
       },
       {
         "peak_live_512mib": 21,
         "slot_means": [
-          4.918174463697271,
-          4.834640112646387,
-          4.774218867553145,
-          5.042425399802937,
-          4.96748520736677
+          4.9336544843021874,
+          4.837775652325891,
+          4.774339208190179,
+          5.038086355467721,
+          4.958785026059521
         ],
-        "across_process_repeat_spread_pct": 1.03,
-        "shift_vs_previous_level_pct": 10.15
+        "across_process_repeat_spread_pct": 1.14,
+        "shift_vs_previous_level_pct": 10.39
       }
     ],
     "why_not_within_process": "the measurement itself allocates and frees 2 GiB buffers, which re-rolls placement; a within-process sweep measures that instead of the peak and reports a spurious step at every level"
   },
-  "verdict": "The conclusion holds at the size that matters, for a better-supported reason. At 2 GiB the copy rate ranges 11.72% over 80 draws spanning 5 allocation slots and 4 allocator peaks, which is 57x the 0.20% width of the band the historical 4.89 cell implies, with 16 draws below it and 64 at or above. That is NOT a demonstration that the band is reachable: zero draws land in it, and because the draws cluster on allocation slots whose means are separated by gaps far wider than the band, zero in-band is what a uniform model predicts even if the band is perfectly reachable -- see band_reachability_power. The defensible claim is symmetric and weaker than the one this artifact first made: at this sample size the data neither authenticate nor exclude the historical value, and a single copy draw cannot authenticate a harness, a device, or a commit. What changes from the superseded artifact is the number and its scope, not the verdict: 11.72% at 2 GiB rather than the 19.11% this same collection gives at 512 MiB, which is the size the superseded artifact measured.",
+  "verdict": "The conclusion holds at the size that matters, for a better-supported reason. At 2 GiB the copy rate ranges 11.93% over 80 draws spanning 5 allocation slots and 4 allocator peaks, which is 58x the 0.20% width of the band the historical 4.89 cell implies, with 16 draws below it and 64 at or above. That is NOT a demonstration that the band is reachable: zero draws land in it, and because the draws cluster on allocation slots whose means are separated by gaps far wider than the band, zero in-band is what a uniform model predicts even if the band is perfectly reachable -- see band_reachability_power. The defensible claim is symmetric and weaker than the one this artifact first made: at this sample size the data neither authenticate nor exclude the historical value, and a single copy draw cannot authenticate a harness, a device, or a commit. What changes from the superseded artifact is the number and its scope, not the verdict: 11.93% at 2 GiB rather than the 18.60% this same collection gives at 512 MiB, which is the size the superseded artifact measured.",
   "what_is_and_is_not_repeatable": {
-    "repeatable": "copy IS repeatable to under 0.97% given a fixed allocation slot, a fixed program, and a fixed allocator peak",
-    "not_repeatable": "which slot a draw lands on -- 6.80% across slots at 2 GiB within a single fixed program -- and where those slots sit once the program's peak high-water mark changes (9.65%). Pooling both axes gives 11.72%, which is the figure the verdict uses; it is reported as a pooled range and not as either axis alone, because a fresh draw from an unknown harness is exposed to both.",
+    "repeatable": "copy IS repeatable to under 0.96% given a fixed allocation slot, a fixed program, and a fixed allocator peak",
+    "not_repeatable": "which slot a draw lands on -- 7.55% across slots at 2 GiB within a single fixed program -- and where those slots sit once the program's peak high-water mark changes (8.92%). Pooling both axes gives 11.93%, which is the figure the verdict uses; it is reported as a pooled range and not as either axis alone, because a fresh draw from an unknown harness is exposed to both.",
     "corrects": "denominator_stability_across_processes in the roofline sidecar, which reports copy at 13.35% with n_processes: 3. That is not a process axis: the three runs straddled edits to _copy_variability that changed the allocator's peak. Same program, six processes: 0.63%."
   }
 }

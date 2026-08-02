@@ -70,6 +70,12 @@ OUT = REPO / "AI/data/copy_placement_draws/copy_axes_dev5.json"
 
 # Inherited from 4d6ed9de. Named, not assumed: a bare pair reads as closed.
 BAND = (4.885, 4.895)
+DIRECTION_CONTROL_ABSENT = (
+    "this sweep ran levels in monotonic wall-clock order, so a level effect and a "
+    "drift over the collection window are indistinguishable in it. Steps below are "
+    "reported without a time-reversal control. @Reviewer, 5c2e0083."
+)
+
 BAND_CONVENTION = (
     "half-open [lo, hi) under a nearest / half-up display rule: a true value of "
     "4.895 displays as 4.90, not 4.89, so it cannot have produced the historical "
@@ -88,10 +94,101 @@ def _load(src_dir):
         if path.name.startswith("_"):
             continue  # _peak_sweep.json is the staircase sweep, a different schema
         d = json.loads(path.read_text())
-        runs[d["peak_live_512mib"]].append(d)
+        # New name first. The treatment is prior allocation count, not peak bytes;
+        # `peak_live_512mib` is the retracted alias kept so older runs still load.
+        runs[d.get("n_prior_512mib_allocs", d["peak_live_512mib"])].append(d)
     if not runs:
         raise SystemExit(f"no runs in {src_dir}")
     return dict(sorted(runs.items()))
+
+
+def _high_water_check(runs):
+    """Did the treatment move the process high-water at all? Measured per run.
+
+    This exists because the axis was published for two commits as "allocator peak
+    high-water mark" when the prefix never exceeded the live set the measurement
+    itself allocates -- so the high-water was constant across every level and the
+    name asserted a mechanism the design could not touch. @Reviewer caught it by
+    reading the code. The point of this function is that the next reader should
+    not have to: the claim is now falsifiable from the artifact.
+    """
+    allr = [r for rs in runs.values() for r in rs]
+    have = [r for r in allr if "high_water_bytes" in r]
+    if not have:
+        return {
+            "recorded": False,
+            "why_it_matters": (
+                "these runs predate high_water_bytes. Any statement here about a "
+                "peak-bytes threshold is unsupported by them; the treatment is prior "
+                "allocation count."
+            ),
+        }
+    g = 1024**3
+    # Per measurement block, not pooled. A run measures 512 MiB then 2 GiB
+    # sequentially, and the two have very different live sets (~3 GiB vs 12 GiB).
+    # Collapsing them with max() would report the 22 GiB pattern-probe peak against
+    # every block and hide that the prefix *does* exceed the 512 MiB block's live
+    # set at the upper levels. Which is the whole question: the axis is separable
+    # exactly where the prefix is the thing setting the high-water.
+    blocks = sorted({k for r in have for k in r["high_water_bytes"] if k != "after_prefix"})
+    by_level = {}
+    for level, rs in runs.items():
+        rs = [r for r in rs if "high_water_bytes" in r]
+        if not rs:
+            continue
+        hw = [r["high_water_bytes"] for r in rs]
+        pre = max(h["after_prefix"] for h in hw)
+        row = {"prefix_high_water_GiB": round(pre / g, 2)}
+        for b in blocks:
+            vals = [h[b] for h in hw if b in h]
+            if not vals:
+                continue
+            row[b] = {
+                "measurement_live_set_GiB": round(max(vals) / g, 2),
+                "high_water_set_by": "prefix" if pre > max(vals) else "measurement",
+            }
+        by_level[str(level)] = row
+
+    per_block = {}
+    for b in blocks:
+        setters = {
+            row[b]["high_water_set_by"] for row in by_level.values() if isinstance(row.get(b), dict)
+        }
+        hws = {
+            max(row[b]["measurement_live_set_GiB"], row["prefix_high_water_GiB"])
+            for row in by_level.values()
+            if isinstance(row.get(b), dict)
+        }
+        per_block[b] = {
+            "high_water_varies_across_levels": len(hws) > 1,
+            "distinct_high_waters_GiB": sorted(hws),
+            "peak_bytes_separable_from_alloc_count": len(hws) > 1 and "prefix" in setters,
+        }
+
+    sep = [b for b, v in per_block.items() if v["peak_bytes_separable_from_alloc_count"]]
+    key2g = "during_identical_buffers_2048MiB"
+    return {
+        "recorded": True,
+        "by_level": by_level,
+        "per_measurement_block": per_block,
+        "blocks_where_peak_bytes_varies": sep,
+        "load_bearing_block": key2g,
+        "verdict": (
+            "For the 2 GiB identical-buffer draws -- the block every conclusion in this "
+            "artifact rests on -- the prefix never sets the process high-water: it tops "
+            f"out below the {key2g} live set at every level, so peak bytes is constant "
+            "and cannot be the axis. The treatment there is prior allocation count and "
+            "history, with count, bytes, churn, fill time and placement mutually "
+            "confounded. At 512 MiB the upper prefixes do exceed that block's smaller "
+            "live set, so peak bytes varies there; that is a partial separation this "
+            "design produced by accident, not by intent, and it is reported rather than "
+            "claimed as a control. A real factorial needs prefixes above the 2 GiB "
+            "block's own live set."
+            if key2g not in sep
+            else "the prefix sets the high-water for the 2 GiB block at some levels; "
+            "peak bytes and allocation count are at least partly separable here."
+        ),
+    }
 
 
 def _decompose(runs, size):
@@ -467,9 +564,13 @@ def _staircase(path=REPO / "AI/data/copy_placement_draws/raw_dev5/_peak_sweep.js
     if not path.exists():
         return {"collected": False, "how": "python AI/probe_copy_size_draws.py OUT --sweep-steps"}
     d = json.loads(path.read_text())
+
+    def lvl(r):
+        return r.get("n_prior_512mib_allocs", r["peak_live_512mib"])
+
     by = defaultdict(list)
     for r in d["rows"]:
-        by[r["peak_live_512mib"]].append(r["draws_2GiB"])
+        by[lvl(r)].append(r["draws_2GiB"])
 
     # The floor the step criterion needs, measured rather than assumed. The
     # previous criterion was `3 * max(repeat, 0.5)`, and that 0.5 was typed by
@@ -511,14 +612,63 @@ def _staircase(path=REPO / "AI/data/copy_placement_draws/raw_dev5/_peak_sweep.js
         if shift is not None and shift > 3 * max(repeat, floor):
             steps.append(peak)
         prev = means
+
+    # Direction control. The first sweep ran 0..21 in wall-clock order, so a level
+    # effect and a slow drift over the collection window are the same signal. If
+    # the rows carry a direction, the same step-finding runs on each pass
+    # independently: a real step appears at the same level going up and coming
+    # back down; a drift artifact does not survive time reversal.
+    def steps_for(rows):
+        b = defaultdict(list)
+        for r in rows:
+            b[lvl(r)].append(r["draws_2GiB"])
+        s, pv = [], None
+        for pk in sorted(b):
+            reps = b[pk]
+            if len(reps) < 2:
+                pv = [sum(r[i] for r in reps) / len(reps) for i in range(5)]
+                continue
+            mn = [sum(r[i] for r in reps) / len(reps) for i in range(5)]
+            rp = max(max(r[i] for r in reps) / min(r[i] for r in reps) - 1 for i in range(5)) * 100
+            sh = None if pv is None else max(abs(a / b2 - 1) for a, b2 in zip(mn, pv)) * 100
+            if sh is not None and sh > 3 * max(rp, floor):
+                s.append(pk)
+            pv = mn
+        return s
+
+    dirs = {r.get("direction") for r in d["rows"]}
+    direction_control = {"present": False, "why_it_matters": DIRECTION_CONTROL_ABSENT}
+    if dirs - {None}:
+        up = steps_for([r for r in d["rows"] if r.get("direction") == "up"])
+        down = steps_for([r for r in d["rows"] if r.get("direction") == "down"])
+        both = sorted(set(up) & set(down))
+        direction_control = {
+            "present": True,
+            "steps_ascending": up,
+            "steps_descending": down,
+            "steps_in_both_directions": both,
+            "steps_in_one_direction_only": sorted(set(up) ^ set(down)),
+            "note": (
+                "each row is still its own fresh process; only the order of processes "
+                "differs. Steps appearing in one direction only are not established -- "
+                "they are consistent with drift over the collection window, which the "
+                "monotonic first design could not distinguish from a level effect."
+            ),
+        }
     return {
         "collected": True,
         "reps_per_level": d["reps_per_level"],
         "one_process_per_row": d["one_process_per_row"],
+        "step_at_n_prior_512mib_allocs": steps,
         "step_at_peak_live_512mib": steps,
+        "axis_name_retracted": (
+            "'peak_live_512mib' named a quantity this design holds constant; see "
+            "high_water_check. The level is a prior-allocation count."
+        ),
         "criterion": "level-to-level shift exceeds 3x the across-process repeat spread",
         "criterion_floor_pct": round(floor, 3),
         "criterion_floor_source": floor_src,
+        "direction_control": direction_control,
         "levels": levels,
         "why_not_within_process": d["why_not_within_process"],
     }
@@ -593,7 +743,17 @@ def main():
         "what": (
             "Copy-rate draws at both 512 MiB and the 2 GiB size the historical "
             "roofline table was measured at, decomposed across three axes: "
-            "allocation slot, process, and allocator peak high-water mark."
+            "allocation slot, process, and prior allocation count/history."
+        ),
+        "retracted_axis_name": (
+            "the third axis was published in 9879dda and be86f90 as 'allocator peak "
+            "high-water mark'. That name is withdrawn: see high_water_check, which "
+            "measures that the process high-water is identical at every level because "
+            "the prefix never exceeds the live set the measurement itself allocates. "
+            "Raised by @Reviewer in 5c2e0083 and confirmed by instrumenting "
+            "torch.cuda.max_memory_allocated. The staircase is real and reproducible; "
+            "the mechanism named for it was not measured. Field keys carrying 'peak' "
+            "are retained as aliases so prior runs and readers still parse."
         ),
         "supersedes": (
             "AI/data/copy_placement_draws/copy_512MiB_draws_dev5.json, whose argument "
@@ -604,7 +764,9 @@ def main():
         "device_name": allr[0]["device_name"],
         "hip_visible_devices": allr[0]["hip_visible_devices"],
         "n_processes": len(allr),
+        "n_prior_512mib_alloc_levels": sorted(runs),
         "peak_levels_512mib": sorted(runs),
+        "high_water_check": _high_water_check(runs),
         "generator": "AI/probe_copy_size_draws.py",
         "assembler": "AI/assemble_copy_axes.py",
         "input_manifest": _input_manifest(src, []),
