@@ -10,7 +10,12 @@ is fixed will overstate bandwidth on every shape below `32768x2048`.
 L2 evictor from `torch.cuda.get_device_properties().L2_cache_size`. On gfx950
 that property reports **4 MiB**, which is the *per-XCD* L2. It does not report
 the device-wide **256 MiB MALL / Infinity Cache** that sits behind it. Two
-independent consequences follow, and they compound.
+independent consequences follow. They were originally written up as compounding;
+the controlled measurement (below) attributes the observed 1.32x to **defect 1**
+— the evictor never runs — and does *not* show defect 2's undersizing costing
+anything measurable on this access pattern. Defect 2 is still a real
+mis-derivation and should be fixed, but it should not be credited with the
+inflation.
 
 The cache hierarchy on this part (ROCm Kernel Wiki `hw-chiplet-xcd`):
 
@@ -28,8 +33,13 @@ enough to stay resident in MALL. For `4096x4096` bf16 forward at 2 buffers the
 working set is 128 MiB — the gate evaluates `128 MiB < 12 MiB` = False, so no
 eviction happens, and 128 MiB fits comfortably in the 256 MiB MALL.
 
-The evictor is also only 12 MiB, which cannot flush a 256 MiB cache even when
-it does run.
+The evictor is also only 12 MiB, which on the face of it cannot flush a 256 MiB
+cache even when it does run. That reasoning turns out not to survive
+measurement: forcing a 12 MiB evictor to run at the boundary recovers almost
+all of the gap (4891 GB/s against a 4964 GB/s HBM reference), within ~2% of
+what a 256 MiB evictor achieves. A copy-based evictor evidently disturbs MALL
+residency out of proportion to its own footprint. The binding problem is the
+gate, not the size.
 
 ## Defect 2: default rotation counts cannot clear the MALL
 
@@ -160,13 +170,19 @@ agent, and it parses cleanly:
 
     arch=gfx950  L2=4 MiB (per-XCD)  L3/MALL=256 MiB
 
-1. **Size the evictor from the largest reported cache level, not `L2_cache_size`.**
-   Derive an effective LLC (`L3` if present, else `L2`) and target a multiple of
-   *that*. Also fix the `use_evictor` gate, which currently compares against the
-   same undersized number and so switches eviction off precisely where it is
-   needed. This is the option I favour: it is one sizing function, it fixes both
-   defects, and it degenerates to current behaviour on NVIDIA where no L3 is
-   reported.
+1. **Fix the `use_evictor` gate first; re-size the evictor second.**
+   The gate is the part the measurement actually indicts. `use_evictor =
+   ws < l2_target_bytes` switches eviction off precisely where it is needed, and
+   the evictor-control block shows that *running an evictor at all* is what
+   recovers the HBM number — 12 MiB gets within ~2% of the 256/512 MiB results.
+   So the gate should be driven by whether the working set fits the effective
+   LLC, not by whether it is smaller than a multiple of the per-XCD L2.
+
+   Re-sizing off an effective LLC (`L3` if present, else `L2`) is still correct
+   and should ship with it — the current derivation is wrong on its own terms,
+   and it degenerates to today's behaviour on NVIDIA where no L3 is reported —
+   but it should be presented as correcting a mis-derivation, not as the thing
+   that buys back the 1.32x. On this access pattern it does not.
 
 2. **Force the rotation working set past the MALL.** Rejected as a primary fix —
    the table above shows the requirement is impossible at small `m`, and
