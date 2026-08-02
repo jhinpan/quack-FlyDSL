@@ -905,6 +905,21 @@ def _packed_rows(tensor: torch.Tensor) -> torch.Tensor:
     itself from the tensor. So the fix is to hand it a tensor whose first
     unit-stride axis *is* the row axis, which is what ``_unambiguous_layout``
     does.
+
+    One correction to how I described this to the team: I said the two layouts
+    were indistinguishable to FlyDSL, so a layout term in the cache key could
+    not have helped either. That is false, and @Autotune measured it::
+
+        MemRefSpec(16, [1, 64], [1, 1]).mark_layout_dynamic()
+            -> get_cache_signature() == (2, False, (-1, -1), (1, -1))
+        MemRefSpec(16, [4, 64], [64, 1]).mark_layout_dynamic()
+            -> get_cache_signature() == (2, False, (-1, -1), (-1, 1))
+
+    The signatures differ, so an ABI-signature term in the key *would* separate
+    these two entries. Canonicalizing first is still the right primary fix --
+    it makes the reuse correct rather than merely rarer, and it keeps one
+    launcher per shape -- but "a key term could not have worked" was an
+    argument for it that does not hold, and it should not be repeated.
     """
     tensor = _unambiguous_layout(tensor)
     if torch.compiler.is_compiling():

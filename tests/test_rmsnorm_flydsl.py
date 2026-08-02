@@ -1631,7 +1631,16 @@ def test_a_row_padded_view_is_not_copied_and_not_wrong(pitch_pad):
     weight = torch.randn(n, device="cuda", dtype=torch.bfloat16)
 
     assert rmsnorm_flydsl_impl._packed_rows(view).data_ptr() == view.data_ptr()
-    assert torch.equal(rmsnorm(view, weight), rmsnorm(view.contiguous(), weight))
+
+    # Unlike the singleton case, `.contiguous()` here really does copy -- the
+    # view is genuinely discontiguous -- so this comparison is not the tautology
+    # @Autotune flagged elsewhere. It is still only a *value* check: both calls
+    # go through one cache, so it would not notice the padded launcher being
+    # reused for the packed shape. The reference check is what covers that.
+    packed = view.contiguous()
+    assert packed.data_ptr() != view.data_ptr(), "premise: this view is really copied"
+    assert torch.equal(rmsnorm(view, weight), rmsnorm(packed, weight))
+    _assert_close(rmsnorm(view, weight), _reference(view, weight, 1e-6))
 
 
 def test_the_copy_still_happens_where_upstream_takes_it():
