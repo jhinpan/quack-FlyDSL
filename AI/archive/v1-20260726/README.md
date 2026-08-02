@@ -73,14 +73,26 @@ the CSVs. They record per-cell `tuned_config` strings from the same period and
 are the source for the `use_tma=True, smem_stages=3` claim about the widest
 backward row, which was also briefly and wrongly retracted as unsourced:
 
-| host | 32768x8192 bwd winner | tuned/analytical |
-| --- | --- | --- |
-| H100 | `use_tma=True, smem_stages=3` | 0.911 |
-| H200 | `use_tma=True, smem_stages=3` | 0.8325 |
+| host | 32768x8192 bwd winner | tuned/analytical | implied gain |
+| --- | --- | --- | --- |
+| H100 | `use_tma=True, smem_stages=3` | 0.911 | 8.90% |
+| H200 | `use_tma=True, smem_stages=3` | 0.8325 | 16.75% |
 
 At 32768x2048 bwd the H100 winner is `use_tma=True, smem_stages=2` (0.9657) and
 the H200 winner is the analytical config unchanged (1.0042), which independently
 supports the gain being confined to the widest row.
+
+**These probes are a separate run from No.001 — do not equate them.** The
+published No.001 gains at the same cell are 9.155% (H100) and 17.479% (H200),
+against these probes' 8.90% and 16.75%. Close, but not identical, so the probes
+corroborate *which config wins* and roughly how much it wins by; they are not
+the timing record behind the published numbers. The two probe files also differ
+from each other in toolchain — H100 ran torch 2.11.0+cu130, H200 torch
+2.9.1+cu128 — so they are not even a matched pair between hosts, and neither
+records a Quack commit, command line, date or cache identity. The generating
+script is archived here as `probe_tuned_vs_analytical.py`
+(sha256 `d2cd0915496f296f2ef9f8366aaa4ec7e5a6e7d05bb4bde3c8e550ed62d1faa7`),
+but nothing cryptographically links either JSON to a source commit.
 
 ## Still unarchived
 

@@ -544,6 +544,11 @@ it will not reproduce these numbers.
 
 Limits of this provenance: schema-v1 records no commit SHA, toolchain version or
 hostname, and the 2026-07-26 date comes from file mtimes rather than the data.
+The bundled `tuned_config` probes are likewise a *separate* run from No.001 —
+their widest-row gains are 8.90%/16.75% against the published 9.155%/17.479%,
+and the two probe files even used different torch builds (2.11.0+cu130 on H100,
+2.9.1+cu128 on H200). They establish which config won, not the published
+timings.
 These bytes pin the numbers; they do not pin the code or environment. Only the
 two Quack Hopper columns are covered — the MI355X column's six regime values,
 its 5279 GB/s roofline, the 13.0 us M=1 figure and the ~3.5 us Python/FFI floor
