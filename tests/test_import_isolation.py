@@ -1,5 +1,6 @@
 # Copyright (c) 2026, Tri Dao.
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -11,24 +12,35 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# Prepended to every child. ``-I`` drops PYTHONPATH, so the tree under test has
+# to be named explicitly -- which is the stronger arrangement anyway.
+_PREAMBLE = f"import sys\nsys.path.insert(0, {str(ROOT)!r})\n"
+
 
 def _run_python(
     source: str, *, cwd: Path = ROOT, check: bool = True
 ) -> subprocess.CompletedProcess[str]:
-    """Run ``source`` in a fresh interpreter.
+    """Run ``source`` in a fresh interpreter, with a fresh package state.
 
     ``check=False`` is for callers that treat the exit code as the result
     rather than as a precondition; they must inspect ``returncode``
     themselves. Every other caller keeps the default and gets the stdout and
     stderr of a failed child in the assertion message.
+
+    ``-I`` is what makes the child's *package* state fresh rather than merely
+    its interpreter, and it is not optional. @Reviewer measured the difference:
+    with a ``sitecustomize.py`` on the inherited ``PYTHONPATH`` containing
+    nothing but ``import quack``, the simulation below reported
+    ``XPASS(strict)`` against a completely unmodified ``quack/__init__.py`` --
+    a green "the boundary is fixed" signal with no fix anywhere. A new
+    interpreter is not a new package state. Since ``-I`` also ignores
+    ``PYTHONPATH``, ROOT goes onto ``sys.path`` from inside the child, which
+    additionally pins these tests to *this* tree rather than to whichever
+    ``quack`` the ambient environment resolves first.
     """
     env = os.environ.copy()
-    pythonpath = [str(ROOT)]
-    if env.get("PYTHONPATH"):
-        pythonpath.append(env["PYTHONPATH"])
-    env["PYTHONPATH"] = os.pathsep.join(pythonpath)
     result = subprocess.run(
-        [sys.executable, "-c", textwrap.dedent(source)],
+        [sys.executable, "-I", "-c", _PREAMBLE + textwrap.dedent(source)],
         cwd=cwd,
         env=env,
         capture_output=True,
@@ -196,11 +208,16 @@ class CutedslGateStillCouplesFlydsl(AssertionError):
         "dependency, so importing quack.rmsnorm_flydsl should survive a broken "
         "cutedsl chain. Today it does not: quack/__init__.py:6 runs the CuTe "
         "bootstrap unconditionally on CUDA. Written as a strict xfail per "
-        "@Reviewer, so that repairing the import boundary turns this GREEN "
-        "instead of red -- a plain green assertion on the broken behaviour "
-        "would make the fix look like a regression. raises= is narrowed to "
-        "CutedslGateStillCouplesFlydsl so that an unrelated failure cannot be "
-        "absorbed as this expected one."
+        "@Reviewer, so that repairing the import boundary produces "
+        "XPASS(strict) -- a red result whose meaning is FLIP THIS MARKER, "
+        "not a regression. (The earlier wording here said the repair turns "
+        "the test GREEN. The desired assertion does pass, but strict=True "
+        "deliberately makes the pytest outcome a failure until the marker "
+        "is removed; @Reviewer caught the reason contradicting the "
+        "docstring below it.) raises= is narrowed to "
+        "CutedslGateStillCouplesFlydsl, and the child now authenticates its "
+        "own branch, so neither an unrelated exception nor an unrelated "
+        "exit 3 can be absorbed as this expected one."
     ),
 )
 def test_simulated_cuda_flydsl_import_survives_a_broken_cutedsl_chain():
@@ -224,7 +241,7 @@ def test_simulated_cuda_flydsl_import_survives_a_broken_cutedsl_chain():
     "structurally untestable on this hardware" because ROCm takes the other
     branch. That was wrong in the same way as several things above it -- the
     branch is chosen by ``torch.version.hip``, which the sibling test at
-    :77 already overrides, and the failing cutedsl import is a meta_path
+    :150 already overrides, and the failing cutedsl import is a meta_path
     loader away. Untestable on this hardware and untested on this hardware are
     different claims, and I had asserted the stronger one.
 
@@ -238,85 +255,220 @@ def test_simulated_cuda_flydsl_import_survives_a_broken_cutedsl_chain():
     that the import FAILS would make the obvious repair -- decoupling the
     FlyDSL path from the cutedsl bootstrap -- show up as a red test, i.e. the
     fix would look like the regression. Under ``xfail(strict=True)`` the file
-    reads as "this SHOULD work", XFAILs today, and turns XPASS -> failure the
-    moment the boundary is fixed, which is the signal that the successor
-    landed rather than a wall in front of it.
+    reads as "this SHOULD work", XFAILs today, and turns into a failing
+    XPASS(strict) the moment the boundary is fixed -- red, but red meaning
+    "flip this marker", which is the signal that the successor landed rather
+    than a wall in front of it.
 
-    The ImportError branch is what currently runs, and it still checks the
-    message rather than the bare fact of raising, because an xfail that
-    triggers for the wrong reason is no better than a green one.
+    Three things this version does that its predecessor did not, each because
+    @Reviewer measured the gap rather than reading the reason text:
+
+    1. The child names its own branch and the parent checks that name. An exit
+       code crossing a process boundary authenticates nothing: he replaced the
+       child body with a bare ``SystemExit(3)``, which collided with the
+       reserved code and was converted straight into the expected exception --
+       ``1 xfailed``, pytest exit 0, for a reason this test does not describe.
+    2. The failure travels the real chain. ``alloc_reserved_mbarrier`` is
+       imported at exactly one place, ``quack/pipeline.py:13``, reached from
+       ``quack/rmsnorm.py:24``. The predecessor fabricated that error at
+       ``quack.dsl`` -- which imports ``cutlass.cute*`` and never
+       ``cutlass.pipeline``, so it never requests the missing name -- and
+       ``quack.dsl`` is imported first, so every run passed at a boundary the
+       real chain does not fail at.
+    3. Reach is recorded, not inferred. ``"quack.rmsnorm_flydsl" not in
+       sys.modules`` was never evidence that Python failed to reach the target;
+       the import machinery deletes a module whose body raised.
     """
     result = _run_python(
         """
         import importlib.abc
+        import importlib.machinery
         import importlib.util
+        import json
         import sys
+
+
+        # Preload precondition, checked before anything else can mask it. Under
+        # -I this should be impossible; asserting it anyway means a future
+        # change that drops -I fails loudly rather than reporting a fixed
+        # boundary that was never broken in the child.
+        assert "quack" not in sys.modules, "quack was preloaded; the child is not hermetic"
 
         import torch
 
 
         MESSAGE = "cannot import name 'alloc_reserved_mbarrier' from 'cutlass.pipeline'"
+        REACHED = []
 
 
-        class BrokenCutedslLoader(importlib.abc.Loader):
+        class WorkingDslLoader(importlib.abc.Loader):
+            \"\"\"``quack.dsl`` SUCCEEDS, because in the real tree it does.
+
+            The predecessor made this module raise the missing-symbol error
+            too, on the stated grounds that it "would fail on the same missing
+            cutlass". @Reviewer checked that against the tree and it is false:
+            ``quack/dsl/`` imports ``cutlass.cute*`` and never
+            ``cutlass.pipeline``, so it does not request the missing name. It
+            was also imported first, which means the predecessor's ImportError
+            always came from here -- the assertion passed on a boundary the
+            real chain does not fail at. Verified again while writing this: the
+            fabricated error was raised by ``quack.dsl`` on every run.
+
+            It is stubbed rather than left real only because this box has no
+            cutlass at all; what it stubs is a module that succeeds.
+            \"\"\"
+
             def create_module(self, spec):
                 return None
 
             def exec_module(self, module):
-                raise ImportError(MESSAGE)
+                REACHED.append("quack.dsl")
+                module.cute_op = lambda *a, **k: (lambda f: f)
+                module.__path__ = []
 
 
-        class BrokenCutedslFinder(importlib.abc.MetaPathFinder):
-            # quack.dsl too: on a real CUDA box it is imported first and would
-            # fail on the same missing cutlass, so intercepting only
-            # quack.rmsnorm would let the run die with a less specific error
-            # and the assertion below would pass for the wrong reason.
-            names = {"quack.dsl", "quack.rmsnorm"}
+        class RmsnormLoader(importlib.abc.Loader):
+            \"\"\"Replays ``quack/rmsnorm.py``'s own import order to the failing edge.
+
+            The real module reaches ``quack.pipeline`` at :24. Its earlier
+            lines pull in ``cuda.bindings.driver`` (:7) and ``cutlass.cute``
+            (:9-13), neither installed here, so those are what the stub stands
+            in for -- not the edge under test, which is exercised below.
+            \"\"\"
+
+            def create_module(self, spec):
+                return None
+
+            def exec_module(self, module):
+                REACHED.append("quack.rmsnorm")
+                import quack.pipeline  # noqa: F401
+
+
+        class MissingSymbolLoader(importlib.abc.Loader):
+            \"\"\"``quack/pipeline.py:13``, the one line this test is about.
+
+            That line is ``from cutlass.pipeline import agent_sync,
+            alloc_reserved_mbarrier``, and on cutlass 4.5.2 the second name is
+            absent. ``name=`` is set so the exception carries the same metadata
+            a real one would.
+            \"\"\"
+
+            def create_module(self, spec):
+                return None
+
+            def exec_module(self, module):
+                REACHED.append("quack.pipeline")
+                raise ImportError(MESSAGE, name="cutlass.pipeline")
+
+
+        class TargetRecordingLoader(importlib.abc.Loader):
+            \"\"\"Stands in for quack.rmsnorm_flydsl and records that it was reached.
+
+            Two things @Reviewer showed the previous version could not do.
+            ``"quack.rmsnorm_flydsl" not in sys.modules`` proves nothing about
+            reach -- the import machinery deletes a module whose body raised --
+            so reach is recorded here on entry instead. And supplying
+            ``rmsnorm`` from the stub decouples the success path from whether
+            this host happens to have the optional FlyDSL package installed;
+            the previous version's XPASS depended on it, which is why blocking
+            flydsl turned the repaired boundary into an ordinary rc=1.
+            \"\"\"
+
+            def create_module(self, spec):
+                return None
+
+            def exec_module(self, module):
+                REACHED.append("quack.rmsnorm_flydsl")
+                module.rmsnorm = lambda *a, **k: None
+
+
+        class Finder(importlib.abc.MetaPathFinder):
+            LOADERS = {
+                "quack.dsl": WorkingDslLoader,
+                "quack.rmsnorm": RmsnormLoader,
+                "quack.pipeline": MissingSymbolLoader,
+                "quack.rmsnorm_flydsl": TargetRecordingLoader,
+            }
 
             def find_spec(self, fullname, path=None, target=None):
-                if fullname in self.names:
-                    return importlib.util.spec_from_loader(fullname, BrokenCutedslLoader())
+                loader = self.LOADERS.get(fullname)
+                if loader is not None:
+                    return importlib.util.spec_from_loader(fullname, loader())
                 return None
 
 
         torch.version.hip = None
-        sys.meta_path.insert(0, BrokenCutedslFinder())
+        sys.meta_path.insert(0, Finder())
 
-        # The desired behaviour: FlyDSL does not import cutlass, so a broken
-        # cutedsl chain should be irrelevant to it. Today the package gate
-        # makes it fatal. Exit 3 is reserved for "failed, and failed for
-        # exactly the cutedsl reason" so the caller can tell that apart from
-        # an unrelated breakage, which exits 1 with a traceback.
+        outcome = {"branch": None, "reached": None, "message_ok": None}
         try:
             import quack.rmsnorm_flydsl
         except ImportError as exc:
-            assert MESSAGE in str(exc), f"wrong failure: {exc!r}"
-            assert "quack.rmsnorm_flydsl" not in sys.modules
+            outcome["branch"] = "cutedsl_gate_still_couples_flydsl"
+            outcome["message_ok"] = MESSAGE in str(exc)
+            outcome["reached"] = REACHED
+            print("SENTINEL " + json.dumps(outcome))
             raise SystemExit(3)
 
         # Callable, not merely present in sys.modules: a half-initialised
         # module object would satisfy the weaker check.
         assert callable(quack.rmsnorm_flydsl.rmsnorm)
+        outcome["branch"] = "flydsl_import_survived"
+        outcome["reached"] = REACHED
+        print("SENTINEL " + json.dumps(outcome))
         """,
         check=False,
     )
 
-    # A plain AssertionError, deliberately NOT the expected-xfail type: an
-    # unrelated breakage must surface as a real failure rather than be absorbed
-    # as the expected one. This is the assertion @Reviewer's mutation escapes
-    # through when raises= is absent.
+    # Every assertion below is a plain AssertionError, deliberately NOT the
+    # expected-xfail type: an unrelated breakage must surface as a real failure
+    # rather than be absorbed as the expected one.
+    #
+    # The exit code alone is not evidence of anything. @Reviewer's second
+    # mutation replaced the child's ImportError with a bare SystemExit(3),
+    # which collided with the reserved code and was converted straight into the
+    # expected exception -- 1 xfailed, pytest exit 0, for a reason the test does
+    # not describe. A cross-process exit status is not an authenticated source,
+    # so the branch identifies itself in the child's own words and the parent
+    # checks that instead.
     assert result.returncode in (0, 3), (
         "the simulation broke for a reason that is neither outcome it "
         f"distinguishes (rc={result.returncode}):\n" + result.stdout + result.stderr
     )
-    # Today: 3, raised as the expected type -> XFAIL. When the import boundary
-    # is fixed: 0, the test passes, and strict=True turns that pass into a
-    # failure telling you to flip it.
-    if result.returncode != 0:
+    sentinels = [ln for ln in result.stdout.splitlines() if ln.startswith("SENTINEL ")]
+    assert len(sentinels) == 1, (
+        "the child did not report exactly one outcome, so its exit code is "
+        f"unattributable:\n{result.stdout}{result.stderr}"
+    )
+    outcome = json.loads(sentinels[0][len("SENTINEL ") :])
+
+    if result.returncode == 3:
+        assert outcome["branch"] == "cutedsl_gate_still_couples_flydsl", (
+            f"exit 3 from an unexpected branch {outcome['branch']!r}"
+        )
+        assert outcome["message_ok"], (
+            "the import failed, but not with the missing-symbol error this "
+            f"test is about:\n{result.stdout}{result.stderr}"
+        )
+        assert outcome["reached"] == ["quack.dsl", "quack.rmsnorm", "quack.pipeline"], (
+            "the failure did not travel the real chain (quack.dsl succeeds, "
+            "then quack.rmsnorm:24 -> quack/pipeline.py:13): "
+            f"reached {outcome['reached']!r}"
+        )
         raise CutedslGateStillCouplesFlydsl(
             "import quack.rmsnorm_flydsl still dies inside the cutedsl "
             "bootstrap it does not depend on (quack/__init__.py:6)"
         )
+
+    # rc=0: the boundary is repaired. strict=True turns this pass into a
+    # failure telling you to flip the marker.
+    assert outcome["branch"] == "flydsl_import_survived", (
+        f"exit 0 from an unexpected branch {outcome['branch']!r}"
+    )
+    assert "quack.rmsnorm_flydsl" in outcome["reached"], (
+        "the import succeeded without ever reaching the target module: "
+        f"reached {outcome['reached']!r}"
+    )
 
 
 def test_pytest_plugin_collects_on_rocm_without_cutlass(tmp_path):

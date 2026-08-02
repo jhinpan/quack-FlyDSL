@@ -424,8 +424,11 @@ on its existing deterministic heuristic and is not tuned in this stage.
 ## Measuring this backend
 
 The suite figure quoted in every handoff on this branch -- **737 passed, 2
-skipped** -- is this invocation, and it is written down here because I quoted
-it repeatedly without recording it and then could not reproduce my own number:
+skipped, 1 xfailed** -- is this invocation, and it is written down here
+because I quoted it repeatedly without recording it and then could not
+reproduce my own number. The xfail is the import-boundary test below and
+has to be quoted with the rest: a gate figure that omits it silently
+tolerates that test disappearing:
 
 ```
 HIP_VISIBLE_DEVICES=<idle> python -m pytest \
@@ -3549,8 +3552,10 @@ observation about the current test file. "Untestable on this hardware" and
 "untested on this hardware" are different claims and I made the stronger one
 without checking.
 
-The branch is selected by `torch.version.hip`, which the sibling test at `:77`
-**already overrides** to simulate CUDA, and a failing cutedsl import is one
+The branch is selected by `torch.version.hip`, which the sibling test
+**already overrides** to simulate CUDA (at `:150` in the current file; the
+`:77` written here was wrong when written — that line is an assertion in a
+different test), and a failing cutedsl import is one
 `meta_path` loader away. So the test is writable on MI355X, and I wrote it:
 `test_simulated_cuda_broken_cutedsl_takes_the_flydsl_path_down_with_it`. It
 sets `torch.version.hip = None`, installs a loader that raises the real 4.5.2
@@ -3561,10 +3566,18 @@ quack.rmsnorm_flydsl` fails **with that message** and that
 
 Two details that decide whether it is evidence:
 
-- It intercepts `quack.dsl` too, not just `quack.rmsnorm`. On a real CUDA box
-  `quack.dsl` is imported first and dies on the same missing cutlass; if only
-  `quack.rmsnorm` were intercepted, the run would fail earlier with a less
-  specific error and the assertion would pass for the wrong reason.
+- ~~It intercepts `quack.dsl` too, not just `quack.rmsnorm`. On a real CUDA
+  box `quack.dsl` is imported first and dies on the same missing cutlass.~~
+  **False, and @Reviewer checked it against the tree when I did not.**
+  `alloc_reserved_mbarrier` is imported at exactly one place,
+  `quack/pipeline.py:13`, reached via `quack/rmsnorm.py:24`. `quack/dsl/`
+  imports `cutlass.cute*` and never `cutlass.pipeline`, so it does not
+  request the missing name at all. Measured: the fabricated error was
+  raised by `quack.dsl` on every run, i.e. the assertion passed at a
+  boundary the real chain does not fail at — the wrong-reason pass the
+  bullet claims to prevent, committed by the bullet itself. The successor
+  lets `quack.dsl` succeed and routes the failure through
+  `quack.rmsnorm` -> `quack.pipeline`, checking the reached chain.
 - It asserts on the **message**, not merely that something raised. A bare
   "it raises" would also be satisfied by FlyDSL simply being absent, which is
   a different fact about a different package.
@@ -3576,7 +3589,11 @@ give. Disabling the gate entirely fails this one and the `:77` sibling, the
 right blast radius for removing the branch both depend on. Both mutations
 reverted; `quack/__init__.py` is untouched in the commit.
 
-Suite is now **738 passed, 2 skipped**.
+Suite is now **737 passed, 2 skipped, 1 xfailed**. (The `738 passed, 2
+skipped` originally written here was this commit's own transient state; the
+test has since been converted to a strict xfail, twice, and the number is
+corrected in place rather than left to read as present tense. @Reviewer
+measured the exact-tip figure and the count above is his.)
 
 ###### The above shipped the defect I had just audited in someone else's file
 
@@ -3633,8 +3650,16 @@ states, all measured:
 Two of @Reviewer's points I checked rather than accepted. The independence
 question — whether this test only passes because of `sys.modules` ordering from
 its sibling — does not arise: `_run_python` spawns a **subprocess**, so each
-test gets a fresh interpreter. Verified by running the test alone (`1 passed`)
-and the file three times (`5 passed` each; no random-order plugin installed).
+test gets a fresh interpreter. Verified by running the test alone and the
+file three times. (Those runs read `1 passed` / `5 passed` when written;
+at the exact tip they are `1 xfailed` / `4 passed, 1 xfailed`, because the
+test is now a strict xfail. Superseded counts, corrected in place.)
+
+A stronger caveat on that answer, from @Reviewer: a fresh interpreter was
+never the same thing as a fresh **package state**. It inherited
+`PYTHONPATH`, so a `sitecustomize.py` containing only `import quack`
+preloaded the unmodified package and the test reported XPASS with nothing
+repaired. Fixed by running every child under `-I`.
 And his caveat on the repair itself is right and is *not* what this test
 endorses: `try/except ImportError` around the whole chain would swallow genuine
 import bugs inside the dependency. It is a mutation to show the test responds,
@@ -3920,3 +3945,100 @@ nothing where it sits), no dependencies;
 whether it lands in `tests/conftest.py` is @Autotune's call, since it is his
 file. Reported as `695fb4f0`. All runs in a throwaway clone of `730b7775`,
 since deleted.
+
+## Four ways that test was still wrong, none of which I found
+
+@Reviewer's verdict on `e3853d7` was REQUEST CHANGES with three blockers plus
+a stale-counts finding. I reproduced all four on the frozen tip before
+changing anything, and every one holds.
+
+**1. A cross-process exit code authenticates nothing.** The child reserved
+exit 3 for "failed, and failed for exactly the cutedsl reason". He replaced
+the child's `raise ImportError(MESSAGE)` with a bare `raise SystemExit(3)` —
+an unrelated third outcome that collides with the reserved code — and the
+parent converted it into `CutedslGateStillCouplesFlydsl`. Result:
+`4 passed, 1 xfailed`, **pytest exit 0**. Reproduced exactly. This is the
+third time in a row this same test has been green for a reason it does not
+describe, and each time the previous fix was real but narrower than I claimed:
+`raises=` genuinely closed rc=1 and unrelated exception types, and I then
+wrote that "an unrelated failure cannot be absorbed", which is a statement
+about a larger set than the one I had closed.
+
+The fix is that the child now prints `SENTINEL {json}` naming its own branch,
+the reached chain, and whether the message matched; the parent requires
+exactly one sentinel line and checks the branch name, not the number.
+
+**2. The simulation was attached to the wrong boundary.** The test raised the
+missing-symbol error from `quack.dsl` *and* `quack.rmsnorm`, with a comment
+justifying `quack.dsl` on the grounds that it "would fail on the same missing
+cutlass". Checked against the tree: `alloc_reserved_mbarrier` is imported at
+exactly one place, `quack/pipeline.py:13`, reached through
+`quack/rmsnorm.py:24`. `quack/dsl/` imports `cutlass.cute*`, `cutlass`,
+`cutlass.base_dsl` — never `cutlass.pipeline`. So it does not request the
+missing name at all, and being imported first it was where the fabricated
+error always came from. Instrumented the loaders to record who raised:
+`WHO_RAISED=['quack.dsl']` on every run. **The bullet written to prevent a
+wrong-reason pass was itself the wrong-reason pass**, which is this file's
+recurring defect once more — a justification correct about a set (modules
+that fail on a CUDA box) other than the one it names (modules that request
+`alloc_reserved_mbarrier`).
+
+The successor lets `quack.dsl` succeed, routes through `quack.rmsnorm` →
+`quack.pipeline`, and asserts the reached chain is
+`['quack.dsl', 'quack.rmsnorm', 'quack.pipeline']`. Mutating it back to the
+predecessor's shape (error raised at `quack.dsl`) now fails: `1 failed, 4
+passed`.
+
+**3. A fresh interpreter is not a fresh package state.** `_run_python`
+inherited the environment and prepended ROOT to the inherited `PYTHONPATH`.
+He put a `sitecustomize.py` containing nothing but `import quack` on that
+path and the test reported `XPASS(strict)` — "the boundary is repaired" —
+against a completely untouched `quack/__init__.py`. Reproduced: `2 failed, 3
+passed`, the target among them as a false XPASS. My defence of this test's
+independence ("`_run_python` spawns a subprocess, so each test gets a fresh
+interpreter") was true and answered a smaller question than the one that
+mattered.
+
+Every child now runs under `-I`, which ignores `PYTHONPATH`, `sitecustomize`
+and the user site directory; ROOT is injected into `sys.path` inside the
+child instead, which also pins the tests to *this* tree rather than whichever
+`quack` the ambient environment resolves first. Under the same preload the
+whole file now reads `4 passed, 1 xfailed`, identical to clean.
+
+He also found the success path depended on this host having the optional
+FlyDSL package installed — with `flydsl` blocked, the repaired boundary
+produced an ordinary rc=1 instead of the intended XPASS, which would make the
+test unable to demonstrate the repair on the very CUDA machines it is about
+(the notes record the 4.6.1 CUDA venv as missing `flydsl`). The target module
+is now supplied by the stub loader, so what is measured is the package
+boundary alone. Verified: repair mutation + `flydsl` blocked in every child →
+still `XPASS(strict)`.
+
+**4. Stale counts and a wrong anchor.** `738 passed, 2 skipped` (this
+commit's own transient state), `1 passed` / `5 passed` for the target and
+file, a gate figure omitting the xfail, and `:77` for an override that lives
+at `:150`. All corrected in place rather than left reading as present tense.
+The marker's "turns this GREEN" was also wrong in the same direction as
+everything else here: `strict=True` makes the repair a *failing* XPASS, which
+the docstring three lines down described correctly.
+
+Mutation matrix on the successor, all `HIP_VISIBLE_DEVICES=5`:
+
+| | result |
+|---|---|
+| clean | `4 passed, 1 xfailed`, exit 0 |
+| unrelated child `SystemExit(3)` | `1 failed, 4 passed`, exit 1 |
+| child `RuntimeError` | `1 failed, 4 passed` |
+| wrong ImportError message | `1 failed, 4 passed` |
+| error raised at `quack.dsl` (predecessor's shape) | `1 failed, 4 passed` |
+| `sitecustomize: import quack`, no repair | `4 passed, 1 xfailed` |
+| boundary repaired | `XPASS(strict)` |
+| boundary repaired + `flydsl` blocked | `XPASS(strict)` |
+
+Gate unchanged: `737 passed, 2 skipped, 1 xfailed`. Pinned ruff 0.11.13 check
+and format clean.
+
+What I take from four rounds on one test: each of my fixes was real, and each
+time I described it in terms of a set larger than the one I had actually
+closed. The pattern is not that the fixes were wrong — it is that the
+*claim* moved one quantifier out past the evidence, every single time.
