@@ -1945,38 +1945,45 @@ def test_the_singleton_layout_compiles_with_fullgraph(dynamic):
         _assert_close(got, _reference(tensor, weight, 1e-6))
 
 
-def test_the_autotuned_path_does_not_share_a_launcher_across_row_counts():
+def test_the_autotuned_path_does_not_share_a_launcher_across_row_counts(tmp_path, monkeypatch):
     """The forced-tuner singleton path, listed as missing coverage.
 
-    Written as a structural assertion on purpose. The obvious value test --
-    run a singleton through ``rmsnorm_autotuned``, then an ordinary tensor,
-    compare against a reference -- **cannot fail**, and I checked that before
-    writing this rather than after. With ``_unambiguous_layout`` neutralised,
-    eager and ``fullgraph=True`` compiled both return exact answers across
-    m = 1, 2, 3, 4, 8, 37, 128, a repeat singleton, and an offset singleton:
-    worst error 0.0 in every cell. A value test here would join the five
-    can't-fail checks this suite has already had to remove.
+    The obvious value test -- run a singleton through ``rmsnorm_autotuned``,
+    then an ordinary tensor, compare against a reference -- **cannot fail**,
+    and I checked that before writing this rather than after. With
+    ``_unambiguous_layout`` neutralised, eager and ``fullgraph=True`` compiled
+    both return exact answers across m = 1, 2, 3, 4, 8, 37, 128, a repeat
+    singleton, and an offset singleton: worst error 0.0 in every cell.
 
-    The reason it cannot fail is worth pinning down, because it is a property
-    of the tuner and could change. ``_launch_rmsnorm_fwd_autotuned`` does not
-    consult ``_FWD_CACHE`` at all -- measured, 0 entries after both calls --
-    so the shared-key defect that poisons the non-tuned forward has no path
-    here. The tuner keeps its own cache, and ``m`` is the first term of
-    ``_RMSNORM_AUTOTUNE_KEY``, so the two row counts cannot collide the way
-    the FWD entries do.
+    The first version of this test did not force tuning, which @Reviewer
+    caught. Without ``FLYDSL_AUTOTUNE=1`` and with a ``default`` supplied,
+    ``Autotuner.__call__`` runs the default config directly and never touches
+    ``tuner.cache``, so the version that called ``rmsnorm_autotuned`` twice and
+    inspected ``_FWD_CACHE`` was exercising the analytical-default path and
+    testing nothing about the tuner. It also asserted
+    ``_RMSNORM_AUTOTUNE_KEY[0] == "m"``, a list-position check that would fire
+    on a harmless reorder while saying the two calls "can now land on one
+    tuner entry" -- which moving ``m`` to position 2 would not cause.
 
-    So this test asserts the two structural facts the immunity rests on. If a
-    later change routes the tuner through ``_FWD_CACHE``, or drops ``m`` from
-    the tuner key, this fails immediately -- whereas the value test would keep
-    passing right up until it silently did not.
+    So this forces a real search and compares the keys the tuner actually
+    built. What makes the autotuned path immune is that those keys differ by
+    row count, and that ``_launch_rmsnorm_fwd_autotuned`` never consults
+    ``_FWD_CACHE`` -- the shared-key cache that poisons the non-tuned forward.
+    Both are asserted against measured state rather than against the shape of
+    a constant.
     """
-    from quack.flydsl.rmsnorm_autotune import _RMSNORM_AUTOTUNE_KEY
+    _clear_caches()
+    tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
+    monkeypatch.setattr(tuner, "_cache_file", tmp_path / "winner.json")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CONFIG_DIR", str(tmp_path / "artifacts"))
 
-    assert _RMSNORM_AUTOTUNE_KEY[0] == "m", (
-        "the tuner key no longer leads with the row count; the singleton and an "
-        "ordinary tensor can now land on one tuner entry, so the autotuned path "
-        "needs the same canonicalisation guard as the non-tuned one"
-    )
+    def bench_once(call, warmup, rep):
+        call()
+        torch.cuda.synchronize()
+        return 1.0
+
+    monkeypatch.setattr(tuner, "_do_bench", bench_once)
 
     torch.manual_seed(0)
     n = 64
@@ -1984,9 +1991,21 @@ def test_the_autotuned_path_does_not_share_a_launcher_across_row_counts():
     singleton = torch.randn((n, 1), device="cuda", dtype=torch.bfloat16).t()
     ordinary = torch.randn((8, n), device="cuda", dtype=torch.bfloat16)
 
-    rmsnorm_flydsl_impl._FWD_CACHE.clear()
     rmsnorm_autotuned(singleton, weight)
+    singleton_keys = set(tuner.cache)
+    assert singleton_keys, "premise: the forced search populated the tuner cache"
+
     rmsnorm_autotuned(ordinary, weight)
+    ordinary_keys = set(tuner.cache) - singleton_keys
+
+    assert ordinary_keys, (
+        "the ordinary call reused the singleton's tuner entry instead of building "
+        "its own; the autotuned path now needs the same canonicalisation guard as "
+        "the non-tuned one"
+    )
+    assert singleton_keys.isdisjoint(ordinary_keys), (
+        "the singleton and the ordinary call share a tuner key"
+    )
 
     assert len(rmsnorm_flydsl_impl._FWD_CACHE) == 0, (
         "the autotuned path now populates _FWD_CACHE, which has no row-count or "
@@ -2110,15 +2129,25 @@ def test_a_compiled_singleton_backward_does_not_poison_later_gradients():
 
         after singleton bwd: FWD keys = 1  BWD keys = 1   (num_programs = 1)
         after ordinary  bwd: FWD keys = 1  BWD keys = 2   (num_programs = 1, 8)
-        clear FWD only : dx equal = False
-        clear BOTH     : dx equal = False  maxdiff = 0.46875
+        retain FWD+BWD : dx 0.46875  dw 0.71875
+        clear FWD only : dx 0        dw 0
+        clear BWD only : dx 0.46875  dw 0.71875
+        clear BOTH     : dx 0        dw 0
 
     The BWD key ends with ``num_programs`` (``rmsnorm_flydsl.py:247-256``,
     ``min(next_power_of_two(m), num_cus)``), so the singleton (m=1) and the
     ordinary call (m=8) get 1 and 8 -- two distinct entries, never shared. The
     FWD cache has no such term: one key serves both row counts, dx depends on
-    the forward's rstd and output, and that is the whole path. Clearing FWD
-    alone still reproduces the failure, which is the discriminating result.
+    the forward's rstd and output, and that is the whole path.
+
+    The discriminating pair is ``clear FWD only`` against ``clear BWD only``.
+    Dropping the forward entry fixes the gradients; dropping the backward entry
+    changes nothing. An earlier version of this table had those two rows the
+    wrong way round -- @Reviewer caught it, and re-running the isolation gave
+    the numbers above. The conclusion was right and the evidence printed under
+    it was inverted, which is worse than a wrong conclusion honestly supported:
+    anyone checking the reasoning against the table would have found it
+    argued for the opposite of what it concluded.
     """
     torch.manual_seed(0)
     n = 64

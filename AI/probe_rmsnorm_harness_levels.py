@@ -39,7 +39,7 @@ import torch
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-import quack.rmsnorm_flydsl as flydsl_rmsnorm
+import quack.rmsnorm_flydsl as flydsl_rmsnorm  # noqa: E402  (must follow the sys.path insert)
 
 # The cutedsl backend imports `cuda.bindings.driver`, which does not exist on
 # ROCm, so on this box quack's levels cannot be timed at all -- the import
