@@ -1,0 +1,193 @@
+{
+  "what": "cost of each call level, both backends, so the harness's provider asymmetry can be attributed rather than assumed",
+  "device": "AMD Instinct MI355X",
+  "device_uuid": "66636163-3034-3537-3439-313935646234",
+  "HIP_VISIBLE_DEVICES": "6",
+  "torch": "2.9.1+rocm7.2.0.git7e1940d4",
+  "hip": "7.2.26015-fc0010cf6a",
+  "python": "3.10.12",
+  "host": "mia1-p02-g23",
+  "commit": "f21daca2ad14a2e2703e68241a0f7d4caecdddcf",
+  "worktree_dirty": true,
+  "source_sha256_16": {
+    "quack/rmsnorm.py": "1ed6a9bc19690319",
+    "benchmarks/benchmark_rmsnorm_flydsl.py": "cdba7c5931e554c8",
+    "quack/rmsnorm_flydsl.py": "91e177cce3807b72",
+    "AI/probe_rmsnorm_harness_levels.py": "fb843ffa8ac5b559"
+  },
+  "protocol": {
+    "dtype": "bfloat16",
+    "warmup_calls": 20,
+    "rounds": 7,
+    "reps_per_round": 50,
+    "statistic": "min over rounds of (mean over reps); all rounds retained",
+    "timer": "torch.cuda.Event, recorded around a rep loop",
+    "exclusivity": "single visible device; caller is responsible for it being idle. rocm-smi utilisation at start is recorded below."
+  },
+  "exclusivity_check": "\n\n============================ ROCm System Management Interface ============================\n=================================== % time GPU is busy ===================================\nGPU[0]\t\t: GPU use (%): 0\nGPU[0]\t\t: GFX Activity: 833376648\nGPU[1]\t\t: GPU use (%): 0\nGPU[1]\t\t: GFX Activity: 907668000\nGPU[2]\t\t: GPU use (%): 0\nGPU[2]\t\t: GFX Activity: 829455328\nGPU[3]\t\t: GPU use (%): 0\nGPU[3]\t\t: GFX Activity: 2225064945\nGPU[4]\t\t: GPU use (%): 0\nGPU[4]\t\t: GFX Activity: 897446437\nGPU[5]\t\t: GPU use (%): 0\nGPU[5]\t\t: GFX Activity: 871597254\nGPU[6]\t\t: GPU use (%): 0\nGPU[6]\t\t: GFX Activity: 849926141\nGPU[7]\t\t: GPU use (%): 0\nGPU[7]\t\t: GFX Activity: 864559247\n==========================================================================================\n================================== End of ROCm SMI Log ===================================\n",
+  "levels": {
+    "quack._rmsnorm_fwd": "custom op; all outputs preallocated by caller",
+    "quack.rmsnorm_fwd": "allocates out/rstd/residual_out, checks weight_offset, delegates. No reshape, no autograd.",
+    "quack.rmsnorm": "reshape to 2-D + RMSNormFunction.apply",
+    "flydsl._launch_rmsnorm_fwd": "launcher; outputs preallocated by caller",
+    "flydsl.rmsnorm": "operand guards + reshape + autograd"
+  },
+  "quack_backend_import_error": "ModuleNotFoundError: No module named 'cuda'",
+  "quack_levels_measured": false,
+  "harness_pairing": {
+    "_QuackProvider": "quack.rmsnorm_fwd",
+    "_FlyDSLProvider": "flydsl._launch_rmsnorm_fwd"
+  },
+  "measurements": {
+    "32768x4096": {
+      "flydsl._launch_rmsnorm_fwd": {
+        "us_min_of_rounds": 89.6309757232666,
+        "us_median_of_rounds": 89.8277759552002,
+        "us_max_of_rounds": 91.48457527160645,
+        "raw_rounds_us": [
+          91.48457527160645,
+          91.36460304260254,
+          90.31257629394531,
+          89.8277759552002,
+          89.66777801513672,
+          89.72138404846191,
+          89.6309757232666
+        ]
+      },
+      "flydsl.rmsnorm": {
+        "us_min_of_rounds": 89.93260383605957,
+        "us_median_of_rounds": 90.0733757019043,
+        "us_max_of_rounds": 90.3302001953125,
+        "raw_rounds_us": [
+          90.3302001953125,
+          89.9357795715332,
+          90.16457557678223,
+          89.93260383605957,
+          90.24457931518555,
+          90.0733757019043,
+          89.95896339416504
+        ]
+      }
+    },
+    "8192x4096": {
+      "flydsl._launch_rmsnorm_fwd": {
+        "us_min_of_rounds": 20.502519607543945,
+        "us_median_of_rounds": 20.727319717407227,
+        "us_max_of_rounds": 21.11933946609497,
+        "raw_rounds_us": [
+          21.11933946609497,
+          20.624139308929443,
+          20.676119327545166,
+          20.502519607543945,
+          20.778539180755615,
+          20.768940448760986,
+          20.727319717407227
+        ]
+      },
+      "flydsl.rmsnorm": {
+        "us_min_of_rounds": 29.410579204559326,
+        "us_median_of_rounds": 29.560179710388184,
+        "us_max_of_rounds": 30.632998943328857,
+        "raw_rounds_us": [
+          29.523379802703857,
+          29.666600227355957,
+          30.632998943328857,
+          29.560179710388184,
+          29.428999423980713,
+          29.702579975128174,
+          29.410579204559326
+        ]
+      }
+    },
+    "1024x1024": {
+      "flydsl._launch_rmsnorm_fwd": {
+        "us_min_of_rounds": 12.214479446411133,
+        "us_median_of_rounds": 12.727279663085938,
+        "us_max_of_rounds": 14.899300336837769,
+        "raw_rounds_us": [
+          14.097679853439331,
+          12.727279663085938,
+          14.899300336837769,
+          12.265679836273193,
+          12.385679483413696,
+          14.13290023803711,
+          12.214479446411133
+        ]
+      },
+      "flydsl.rmsnorm": {
+        "us_min_of_rounds": 29.371399879455566,
+        "us_median_of_rounds": 29.57777976989746,
+        "us_max_of_rounds": 30.42020082473755,
+        "raw_rounds_us": [
+          29.57777976989746,
+          29.641799926757812,
+          29.489779472351074,
+          30.192179679870605,
+          29.472200870513916,
+          30.42020082473755,
+          29.371399879455566
+        ]
+      }
+    },
+    "256x512": {
+      "flydsl._launch_rmsnorm_fwd": {
+        "us_min_of_rounds": 11.777679920196533,
+        "us_median_of_rounds": 12.112879753112793,
+        "us_max_of_rounds": 12.80087947845459,
+        "raw_rounds_us": [
+          11.777679920196533,
+          12.80087947845459,
+          12.000080347061157,
+          12.092080116271973,
+          12.112879753112793,
+          12.328100204467773,
+          12.676880359649658
+        ]
+      },
+      "flydsl.rmsnorm": {
+        "us_min_of_rounds": 29.268200397491455,
+        "us_median_of_rounds": 29.34420108795166,
+        "us_max_of_rounds": 30.20982027053833,
+        "raw_rounds_us": [
+          29.327399730682373,
+          29.544999599456787,
+          29.481000900268555,
+          30.20982027053833,
+          29.268200397491455,
+          29.34420108795166,
+          29.33540105819702
+        ]
+      }
+    },
+    "64x256": {
+      "flydsl._launch_rmsnorm_fwd": {
+        "us_min_of_rounds": 11.440860033035278,
+        "us_median_of_rounds": 12.225680351257324,
+        "us_max_of_rounds": 12.865699529647827,
+        "raw_rounds_us": [
+          11.440860033035278,
+          12.865699529647827,
+          12.18168020248413,
+          12.141679525375366,
+          12.225680351257324,
+          12.328879833221436,
+          12.75607943534851
+        ]
+      },
+      "flydsl.rmsnorm": {
+        "us_min_of_rounds": 29.056999683380127,
+        "us_median_of_rounds": 29.250600337982178,
+        "us_max_of_rounds": 30.302600860595703,
+        "raw_rounds_us": [
+          29.250600337982178,
+          29.286599159240723,
+          29.072179794311523,
+          29.056999683380127,
+          29.67780113220215,
+          29.239380359649658,
+          30.302600860595703
+        ]
+      }
+    }
+  }
+}

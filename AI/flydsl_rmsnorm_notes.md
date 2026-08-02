@@ -508,7 +508,13 @@ Three properties make this specific trap durable, all confirmed here:
 
 What makes it worth its own entry is that **the invalid measurement carried its
 own refutation and it still shipped**: 26.9 us over that shape's logical bytes
-is 19 TB/s, on a part whose measured copy roofline is ~5.3 TB/s. The check that
+is 19 TB/s, on a part whose measured copy rate is ~5.3 TB/s -- and whose
+highest measured probe of any pattern is 6.894 TB/s (write), so 19 TB/s is
+impossible against the most generous denominator available, not merely against
+copy. The word "roofline" was attached to copy here, which the section below
+("A same-device copy is not the bandwidth ceiling") spends its length denying;
+the sanity check survives the correction because 19 exceeds every probe, but
+the phrasing did not. The check that
 would have caught it -- divide by the roofline, ask whether the answer is
 physically possible -- costs one line and was not run for an entire commit. It
 was eventually caught only because an unrelated probe read 45 TB/s, which was
@@ -609,7 +615,16 @@ independent processes at `32768x1024`, no code change between them:
 So a canary matching to 0.40% sits *inside* the noise floor of the thing being
 compared, and a canary matching to 0.05% would be no better -- both are
 consistent with a real regression smaller than 2%, and neither distinguishes
-that from a clean run. @Reviewer's phrasing on 2026-08-02, refusing to take a
+that from a clean run.
+
+**This table bounds its own experiment and nothing else.** It is
+`32768x1024` on one MI355X (`a60c2956cd9dd4c5`, bdf `0000:75:00`), five
+processes, and the 1.99% is that configuration's observed span. Elsewhere in
+this file I reused the figure as a general noise floor for a different shape,
+provider and card; that use is retracted below ("The 1.9884% noise floor was
+borrowed"). The retraction is 300 lines away, so it is repeated here: a reader
+arriving at this table should not carry 1.99% out of it. The comparable span
+for the roofline rows is 0.18-2.18%, measured on those rows. @Reviewer's phrasing on 2026-08-02, refusing to take a
 canary as stability evidence, is the correct standard and this table is the
 number behind it. A canary is a smoke test: it catches the change that moved a
 cell by 20%, which is worth catching, and it is evidence of nothing finer.
@@ -880,17 +895,42 @@ and unsettles one.
 The copy proxy on this card measures 4.772 TB/s, so I had cited, as evidence of
 headroom, a number 25% *above* the ceiling I was comparing it to. @Reviewer
 caught the arithmetic. The mistake is the one this file already records twice:
-a copy is not the roofline. Against `two_read_one_write`, 6.139 TB/s on the same
-card in the same process, the forward runs at **97.9% of achievable** -- which
-is the real result, and it is a better one than the claim it replaces. The
-three probes are in the sidecar so the denominator can be re-derived rather
+a copy is not the roofline.
+
+Against `two_read_one_write`, 6.139 TB/s on the same card in the same process,
+the forward runs at **97.9% cold / 97.3% warm**. Both halves of that need
+saying, and my first correction gave only the first: 97.9% is specifically
+`6.010445 / 6.138881`, the *cold* pair, while the warm pair is 5.9745 and gives
+97.3%. Quoting the cold ratio unlabelled picked the flattering one of two
+numbers sitting side by side in the same file. @Reviewer caught that too, in
+the correction to the previous mistake.
+
+Two further qualifications on the denominator and the numerator:
+
+- `two_read_one_write` is the *traffic-matched proxy*, not an unqualified
+  ceiling. The highest probe on this card is write at 6.894 TB/s, and it is the
+  one the repository's own roofline code selects. Against write the forward is
+  87.2%. Calling 6.139 "achievable" without naming it is a choice of
+  denominator that happens to favour the result; it is the right denominator
+  for a normalization's access pattern, which is the argument for it, but the
+  argument has to be made rather than hidden in the word.
+- The sidecar's byte count, 536,870,912, is `x + out` and **omits the bf16
+  weight**. Exact traffic is 536,879,104. The weight is 8,192 bytes against
+  512 MiB, so it moves the derived TB/s by 0.0015% and no conclusion here
+  turns on it -- but a figure labelled as exact should be exact, and it is the
+  sidecar's job to let the number be re-derived rather than approximated.
+
+The three probes are in the sidecar so the denominator can be re-derived rather
 than taken on trust.
 
 **183.2 us does not reproduce and I cannot reconstruct it.** torch's fused path
 is 154.7-157.5 us here across `F.rms_norm` and `nn.RMSNorm`. The only nearby
 figure is the unfused fp32-weight path at 902 us, which is not it either. I
 sent 183.2 to @Reviewer; it is withdrawn, not re-explained. The speedup at this
-shape is 1.73x, not the 2.04x that number implied.
+shape is 1.73x cold (`154.7379 / 89.323`) and 1.72x warm
+(`154.9402 / 89.8598`), not the 2.04x that number implied. Stating it as a bare
+"1.73x" repeated the habit the paragraph above corrects -- the cold pair is the
+larger of two, and which pair produced a ratio belongs next to the ratio.
 
 **The 1.9884% noise floor was borrowed.** It was a different shape, provider and
 card's observed span, quoted as though it bounded this experiment. The spread
@@ -954,34 +994,63 @@ this file already flags as a measurement hazard elsewhere.
 
 ### The harness times the two backends at different levels, and it matters below ~8192 rows
 
+Generator `AI/probe_rmsnorm_harness_levels.py`, artifact
+`AI/data/rmsnorm_harness_levels.json`.
+
 `_QuackProvider`'s docstring says it calls "the same low-level `rmsnorm_fwd` /
 `rmsnorm_bwd` entry points ... which is also the level the FlyDSL provider
-measures." The second half is not true. `_FlyDSLProvider` calls
-`_launch_rmsnorm_fwd`, which is *below* `rmsnorm_fwd`: it skips the operand
-guards, the reshape, the autograd `Function`, and the custom-op dispatch.
-Quack's `rmsnorm_fwd` is a public entry point that includes its own equivalents.
+measures." The second half is not true: `_FlyDSLProvider` calls
+`_launch_rmsnorm_fwd`, which sits below it.
 
-What the difference is worth, bf16 forward, min-of-7-rounds-of-50 on MI355X:
+**What that difference consists of, read from the source.** An earlier version
+of this section said quack's `rmsnorm_fwd` contains the reshape, the autograd
+`Function` and the custom-op dispatch. It does not. `rmsnorm_fwd`
+(`quack/rmsnorm.py:473`) allocates `out`, and optionally `rstd` and
+`residual_out`, checks `weight_offset`, and delegates to the `_rmsnorm_fwd`
+custom op. The reshape to 2-D and `RMSNormFunction.apply` live only in the
+top-level `rmsnorm()`. The real asymmetry is narrower than I described it: a
+FlyDSL launcher whose caller preallocates every output, against a CuTe forward
+wrapper that allocates. @Reviewer caught the misattribution.
 
-| shape | `_launch` (what the harness times) | `rmsnorm()` | difference |
+**The measurement is one-sided on this box, and that is the more important
+correction.** `quack/rmsnorm.py` imports `cuda.bindings.driver`, which does not
+exist on ROCm, so the cutedsl levels cannot be timed on MI355X at all -- the
+import fails before any kernel runs. The old table's two columns were therefore
+*both FlyDSL*: `_launch_rmsnorm_fwd` against FlyDSL's own `rmsnorm()`. It
+measured FlyDSL's wrapper and I labelled the result quack's. Nothing in it
+supported a claim about the cross-backend comparison, which is what the section
+was written to make. The probe now records `quack_levels_measured: false` with
+the import error, so the gap is visible in the artifact rather than absent
+from it.
+
+What is measurable here, bf16 forward, min-of-7-rounds-of-50, all rounds
+retained in the JSON:
+
+| shape | `_launch` (what the harness times) | FlyDSL `rmsnorm()` | difference |
 | --- | --- | --- | --- |
-| 32768x4096 | 89.64 us | 90.15 us | +0.6% |
-| 8192x4096 | 20.46 us | 27.35 us | +33.7% |
-| 1024x1024 | 10.90 us | 27.29 us | +150.5% |
-| 256x512 | 10.84 us | 27.32 us | +152.0% |
-| 64x256 | 10.72 us | 27.68 us | +158.2% |
+| 32768x4096 | 89.63 us | 89.93 us | +0.30 us (+0.3%) |
+| 8192x4096 | 20.50 us | 29.41 us | +8.91 us (+43.4%) |
+| 1024x1024 | 12.21 us | 29.37 us | +17.16 us (+140.5%) |
+| 256x512 | 11.78 us | 29.27 us | +17.49 us (+148.5%) |
+| 64x256 | 11.44 us | 29.06 us | +17.62 us (+154.0%) |
 
-The wrapper cost is a near-constant ~16.5 us, so it disappears into a 90 us
-kernel and dominates a 10 us one. At the shapes where the published tables show
-FlyDSL furthest ahead, the comparison is FlyDSL's kernel against quack's
-kernel-plus-wrapper. This is the same ~26 us host-dispatch floor recorded
-above, seen from the harness's side rather than the user's.
+**The cost is not a constant, and the earlier "~16.5 us" was fitted to the
+three rows where it happened to hold.** The five differences are 0.30, 8.91,
+17.16, 17.49 and 17.62 us. They saturate near 17.6 us at small shapes and fall
+away as the kernel grows, which is the shape of a fixed host cost being
+progressively hidden behind device work, not of a constant addend. Round-to-
+round spread is 0.40-1.25 us, so the 8.91 us row is a real intermediate and not
+noise. Quoting a single number across the range asserted an overlap model I had
+not tested; the honest summary is "up to ~17.6 us, fully hidden by 32768x4096".
 
-It does not invalidate the large-shape results -- at 32768x4096 the level
-choice is worth 0.6%, well inside the run-to-run spread. It does mean any
-small-shape speedup quoted from this harness needs the level stated with it,
-and the honest fix is to time both providers at their public entry point, or
-both at their launcher, rather than one of each.
+The consequence for the published tables is unchanged in direction and
+unproven in size. At 32768x4096 the level choice is worth 0.3%, inside the
+spread, so the large-shape results stand. At small shapes the harness compares
+a preallocated FlyDSL launcher against an allocating quack wrapper, and **how
+much that is worth on the quack side has not been measured** -- it needs a CUDA
+box, and until then no small-shape speedup from this harness should be quoted
+without the level stated alongside it. The fix remains to time both providers
+at the same level.
 
 ## The register-budget mechanism, now measured rather than assumed
 
