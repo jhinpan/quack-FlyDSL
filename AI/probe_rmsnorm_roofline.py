@@ -53,8 +53,10 @@ sys.path.insert(0, str(REPO))
 # the two ruff versions in play disagree about that. E402 is in the default set
 # of 0.11.13 (pinned by CI and pre-commit) and not of 0.16.0 (what is on PATH
 # here), so 0.11.13 flags a bare import while 0.16.0 flags an inline
-# `# noqa: E402` as RUF100 "non-enabled". No inline directive satisfies both
-# versions; a function-scoped import needs none. It still runs at module load.
+# suppression for it as RUF100 "non-enabled". (Writing that directive out here
+# makes ruff parse this comment as one, so it is described rather than quoted.)
+# No inline directive satisfies both versions; a function-scoped import needs
+# none. It still runs at module load.
 def _flydsl_rmsnorm():
     import quack.rmsnorm_flydsl as m
 

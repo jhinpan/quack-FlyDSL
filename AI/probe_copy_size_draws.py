@@ -54,6 +54,7 @@ Collected in bulk by AI/collect_copy_axes.sh; assembled by AI/assemble_copy_axes
 import argparse
 import json
 import os
+import random
 import subprocess
 import sys
 from pathlib import Path
@@ -68,8 +69,10 @@ sys.path.insert(0, str(REPO))
 # two ruff versions in play disagree about that. E402 is in ruff 0.11.13's
 # default set (the version this repo pins in CI and pre-commit) and is NOT in
 # 0.16.0's, which is what happens to be on PATH in this container. So 0.11.13
-# flags a bare import here, while 0.16.0 flags an inline `# noqa: E402` for it
-# as RUF100 "non-enabled". No inline directive satisfies both versions; a
+# flags a bare import here, while 0.16.0 flags an inline suppression for it as
+# RUF100 "non-enabled". (Spelling that directive out in this comment makes ruff
+# parse the comment itself as one, which is its own small lesson.) No inline
+# directive satisfies both versions; a
 # function-scoped import needs no directive and satisfies both.
 def _roofline():
     from AI.probe_rmsnorm_roofline import (
@@ -127,6 +130,10 @@ SIZES_MIB = (512, 2048)
 PREFIX_PEAK_LIVE_512MIB = (0, 6, 14, 20)
 SWEEP_STEPS = tuple(range(22))
 SWEEP_REPS = 2
+# Fixed so the visiting order is a property of the artifact and not of the run.
+# The seed is arbitrary; what matters is that it is recorded and that nobody
+# picked it after seeing the result.
+SWEEP_SHUFFLE_SEED = 20260802
 
 
 def _run_prefix(peak):
@@ -239,42 +246,82 @@ def _sweep_steps(out_path):
     #
     # This is NOT the within-process A-B-A that was tried and shown invalid: each
     # row is still its own fresh process. The order of *processes* is what varies.
-    order = [(p, "up") for p in SWEEP_STEPS] + [(p, "down") for p in reversed(SWEEP_STEPS)]
+    #
+    # But ascending-then-descending is still not enough, and @Reviewer is right
+    # about why: all-up-then-all-down makes level an exact function of collection
+    # position, `level == min(seq, 43 - seq)`. A single transient centred on the
+    # turnaround therefore satisfies BOTH direction tests -- it raises the levels
+    # collected near the middle in each pass, which is exactly where the high
+    # levels are. Time reversal does not break a symmetric confound; it is
+    # symmetric itself.
+    #
+    # The interleaved pass breaks the functional relationship outright. Levels
+    # are visited in a fixed shuffle (seeded, so the artifact is reproducible),
+    # which leaves no monotone or symmetric function of seq that recovers level.
+    # If the staircase survives here it is not a function of when the row was
+    # collected, whatever shape that function has.
+    #
+    # The repeats are shuffled INTO that order rather than run back to back. Two
+    # adjacent processes at the same level would share whatever the box was doing
+    # in that half-second, so consecutive repeats make the level look more stable
+    # than it is -- the same adjacency problem as the turnaround, one scale down.
+    # The up/down passes keep their paired repeats: changing two things at once
+    # would make a difference between the passes unattributable.
+    order = [(p, "up", r) for p in SWEEP_STEPS for r in range(SWEEP_REPS)]
+    order += [(p, "down", r) for p in reversed(SWEEP_STEPS) for r in range(SWEEP_REPS)]
+    inter = [(p, "interleaved", r) for p in SWEEP_STEPS for r in range(SWEEP_REPS)]
+    random.Random(SWEEP_SHUFFLE_SEED).shuffle(inter)
+    order += inter
 
     rows = []
-    for seq, (peak, direction) in enumerate(order):
-        for rep in range(SWEEP_REPS):
-            proc = subprocess.run(
-                [_sys.executable, __file__, "-", "--peak-live-512mib-any", str(peak)],
-                capture_output=True,
-                text=True,
-                check=True,
-                env={**os.environ},
-            )
-            row = json.loads(proc.stdout)
-            rows.append(
-                {
-                    "n_prior_512mib_allocs": peak,
-                    "peak_live_512mib": peak,
-                    "direction": direction,
-                    "seq": seq,
-                    "rep": rep,
-                    "draws_2GiB": row["draws_2GiB"],
-                    "rounds_us_2GiB": row["rounds_us_2GiB"],
-                    "high_water_bytes": row.get("high_water_bytes"),
-                }
-            )
+    for seq, (peak, direction, rep) in enumerate(order):
+        proc = subprocess.run(
+            [_sys.executable, __file__, "-", "--peak-live-512mib-any", str(peak)],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ},
+        )
+        row = json.loads(proc.stdout)
+        rows.append(
+            {
+                "n_prior_512mib_allocs": peak,
+                "peak_live_512mib": peak,
+                "direction": direction,
+                "seq": seq,
+                "rep": rep,
+                "draws_2GiB": row["draws_2GiB"],
+                "rounds_us_2GiB": row["rounds_us_2GiB"],
+                "high_water_bytes": row.get("high_water_bytes"),
+            }
+        )
     out_path.write_text(
         json.dumps(
             {
                 "device_name": torch.cuda.get_device_name(0),
                 "hip_visible_devices": os.environ.get("HIP_VISIBLE_DEVICES"),
                 "what": (
-                    "2 GiB slot values by allocator peak high-water mark, one fresh "
-                    "process per level per repeat"
+                    "2 GiB slot values by number of prior 512 MiB allocations, one "
+                    "fresh process per level per repeat, in three passes"
                 ),
                 "one_process_per_row": True,
                 "reps_per_level": SWEEP_REPS,
+                "passes": {
+                    "up": "levels 0..21 in order, repeats adjacent",
+                    "down": "levels 21..0 in order, repeats adjacent",
+                    "interleaved": (
+                        "every (level, repeat) in one seeded shuffle, so no function of "
+                        "collection position recovers the level"
+                    ),
+                },
+                "shuffle_seed": SWEEP_SHUFFLE_SEED,
+                "why_interleaved": (
+                    "up-then-down leaves level an exact symmetric function of seq, "
+                    "level == min(seq, 43 - seq) at reps=1, so a transient centred on "
+                    "the turnaround satisfies both direction tests. @Reviewer, 5c2e0083. "
+                    "Time reversal cannot break a symmetric confound because it is "
+                    "itself symmetric."
+                ),
                 "why_not_within_process": (
                     "the measurement itself allocates and frees 2 GiB buffers, which "
                     "re-rolls placement; a within-process sweep measures that instead of "
