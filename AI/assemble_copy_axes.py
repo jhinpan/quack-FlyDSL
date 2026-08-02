@@ -973,17 +973,54 @@ def _interleaved_control(d, steps_for, lvl):
         "shuffle_seed": d.get("shuffle_seed"),
         "steps_interleaved": steps,
         "corr_level_vs_position": round(statistics.correlation(pos, lv), 4),
+        # Named for what min(p, n-1-p) actually computes. @Reviewer's point: that
+        # expression is CLOSENESS to the midpoint -- it peaks at the centre and
+        # falls to zero at both ends -- so calling it "distance from midpoint"
+        # inverted the direction. The old key is kept as an alias below rather
+        # than dropped, because it is cited in the notes and in two messages.
+        "corr_level_vs_closeness_to_midpoint": round(statistics.correlation(mid, lv), 4),
         "corr_level_vs_distance_from_midpoint": round(statistics.correlation(mid, lv), 4),
+        "corr_level_vs_distance_from_midpoint_is_a_misnomer_alias": (
+            "identical value to corr_level_vs_closeness_to_midpoint. min(p, n-1-p) is "
+            "closeness, not distance; the sign of any interpretation that leans on the "
+            "direction is therefore reversed. Kept only so existing citations resolve."
+        ),
         "max_consecutive_same_level": max(len(list(g)) for _, g in itertools.groupby(lv)),
         "what_this_establishes": (
             "level is not recoverable from collection position in this pass, under "
-            "either a monotone or a midpoint-symmetric reading, so a step found here "
-            "is not a function of when its row was collected. This is the control the "
+            "either a monotone or a midpoint-symmetric reading. This is the control the "
             "up/down pass could not provide."
+        ),
+        "the_so_clause_that_used_to_follow_this_is_withdrawn": (
+            "this field used to continue '...so a step found here is not a function of "
+            "when its row was collected.' That does not follow. The clause before it is "
+            "about the ASSIGNMENT -- whether level can be predicted from position -- and "
+            "the clause after it is about the OUTCOME, whether the rate drifts with "
+            "position. Those are different variables, and a diagnostic on the design "
+            "was being read as a diagnostic on the result. @Autotune supplied the "
+            "counterexample in message 8f43b362: on this same interleaved pass the "
+            "outcome residual carries a substantial positive rank correlation with "
+            "collection position on a median-of-slots basis, while "
+            "corr_level_vs_position stays near zero. Both true at once, because they "
+            "measure different things."
+        ),
+        "and_the_outcome_drift_is_not_settled_either_way": (
+            "on the interleaved pass the residual-vs-position association is not robust "
+            "to how the five slot rates are collapsed to one number per process: the "
+            "median and max-coordinate bases give opposite signs on the same rows with "
+            "the same residualization, and no basis reaches p<.05. Figures are in "
+            "message 8f43b362 and are deliberately NOT restated here: they were computed "
+            "elsewhere, this assembler does not compute them, and prose decimals with no "
+            "computed field behind them are the exact defect this artifact documents. "
+            "Neither 'there is drift' nor 'there is no drift' is licensed. Any "
+            "correlation published alongside this field must name its aggregation basis."
         ),
         "what_it_still_does_not_establish": (
             "why the level matters. The mechanism behind a step is not addressed by any "
-            "ordering control."
+            "ordering control. Nor does randomizing order make drift independent of "
+            "level in fact -- it does so in the ASSIGNMENT DISTRIBUTION, and a realized "
+            "shuffle can still align with drift. corr_level_vs_position is a diagnostic "
+            "on the draw that happened, not the distributional property."
         ),
     }
 
