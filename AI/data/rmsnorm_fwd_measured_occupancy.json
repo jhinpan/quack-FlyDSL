@@ -9,7 +9,7 @@
   "hip": "7.2.26015-fc0010cf6a",
   "python": "3.10.12",
   "host": "mia1-p02-g23",
-  "commit": "c5d879bc0f6e933eb2e2129ad16953953aec7c98",
+  "commit": "e5efbe1ef42228f05950043c34389250b086013b",
   "worktree_dirty": true,
   "rocprofv3_version": {
     "version": "1.1.0",
@@ -20,7 +20,7 @@
   "source_sha256_16": {
     "quack/rmsnorm_flydsl.py": "0c44997dc710d8e5",
     "quack/flydsl/rmsnorm_config.py": "0f0d3adb593bc518",
-    "AI/probe_rmsnorm_measured_occupancy.py": "4f8f468735240b98"
+    "AI/probe_rmsnorm_measured_occupancy.py": "0508f01e8b7bf9bf"
   },
   "counter": "MeanOccupancyPerActiveCU",
   "rocprofv3_invocation": "rocprofv3 --pmc MeanOccupancyPerActiveCU -d <dir> -o <tag> --output-format csv -- python AI/probe_rmsnorm_measured_occupancy.py --inner <m> <n,n,...>. The --output-format csv is load-bearing: the default output is a .db with rocpd_kernel_dispatch and no counter table.",
@@ -143,6 +143,41 @@
     }
   ],
   "vgpr_relation_audit_note": "Ten widths with artifact count, granule-8 allocation, rocprof count and the prediction between them. The fit/held-out labels are vestigial: they were added when the relation was believed to be an empirical law, and a held-out set cannot test an identity -- see vgpr_relation_resolution. They are kept only because earlier commits and notes refer to them. What these rows DO show is the collision -- artifact 226 and 230 both return rocprof 116 -- which is asserted by the probe, and which is what rules out a unit conversion. Trajectory of this field, since it is the point: it first claimed a units explanation, then a held-out-prediction confirmation of it, then that a rival hypothesis was better supported. All three were unnecessary. One line of algebra was available throughout.",
+  "agreement_with_bound": {
+    "what": "worst |measured/bound - 1| in each group, so the notes can cite a field instead of a transcribed number",
+    "groups": {
+      "hardware_cap_rows": {
+        "worst_deviation_pct": 22.45,
+        "at_n": 8192,
+        "at_m": 16384,
+        "measured_over_bound": 0.7755
+      },
+      "register_bound_m16384": {
+        "worst_deviation_pct": 20.43,
+        "at_n": 16384,
+        "at_m": 16384,
+        "measured_over_bound": 0.7957
+      },
+      "register_bound_m4096": {
+        "worst_deviation_pct": 8.08,
+        "at_n": 32768,
+        "at_m": 4096,
+        "measured_over_bound": 0.9192
+      },
+      "cliff_rows_bound_1": {
+        "worst_deviation_pct": 0.04,
+        "at_n": [
+          57344,
+          65536
+        ],
+        "at_m": 4096,
+        "measured_over_bound": [
+          1.0004,
+          1.0003
+        ]
+      }
+    }
+  },
   "discriminating_sweep": [
     {
       "n": 4096,
@@ -161,13 +196,13 @@
       "grid_supply_waves_per_simd": 64.0,
       "register_bound_is_binding": false,
       "limiting_constraint": "hardware_cap",
-      "measured_waves_per_simd": 7.2895,
-      "measured_over_bound": 0.9112,
+      "measured_waves_per_simd": 7.2977,
+      "measured_over_bound": 0.9122,
       "dispatches": 3,
       "counter_samples": [
-        7.31697,
-        7.289514,
-        7.288281
+        7.323348,
+        7.297735,
+        7.279308
       ],
       "dispatch_ids": [
         3,
@@ -194,13 +229,13 @@
       "grid_supply_waves_per_simd": 64.0,
       "register_bound_is_binding": false,
       "limiting_constraint": "hardware_cap",
-      "measured_waves_per_simd": 6.273,
-      "measured_over_bound": 0.7841,
+      "measured_waves_per_simd": 6.2044,
+      "measured_over_bound": 0.7755,
       "dispatches": 3,
       "counter_samples": [
-        5.317926,
-        6.272964,
-        6.28451
+        5.51444,
+        6.278826,
+        6.204372
       ],
       "dispatch_ids": [
         8,
@@ -227,13 +262,13 @@
       "grid_supply_waves_per_simd": 64.0,
       "register_bound_is_binding": true,
       "limiting_constraint": "registers",
-      "measured_waves_per_simd": 3.9834,
-      "measured_over_bound": 0.7967,
+      "measured_waves_per_simd": 3.9784,
+      "measured_over_bound": 0.7957,
       "dispatches": 3,
       "counter_samples": [
-        3.725553,
-        4.004555,
-        3.983398
+        3.706081,
+        3.992939,
+        3.97841
       ],
       "dispatch_ids": [
         13,
@@ -260,13 +295,13 @@
       "grid_supply_waves_per_simd": 64.0,
       "register_bound_is_binding": true,
       "limiting_constraint": "registers",
-      "measured_waves_per_simd": 2.6313,
-      "measured_over_bound": 0.8771,
+      "measured_waves_per_simd": 2.6358,
+      "measured_over_bound": 0.8786,
       "dispatches": 3,
       "counter_samples": [
-        2.607632,
-        2.63125,
-        2.690415
+        2.633183,
+        2.63654,
+        2.635759
       ],
       "dispatch_ids": [
         18,
@@ -293,13 +328,13 @@
       "grid_supply_waves_per_simd": 64.0,
       "register_bound_is_binding": true,
       "limiting_constraint": "registers",
-      "measured_waves_per_simd": 1.9715,
-      "measured_over_bound": 0.9857,
+      "measured_waves_per_simd": 1.9693,
+      "measured_over_bound": 0.9847,
       "dispatches": 3,
       "counter_samples": [
-        1.970935,
-        1.973822,
-        1.971457
+        1.969334,
+        1.972553,
+        1.967331
       ],
       "dispatch_ids": [
         23,
@@ -328,13 +363,13 @@
       "grid_supply_waves_per_simd": 16.0,
       "register_bound_is_binding": true,
       "limiting_constraint": "registers",
-      "measured_waves_per_simd": 2.7827,
-      "measured_over_bound": 0.9276,
+      "measured_waves_per_simd": 2.7575,
+      "measured_over_bound": 0.9192,
       "dispatches": 3,
       "counter_samples": [
-        2.78034,
-        2.782698,
-        2.814933
+        2.753946,
+        2.770989,
+        2.757529
       ],
       "dispatch_ids": [
         3,
@@ -361,13 +396,13 @@
       "grid_supply_waves_per_simd": 16.0,
       "register_bound_is_binding": true,
       "limiting_constraint": "registers",
-      "measured_waves_per_simd": 1.9597,
-      "measured_over_bound": 0.9798,
+      "measured_waves_per_simd": 1.9585,
+      "measured_over_bound": 0.9792,
       "dispatches": 3,
       "counter_samples": [
-        1.914371,
-        1.959687,
-        1.969369
+        1.918473,
+        1.961591,
+        1.958487
       ],
       "dispatch_ids": [
         8,
@@ -394,13 +429,13 @@
       "grid_supply_waves_per_simd": 16.0,
       "register_bound_is_binding": true,
       "limiting_constraint": "registers",
-      "measured_waves_per_simd": 1.9586,
-      "measured_over_bound": 0.9793,
+      "measured_waves_per_simd": 1.9577,
+      "measured_over_bound": 0.9789,
       "dispatches": 3,
       "counter_samples": [
-        1.933715,
-        1.958595,
-        1.959811
+        1.927667,
+        1.957743,
+        1.96187
       ],
       "dispatch_ids": [
         13,
@@ -432,7 +467,7 @@
       "dispatches": 3,
       "counter_samples": [
         1.00037,
-        1.000377,
+        1.000374,
         1.000378
       ],
       "dispatch_ids": [
@@ -464,9 +499,9 @@
       "measured_over_bound": 1.0003,
       "dispatches": 3,
       "counter_samples": [
-        1.000317,
-        1.000335,
-        1.000335
+        1.000319,
+        1.000334,
+        1.000334
       ],
       "dispatch_ids": [
         23,

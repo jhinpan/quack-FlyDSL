@@ -1451,27 +1451,39 @@ bandwidth drop, and the two cliff rows sit at 1.0004 and 1.0003 against a bound
 of 1 in every run.
 
 **How well measured tracks the bound elsewhere I stated too well, twice.** I
-wrote "within 7% everywhere and within 2% from 40960 up". Against the rows: 7%
-holds only for the boundary sweep (worst 7.25% at N=32768) and the
-discriminating sweep reaches **23.9%** at N=8192; and "within 2% from 40960 up"
-is false at N=49152, which reads 2.45%. @Reviewer checked the prose against its
-own table and found both. What the rows support:
+wrote "within 7% everywhere and within 2% from 40960 up". @Reviewer checked the
+prose against its own table and found both false: the discriminating sweep is
+far outside 7%, and 49152 is outside 2%. What the rows support is in
+`agreement_with_bound.groups` in the sidecar — worst deviation per group, with
+the row it came from:
 
-| where | agreement with bound |
+| where | worst \|measured/bound − 1\| |
 |---|---|
-| the two cliff rows (57344, 65536) | 0.04% — the claim's own rows |
-| register-bound rows at m=4096 | within 7.3% |
-| register-bound rows at m=16384 | within 20.3% |
-| cap-bound rows (4096, 8192) | within 21.6% |
+| the two cliff rows (57344, 65536) | **0.04%** — the claim's own rows |
+| register-bound rows at m=4096 | 8.08% (N=32768) |
+| register-bound rows at m=16384 | 20.43% (N=16384) |
+| cap-bound rows (4096, 8192) | 22.45% (N=8192) |
 
-(These are the worst rows in each group, and they move by a point or two
-between runs — the underlying figures are in `measured_over_bound` per row.)
+**That table is transcribed from a field, and the reason it is a field is that
+the paragraph above it was wrong for the same reason it was correcting.** When
+@Reviewer caught the original over-statement I replaced it with hand-copied
+figures — 23.9% and 2.45% in the prose, 21.6% and 7.3% in the table beneath it.
+Two different worst-case numbers for the same rows, in adjacent paragraphs of
+one file, because both were typed rather than read. Re-running the probe just
+now moved them again (8.08% and 22.45%), which is exactly the drift that made
+them disagree in the first place. So the correction to a transcription fault
+was itself a transcription fault, and it took a third pass to stop patching the
+number and fix the mechanism: the groups are now computed in
+`_agreement_summary()` and emitted, so a stale figure here is checkable against
+the sidecar instead of aging silently. Same fault @Reviewer found in the three
+bandwidth constants, and I did not generalise it when I fixed those.
 
 The pattern is the one the spread table shows: agreement is tight where the
 constraint binds hard and loose where it does not, since measured occupancy is
 an average over active CUs and over the kernel's life. That is a defensible
 reading. "Within 7% everywhere" was not — it was a summary statistic quoted
-from the half of the data that supported it.
+from the half of the data that supported it. Note the cliff rows are the one
+group that does *not* drift between runs: 0.04% on all six.
 
 The step is a register-file threshold, not a width effect: `vgpr_alloc` crosses
 256 of the 512-entry budget there, so `floor(512/232)=2` becomes

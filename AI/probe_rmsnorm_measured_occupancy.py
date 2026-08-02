@@ -521,6 +521,52 @@ def _vgpr_relation_audit():
     return out
 
 
+def _agreement_summary(discriminating, boundary):
+    """Worst |measured/bound - 1| per group, computed rather than transcribed.
+
+    The prose in the notes quoted these by hand and drifted: a paragraph
+    correcting two over-stated agreement figures was itself quoting 23.9% and
+    2.45% from a superseded run while the table directly beneath it, and the
+    shipped rows, said 21.6% and 2.07%. That is the same transcription fault
+    @Reviewer found in the bandwidth constants -- a hand-copied number cannot
+    be checked against anything, and it silently ages every time the probe is
+    re-run. Groups are by limiting constraint and by m, because that is the
+    split the reading actually depends on: agreement is tight where the
+    constraint binds hard and loose where it does not.
+    """
+    groups = {}
+    for tag, rows in (("m16384", discriminating), ("m4096", boundary)):
+        for r in rows:
+            if r["limiting_constraint"] == "registers":
+                key = f"register_bound_{tag}"
+            else:
+                key = f"{r['limiting_constraint']}_rows"
+            dev = abs(r["measured_over_bound"] - 1.0) * 100.0
+            prev = groups.get(key)
+            if prev is None or dev > prev["worst_deviation_pct"]:
+                groups[key] = {
+                    "worst_deviation_pct": round(dev, 2),
+                    "at_n": r["n"],
+                    "at_m": r["m"],
+                    "measured_over_bound": r["measured_over_bound"],
+                }
+    cliff = [r for r in boundary if r["occupancy_upper_bound_waves_per_simd"] == 1]
+    if cliff:
+        groups["cliff_rows_bound_1"] = {
+            "worst_deviation_pct": round(
+                max(abs(r["measured_over_bound"] - 1.0) * 100.0 for r in cliff), 2
+            ),
+            "at_n": [r["n"] for r in cliff],
+            "at_m": BOUNDARY_M,
+            "measured_over_bound": [r["measured_over_bound"] for r in cliff],
+        }
+    return {
+        "what": "worst |measured/bound - 1| in each group, so the notes can cite a field "
+        "instead of a transcribed number",
+        "groups": groups,
+    }
+
+
 def _sha(path):
     return hashlib.sha256((REPO / path).read_bytes()).hexdigest()[:16]
 
@@ -583,6 +629,8 @@ def main():
     boundary = _sweep(BOUNDARY_M, BOUNDARY_NS, "boundary", hw_cap, num_cus)
     print(f"vgpr relation audit, m={VGPR_RELATION_M} ...", flush=True)
     vgpr_relation = _vgpr_relation_audit()
+
+    agreement = _agreement_summary(discriminating, boundary)
 
     payload = {
         "what": "measured occupancy (rocprofv3 MeanOccupancyPerActiveCU) against the "
@@ -724,6 +772,7 @@ def main():
             "then that a rival hypothesis was better supported. All three were "
             "unnecessary. One line of algebra was available throughout."
         ),
+        "agreement_with_bound": agreement,
         "discriminating_sweep": discriminating,
         "boundary_sweep": boundary,
     }
