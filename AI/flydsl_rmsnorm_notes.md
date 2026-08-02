@@ -1443,9 +1443,14 @@ unexplained — `count=13` was chosen because it is the first staircase step, an
 nothing predicted this.
 
 **@Reviewer also found this separation is *stronger* than I stated**: all 28
-`step` slot-0 rounds are faster than every round outside that cell. I had
-reported the margin against the best per-slot *rate*; the round-level statement
-is the one his `23a6f662` test actually asks for, and it is cleaner.
+`step` slot-0 rounds (801.84–813.47 µs) are faster than every one of the 700
+rounds outside that cell (min 849.00 µs). I had reported the margin against the
+best per-slot *rate*; the round-level statement is the one his `23a6f662` test
+actually asks for, and it is cleaner.
+
+(`c4bbc6b`'s commit message says *812 rounds*. That is the count outside step
+slot 0, not outside the step cell — 700 is right. A commit message cannot be
+amended once pushed, so the correction lives here.)
 
 ###### A closed form is not self-checking
 
