@@ -835,19 +835,27 @@ happens to do.
 The right calibration was already in the tree, unused: each (prefix, ordinal)
 cell was collected in **four separate processes**, so the whole seven-round
 estimator ran four times at the same relative placement. Repeat it and watch the
-min move:
+min move — as an observed range, which assumes nothing:
 
-| size | median RSD of the min | 2sd | vs 0.2047% band | resolvable by one draw? |
-| --- | --- | --- | --- | --- |
-| 512 MiB | 0.098% | 0.197% | 1.0× | **yes** |
-| 2 GiB | 0.230% | 0.459% | 2.2× | no |
+| size | Q1 / median / Q3, in band widths | min–max | cells repeating to within the band |
+| --- | --- | --- | --- |
+| 512 MiB | 0.62× / 1.01× / 2.14× | 0.038–3.76% | **10 of 20** |
+| 2 GiB | 1.74× / 2.36× / 3.13× | 0.109–0.964% | 1 of 20 |
 
-**At 512 MiB the verdict reverses.** The estimator does repeat to about the band
-width, so resolution is not an obstacle there at all — the clustered slot
-spacing is the only reason zero-in-band is uninformative. At 2 GiB the original
-verdict survives, but at 2.2× rather than 5.0×, and it survives for a reason I
-had not measured. Right answer at one size, wrong answer at the other, from a
-quantity that was never the one in question.
+**At 2 GiB the original verdict survives** — the quartiles sit entirely above the
+band, and one cell in twenty repeats to within it — but at 2.4× rather than 5.0×,
+and for a reason I had not measured. **At 512 MiB there is no verdict to give.**
+The interquartile range crosses the band in both directions and the cells span a
+hundredfold, 0.038% to 3.76%. "Resolves" and "does not resolve" are both false of
+that size as a whole, so the artifact publishes the per-cell count and no flag.
+
+I got there via a second wrong answer. My first correction reported 2sd of the
+per-cell RSD, which flipped 512 MiB to a clean "resolvable: yes" — a parametric
+half-width on n=4, and worse, a median over 20 heterogeneous cells thresholded
+into one boolean. @Autotune reached the same correction independently from the
+quartiles and withdrew their own "marginally resolves" for the same reason.
+**The flag was the defect, not the number behind it**: any single verdict for
+512 MiB would have been false, and the shape of the summary is what forced one.
 
 The pooled-range argument is unaffected — 11.93% against a 0.205% band still
 holds, and the floor is well below the pooled range, which is what makes the
@@ -857,7 +865,11 @@ The general shape, again: I reached for the noise measure that was newly
 available rather than the one the claim needed. Retaining the rounds was the fix
 for a real defect, and the first thing I did with the new data was use it for a
 question it does not answer. **A measurement that arrives as the answer to one
-objection is not thereby the answer to the next one.**
+objection is not thereby the answer to the next one.** And then, correcting it,
+I published a summary statistic whose *shape* — one median, one threshold, one
+boolean — asserted homogeneity the cells do not have. The same defect twice in a
+row, one level apart: first a number that passes for a reason other than the one
+it documents, then a *field shape* that does.
 
 Worth noting what hid it. The previous fix here stored the rates **unrounded**,
 which was correct and necessary — the band question needed those digits. It also

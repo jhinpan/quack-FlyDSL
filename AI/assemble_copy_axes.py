@@ -408,9 +408,16 @@ def _estimator_repeatability(runs, size, band_w):
 
     The measurable substitute is already here: each (prefix, ordinal) cell was
     collected in four separate processes, so the same estimator ran four times at
-    the same relative placement. The RSD of those four minima is estimator
-    uncertainty in the sense the band test needs. Reported as 2*sd against the
-    band width, since a band is an interval and one sd is a half-width.
+    the same relative placement.
+
+    Reported as the observed RANGE of those four minima, which is distribution-
+    free: it says what these four processes did and assumes nothing. An earlier
+    version reported 2*sd of the RSD instead. That is a parametric half-width on
+    n=4, and worse, it collapsed 20 heterogeneous cells to one median and then
+    thresholded it -- which at 512 MiB produced a clean "resolvable: yes" from
+    cells whose ranges run 0.038% to 3.76%, a hundredfold spread. @Autotune
+    reached the same correction independently from the quartiles. The per-cell
+    count is what carries the claim now; a single verdict flag does not.
     """
     cells = defaultdict(list)
     for prefix, rs in runs.items():
@@ -419,27 +426,49 @@ def _estimator_repeatability(runs, size, band_w):
                 r["identical_buffers_by_size"][size]["TBps_per_identical_buffer"]
             ):
                 cells[(prefix, ordinal)].append(v)
-    rsds = [statistics.stdev(v) / statistics.mean(v) * 100.0 for v in cells.values() if len(v) > 1]
-    if not rsds:
+    reps = {k: v for k, v in cells.items() if len(v) > 1}
+    if not reps:
         return {
             "n_cells_with_repeats": 0,
             "note": "no cell has repeated batches; estimator uncertainty is not measurable here",
         }
-    med = statistics.median(rsds)
-    two_sd = 2 * med
+    ranges = sorted((max(v) / min(v) - 1) * 100.0 for v in reps.values())
+    q = statistics.quantiles(ranges, n=4) if len(ranges) >= 4 else [ranges[0]] * 3
+    inside = sum(1 for r in ranges if r < band_w)
     return {
         "estimator": "min of seven timing rounds, as published",
-        "n_cells_with_repeats": len(rsds),
-        "replicates_per_cell": sorted({len(v) for v in cells.values() if len(v) > 1}),
-        "median_rsd_pct": round(med, 3),
-        "max_rsd_pct": round(max(rsds), 3),
-        "two_sd_pct": round(two_sd, 3),
+        "statistic": "observed range across repeats of the same cell, distribution-free",
+        "n_cells_with_repeats": len(ranges),
+        "replicates_per_cell": sorted({len(v) for v in reps.values()}),
+        "range_pct_q1_median_q3": [round(x, 4) for x in q],
+        "range_in_band_widths_q1_median_q3": [round(x / band_w, 2) for x in q],
+        "range_pct_min_max": [round(ranges[0], 4), round(ranges[-1], 4)],
         "band_width_pct": round(band_w, 4),
-        "ratio_two_sd_to_band": round(two_sd / band_w, 1),
-        "band_resolvable_by_one_draw": bool(two_sd < band_w),
+        "cells_whose_range_fits_inside_band": inside,
+        "verdict": (
+            f"{inside} of {len(ranges)} cells repeat to within the band. "
+            + (
+                "The cells are heterogeneous -- the interquartile range crosses the band "
+                "in both directions -- so neither 'resolves' nor 'does not resolve' is "
+                "true of this size as a whole. No single flag is published for it."
+                if q[0] < band_w < q[2]
+                else "The quartiles fall entirely on one side of the band, so the size "
+                "has a consistent verdict: "
+                + (
+                    "the estimator repeats to within the band at this size."
+                    if q[2] < band_w
+                    else "the estimator does not repeat to within the band at this size."
+                )
+            )
+        ),
         "what_is_held_fixed": (
             "allocation prefix and allocation ordinal, hence relative placement; the "
             "process, its address-space layout and the clock state are not"
+        ),
+        "what_is_not_claimed": (
+            "no interval is constructed. A t or z half-width on n=4 would assume iid "
+            "normality within a cell, which four fresh processes on a shared machine do "
+            "not establish, and at df=3 the verdict would be sensitive to it."
         ),
     }
 
@@ -547,22 +576,16 @@ def _band_reachability(runs, size):
                 else (
                     " On whether one draw could resolve the band at all: repeating the "
                     "published min-of-seven estimator at a fixed (prefix, ordinal) cell "
-                    f"across {rep['replicates_per_cell'][0]} processes gives a median RSD "
-                    f"of {rep['median_rsd_pct']}%, so 2sd is {rep['two_sd_pct']}% against a "
-                    f"{round(band_w, 4)}% band -- a ratio of {rep['ratio_two_sd_to_band']}. "
-                    + (
-                        "The estimator IS repeatable to about the band width at this size, "
-                        "so resolution is not the obstacle here; the clustered spacing "
-                        "above is. An earlier version claimed the opposite from the "
-                        "seven-round range, which is a property of the sample the min is "
-                        "taken over, not of the min."
-                        if rep["band_resolvable_by_one_draw"]
-                        else "The estimator does not repeat to the band width, so at this "
-                        "size resolution is a second and independent obstacle. An earlier "
-                        "version reached the same verdict from the seven-round range, "
-                        "which is not estimator uncertainty -- right answer, wrong "
-                        "quantity, and it did not hold at the other size."
-                    )
+                    f"across {rep['replicates_per_cell'][0]} processes gives observed "
+                    f"ranges with quartiles {rep['range_in_band_widths_q1_median_q3'][0]}x / "
+                    f"{rep['range_in_band_widths_q1_median_q3'][1]}x / "
+                    f"{rep['range_in_band_widths_q1_median_q3'][2]}x the band. "
+                    + rep["verdict"]
+                    + " Two earlier versions of this sentence were wrong in different "
+                    "ways: the first used the seven-round range, which is a property of "
+                    "the sample the min is taken over rather than of the min; the second "
+                    "used 2sd of the per-cell RSD, which is a parametric half-width on "
+                    "n=4 and collapsed heterogeneous cells to one flag."
                 )
             )
         ),
