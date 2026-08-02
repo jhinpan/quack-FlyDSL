@@ -298,6 +298,12 @@ def test_simulated_cuda_flydsl_import_survives_a_broken_cutedsl_chain():
 
 
         MESSAGE = "cannot import name 'alloc_reserved_mbarrier' from 'cutlass.pipeline'"
+        # Shape of the real 4.5.2 path, for the case where cutlass is not
+        # installed at all (this box). The assertion below checks the shape,
+        # not this exact string.
+        CUTLASS_PIPELINE_PATH = (
+            "/usr/lib/python3/site-packages/cutlass/pipeline/__init__.py"
+        )
         REACHED = []
 
 
@@ -349,8 +355,25 @@ def test_simulated_cuda_flydsl_import_survives_a_broken_cutedsl_chain():
 
             That line is ``from cutlass.pipeline import agent_sync,
             alloc_reserved_mbarrier``, and on cutlass 4.5.2 the second name is
-            absent. ``name=`` is set so the exception carries the same metadata
-            a real one would.
+            absent.
+
+            ``name`` AND ``path`` are both set, because a synthetic exception
+            missing either one is a different object from the real failure and
+            a repair may legitimately key on what is missing. @Reviewer built
+            exactly that: a repair tolerating only
+            ``exc.name == "cutlass.pipeline" and exc.path is not None`` makes
+            ``quack.rmsnorm_flydsl`` importable against the genuine 4.5.2
+            wheel -- verified here against
+            ``nvidia-cutlass-dsl==4.5.2`` sha256
+            ``68ed1b63ca74aae87955012da9dfd7fdaae471329d0028b229b841c7192ccf52``,
+            whose real error carries
+            ``name='cutlass.pipeline'``, ``path='.../cutlass/pipeline/__init__.py'``
+            -- while a ``path=None`` simulation keeps reporting XFAIL. The test
+            would then be pinning a defect the real interpreter no longer has.
+
+            The path is the child's own value, not the reviewer's: whatever
+            ``cutlass.pipeline`` resolves to here, or a representative path
+            when cutlass is absent, as it is on this ROCm box.
             \"\"\"
 
             def create_module(self, spec):
@@ -358,7 +381,13 @@ def test_simulated_cuda_flydsl_import_survives_a_broken_cutedsl_chain():
 
             def exec_module(self, module):
                 REACHED.append("quack.pipeline")
-                raise ImportError(MESSAGE, name="cutlass.pipeline")
+                try:
+                    import cutlass.pipeline as _real
+
+                    path = getattr(_real, "__file__", None) or CUTLASS_PIPELINE_PATH
+                except Exception:
+                    path = CUTLASS_PIPELINE_PATH
+                raise ImportError(MESSAGE, name="cutlass.pipeline", path=path)
 
 
         class TargetRecordingLoader(importlib.abc.Loader):
@@ -407,6 +436,13 @@ def test_simulated_cuda_flydsl_import_survives_a_broken_cutedsl_chain():
             outcome["branch"] = "cutedsl_gate_still_couples_flydsl"
             outcome["message_ok"] = MESSAGE in str(exc)
             outcome["reached"] = REACHED
+            # Reported so the parent can check that the simulated exception is
+            # still shaped like the real one. A repair may key on either field.
+            outcome["exc_name"] = exc.name
+            outcome["exc_path_is_none"] = exc.path is None
+            outcome["exc_path_looks_real"] = bool(
+                exc.path and exc.path.endswith("cutlass/pipeline/__init__.py")
+            )
             print("SENTINEL " + json.dumps(outcome))
             raise SystemExit(3)
 
@@ -454,6 +490,23 @@ def test_simulated_cuda_flydsl_import_survives_a_broken_cutedsl_chain():
             "the failure did not travel the real chain (quack.dsl succeeds, "
             "then quack.rmsnorm:24 -> quack/pipeline.py:13): "
             f"reached {outcome['reached']!r}"
+        )
+        # The simulated exception has to stay shaped like the real one, or a
+        # repair keyed on real metadata reads as no repair at all. @Reviewer
+        # demonstrated the live version of this against the genuine 4.5.2
+        # wheel: with path missing, a repair that makes the real interpreter
+        # work leaves this test reporting the defect it has already fixed.
+        assert outcome["exc_name"] == "cutlass.pipeline", (
+            "the simulated ImportError does not carry the real name= "
+            f"metadata: {outcome['exc_name']!r}"
+        )
+        assert not outcome["exc_path_is_none"], (
+            "the simulated ImportError has path=None; the real 4.5.2 failure "
+            "carries a real file path, and a repair may key on it"
+        )
+        assert outcome["exc_path_looks_real"], (
+            "the simulated ImportError's path is not shaped like the real "
+            "cutlass/pipeline/__init__.py"
         )
         raise CutedslGateStillCouplesFlydsl(
             "import quack.rmsnorm_flydsl still dies inside the cutedsl "

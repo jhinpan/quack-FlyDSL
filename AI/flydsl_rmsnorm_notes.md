@@ -4042,3 +4042,62 @@ What I take from four rounds on one test: each of my fixes was real, and each
 time I described it in terms of a set larger than the one I had actually
 closed. The pattern is not that the fixes were wrong — it is that the
 *claim* moved one quantifier out past the evidence, every single time.
+
+### Addendum: he then checked it against the real wheel, and it broke again
+
+@Reviewer installed genuine PyPI `nvidia-cutlass-dsl==4.5.2` and compared the
+real failure against the synthetic one. I reproduced his setup: downloaded
+both wheels and confirmed the hashes byte-for-byte —
+`nvidia-cutlass-dsl==4.5.2`
+`68ed1b63ca74aae87955012da9dfd7fdaae471329d0028b229b841c7192ccf52`,
+`nvidia-cutlass-dsl-libs-base==4.5.2` (cp310)
+`386e832427e3670479049a1560e4d8d2e565d8c0f37a6852c6d7043d046548f1`.
+Installed to an isolated target with `cuda-python==12.9.7`,
+`cuda-bindings`, `cuda-pathfinder`, the real traceback is:
+
+```
+quack/__init__.py:22 -> quack/rmsnorm.py:24 -> quack/pipeline.py:13
+ImportError: cannot import name 'alloc_reserved_mbarrier' from 'cutlass.pipeline'
+  exc.name = 'cutlass.pipeline'
+  exc.path = '.../cutlass/pipeline/__init__.py'
+```
+
+Confirming his chain independently, on real bytes rather than by reading
+source. My successor set `name=` but not `path=`, and his point is that the
+difference is not cosmetic: a *narrow* repair may legitimately key on the
+metadata. Built the one he describes — tolerate the skew only when
+`exc.name == "cutlass.pipeline" and exc.path is not None` — and measured both
+sides:
+
+| | real 4.5.2 wheel | my successor's test |
+|---|---|---|
+| path-keyed repair, `path=None` simulation | `rmsnorm` callable | `1 xfailed` |
+| path-keyed repair, `path=` simulation | `rmsnorm` callable | `XPASS(strict)` |
+
+The first row is the failure mode: the interpreter the test exists to protect
+is *already fixed*, and the test still reports the defect. So the simulation
+now carries `name` and `path`, taken from the child's own resolution of
+`cutlass.pipeline` where it exists, and the parent asserts the shape of both.
+Dropping `path=` is itself now a failing mutation (`1 failed, 4 passed`).
+
+Which is the same lesson a fifth time, and this one is worth stating exactly:
+I fixed "the error is raised at the right module" and wrote that the failure
+now travels the real chain. It travels the real *modules*. The **exception
+object** was still not the real one, and "the real chain" names a set that
+includes the thing being thrown. Every round of this has been the claim
+covering one more attribute than the evidence.
+
+Full matrix on the amended successor:
+
+| mutation | result |
+|---|---|
+| clean | `4 passed, 1 xfailed` |
+| unrelated child `SystemExit(3)` | `1 failed, 4 passed` |
+| child `RuntimeError` | `1 failed, 4 passed` |
+| wrong message | `1 failed, 4 passed` |
+| wrong `exc.name` | `1 failed, 4 passed` |
+| `path=` dropped | `1 failed, 4 passed` |
+| path-keyed repair | `XPASS(strict)`, and real wheel callable |
+
+Gate `737 passed, 2 skipped, 1 xfailed`; pinned ruff clean over `tests/` and
+`quack/`.
