@@ -837,25 +837,44 @@ cell was collected in **four separate processes**, so the whole seven-round
 estimator ran four times at the same relative placement. Repeat it and watch the
 min move — as an observed range, which assumes nothing:
 
-| size | Q1 / median / Q3, in band widths | min–max | cells repeating to within the band |
+| size | Q1 / median / Q3, in band widths | min–max, TB/s | cells repeating to within the band |
 | --- | --- | --- | --- |
-| 512 MiB | 0.62× / 1.01× / 2.14× | 0.038–3.76% | **10 of 20** |
-| 2 GiB | 1.74× / 2.36× / 3.13× | 0.109–0.964% | 1 of 20 |
+| 512 MiB | 0.69× / 1.09× / 2.08× | 0.0021–0.1931 | **9 of 20** |
+| 2 GiB | 1.82× / 2.48× / 3.19× | 0.0055–0.0484 | 1 of 20 |
 
 **At 2 GiB the original verdict survives** — the quartiles sit entirely above the
-band, and one cell in twenty repeats to within it — but at 2.4× rather than 5.0×,
+band, and one cell in twenty repeats to within it — but at 2.5× rather than 5.0×,
 and for a reason I had not measured. **At 512 MiB there is no verdict to give.**
 The interquartile range crosses the band in both directions and the cells span a
-hundredfold, 0.038% to 3.76%. "Resolves" and "does not resolve" are both false of
-that size as a whole, so the artifact publishes the per-cell count and no flag.
+ninetyfold range. "Resolves" and "does not resolve" are both false of that size
+as a whole, so the artifact publishes the per-cell count and no flag.
 
-I got there via a second wrong answer. My first correction reported 2sd of the
-per-cell RSD, which flipped 512 MiB to a clean "resolvable: yes" — a parametric
-half-width on n=4, and worse, a median over 20 heterogeneous cells thresholded
-into one boolean. @Autotune reached the same correction independently from the
-quartiles and withdrew their own "marginally resolves" for the same reason.
-**The flag was the defect, not the number behind it**: any single verdict for
-512 MiB would have been false, and the shape of the summary is what forced one.
+I got there via two wrong answers, both of them mine and both surviving a round
+of review. The first correction reported 2sd of the per-cell RSD, which flipped
+512 MiB to a clean "resolvable: yes" — a parametric half-width on n=4, and worse,
+a median over 20 heterogeneous cells thresholded into one boolean. @Autotune
+reached the same correction independently from the quartiles and withdrew their
+own "marginally resolves" for the same reason. **The flag was the defect, not
+the number behind it**: any single verdict for 512 MiB would have been false, and
+the shape of the summary is what forced one.
+
+The second is @Reviewer's `a7fe31c8`, and it is a units error hiding inside a
+statistic that had already been corrected twice. **The band is absolute** —
+0.010 TB/s wide, pinned to the display axis at [4.885, 4.895). I was comparing
+each cell's range *as a percent of that cell's own mean* against the band's
+width *as a percent of 4.885*. Two denominators. Cells here run 4.74 to 5.60
+TB/s, so every cell above the band's lower edge was implicitly granted a wider
+threshold than the band actually is: the 5.336 TB/s cell was allowed 0.0109 TB/s
+and moved 0.0104, so it passed. That is the whole difference between the
+published 10/20 and the correct 9/20. The count moved by one cell; what moved
+more is that the quantity being tested was not the quantity the band is defined
+in. The relative range is still reported per cell, because percent-of-own-level
+is the natural way to read how noisy a cell is — it is simply not what the
+threshold is applied to any more.
+
+Three versions, three different ways of being wrong, and every one of them
+produced a plausible number. The pattern across all three is that I kept
+choosing the summary first and asking what it measured second.
 
 The pooled-range argument is unaffected — 11.93% against a 0.205% band still
 holds, and the floor is well below the pooled range, which is what makes the
@@ -1043,27 +1062,81 @@ design produced **by accident**. It is reported in `high_water_check` and not
 leaned on. The 2 GiB block, which every conclusion here rests on, has no such
 separation.
 
-##### The staircase survives time reversal
+##### Time reversal was not enough; the level had to stop being a function of when
 
 The first sweep ran levels 0→21 in wall-clock order, which leaves level
 perfectly confounded with collection time: any slow drift in the box over the
 ~6 minutes reproduces as a staircase with no allocator involved. @Reviewer's
-point, and it was right. The sweep now runs an ascending pass and then a
-descending pass, 88 rows, still one fresh process per row — only the order of
-*processes* differs.
+point, and it was right. The sweep then ran an ascending pass and a descending
+pass, 88 rows, one fresh process per row — only the order of *processes*
+differs.
 
 **Steps at 13, 17 and 21 appear in both directions; none appears in only one.**
-The staircase is a level effect, not drift. That also restores the reversibility
-claim the invalid within-process design was originally reaching for, by a route
-that does not require measuring inside a single process.
+That is necessary and it is not sufficient, which I claimed it was.
 
-Note that this is a *different* control from the one shown invalid earlier. The
+@Reviewer's `5c2e0083`: all-up-then-all-down leaves level an exact function of
+collection position. I checked it rather than conceding it in prose, and it is
+worse than a tendency — the 88 up/down positions fall into **44** classes
+equidistant from the nearest end of the sequence, and **not one class holds two
+different levels**. Level and symmetric position are the same variable there. So
+any midpoint-symmetric function of time reproduces the staircase in both passes
+at once, a single transient at the turnaround included, and no statistic
+computed on those two passes can separate them. **Time reversal cannot break a
+symmetric confound, because reversal is itself symmetric.** I had written "the
+staircase is a level effect, not drift" off the back of it.
+
+The fix is a third pass that visits every (level, repeat) in one seeded shuffle
+(`SWEEP_SHUFFLE_SEED = 20260802`), so no monotone *or* symmetric function of
+position recovers the level. The repeats are shuffled in rather than run
+back-to-back — two adjacent processes at the same level share whatever the box
+was doing in that half-second, which is the same adjacency problem one scale
+down. The up/down passes keep their paired repeats, since changing two things at
+once would make a difference between passes unattributable.
+`interleaved_control` reports the measured association, not merely that a
+shuffle happened: correlation of level against position **−0.020**, against
+distance from the midpoint **0.111**, longest run of one level **2**.
+
+**The interleaved pass finds steps at 13, 17 and 21 — the same three.** Written
+down before the run, in case it hadn't: if the shuffled pass had found different
+steps, those would have been the result and the earlier three would have been an
+artifact of ordering, not something to reconcile toward. It did not come out
+that way, and the level means agree across all three passes to the third decimal
+(level 12 → 13 moves 4.917→4.977 up, 4.922→4.976 down, 4.917→4.977 interleaved).
+So the steps are a level effect. *Why* the level matters is still not addressed
+by any ordering control, and `what_it_still_does_not_establish` says so in the
+artifact.
+
+One more correction, and it is the sharpest one here, because it is a guard
+failing in the flattering direction. I wrote the identity check as
+`level == min(seq, N−1−seq)` — true when each pass has one row per level, which
+was the layout at the time. Adding a second repeat per level doubled the
+position axis, and the check went to **86 exceptions out of 88** while the
+confound itself was completely untouched. Its failure branch then printed *"the
+up/down passes carry some independent information about level"* — a check
+written to restrain a claim reported the claim's obstacle as weaker than it is.
+Had I not recomputed it by hand, the artifact would have quietly said the
+confound had loosened at the exact moment I doubled down on it. The check now
+tests the property (group positions by distance from the nearest end; does any
+group hold two levels?) rather than a formula that encodes one collection
+layout. **A guard whose correctness depends on the shape of the data will
+mislead precisely when the shape changes, which is when it is most needed.**
+
+Note that the up/down pass is a *different* control from the one shown invalid
+earlier. The
 broken version walked the grid up and down within one process, which re-rolled
 placement on every call and destroyed the effect. Reversing the order of fresh
 processes has no such problem, and it took @Reviewer's framing — level confounded
 with time — to see that the valid version of the control was still available
 after the invalid one was abandoned. I had recorded "reversibility is now only
 supported by repeats at the same level" as a permanent limitation. It wasn't.
+
+The sequence is worth keeping intact, because it is three iterations of one
+mistake. Within-process A-B-A: invalid, and it *looked* more careful than what
+replaced it. Up/down over fresh processes: valid as far as it goes, and I read
+it as establishing something it structurally cannot. Interleaved: breaks the
+functional relationship outright. Each time, the control I had just built felt
+like the end of the argument — **the reason a control convinces me is that I
+built it to answer the objection I could see.**
 
 Two corrections to how that was established, both mine. The step locations were
 first written into this file from an exploratory script in `/tmp` — a number
@@ -1120,25 +1193,54 @@ parts.
 | --- | --- |
 | allocation ordinal | **98.10%** |
 | timing position (marginal) | 7.11% |
-| timing position *within* allocation ordinal | **0.30%** |
+| timing position *within* allocation ordinal, saturated | 0.30% |
+| **timing, additive main effect adjusted for ordinal, blocked on process** | **0.0412%** |
 | between identical repeats of one (ordinal, position) cell | 1.60% |
 
 The two marginal numbers overlap and do not sum to 100 — a random permutation
 per process gives an unbalanced grid (all 25 cells occupied, 1 to 7 replicates
-each), so neither marginal is a residual. The line that carries the argument is
-the third: once you know where a buffer was allocated, **when** it was measured
-explains less than the scatter between identical repeats. Warmup, clock ramp and
-drift are out.
+each), so neither marginal is a residual.
+
+I then picked the wrong line out of the remaining ones. I wrote that the third
+row carried the argument and concluded "warmup, clock ramp and drift are out."
+@Reviewer, `a7fe31c8`: **0.30% is a saturated cell term, not a timing main
+effect.** It is what is left between the 25 cell means after removing each
+ordinal's mean, so it contains the ordinal×time interaction, and with cells
+holding 1 to 7 replicates it absorbs per-cell noise too — a cell of size one
+contributes its entire residual to it. The main effect is a different fit:
+model the rate as ordinal + time with no interaction and ask what the time term
+buys. **0.0412%, F(4,72) = 0.52, p = 0.72** with process as a blocking factor.
+
+Same direction, an order of magnitude smaller, and — this is the part that
+matters — a different *kind* of statement. A p of 0.72 at n=100 is a bound, not
+an exclusion. The defensible sentence is that this design **detects no additive
+effect of measurement order**, which constrains warmup and clock ramp without
+ruling them out. "Are out" claimed the null as a result. The artifact now
+publishes both terms with the saturated one labelled as such, so the reader can
+see which is which rather than having to trust that I picked correctly.
 
 The addresses say what "slot" actually means. Across all 20 processes the source
 minus destination offset vector is **byte-identical** — `-10.35, -8.348, -6.346,
 -4.344, -2.002` GiB — while the absolute destination base lands in **11**
-distinct 1 TiB regions. Bucketing by relative offset recovers the same 98.10%,
-necessarily, because in this design the two partitions are identical. So the
-effect is a function of the source's offset *relative to the destination*, and
-absolute placement is randomized and does not track the rate. Per-address η²
-would read 100% and mean nothing: every address is unique, so each group holds
-one datum.
+distinct 1 TiB regions. That is the finding, and it is a real one: **absolute
+placement is randomized here and does not track the rate**, so whatever carries
+the effect is relative.
+
+Bucketing by relative offset also recovers 98.10%. I reported that as
+confirmation. It is not — @Reviewer again, same message. Offset bucket and
+allocation ordinal are a **bijection** on this design (ordinal 0→bucket −1,
+1→−2, … 4→−5, checked and now published as
+`is_a_bijection_with_alloc_ordinal`), so they induce the identical partition of
+the 100 rows and *any* between-group statistic on them is equal by construction.
+Two numbers agreeing because they are the same number is the weakest possible
+evidence dressed as the strongest, and I had written it in the sentence right
+after noting that per-address η² would read 100% and mean nothing for exactly
+this reason. I spotted the degenerate grouping and missed the degenerate one
+next to it.
+
+So relative offset is at most a **redescription** of allocation ordinal here,
+not an explanation of it, and this design cannot tell which is the carrier.
+Doing that needs a probe that varies the offset directly at fixed ordinal.
 
 What this does not do is retroactively upgrade the earlier artifacts. The
 placement reading turns out to be right, but it was never supported *by* those
@@ -1181,7 +1283,7 @@ The last of those jumps happened while writing this paragraph — adding the
 measured gap list that replaced the uniform prior widened the accept-set by
 another point. Improving the artifact degrades its own tripwire, monotonically,
 and nothing warned you — so the assembler now **refuses to write** once the rate
-passes a 12% ceiling (headroom is 2.6 points), with the error saying explicitly
+passes a 12% ceiling, with the error saying explicitly
 that raising the ceiling to make it pass is the failure mode being interrupted.
 A tripwire that decays as a side effect of good changes needs a hard stop, not a
 field reporting its own decline. Widening
@@ -1189,6 +1291,19 @@ the accept rule from 0–3 dp to 0–5 dp — the change I had written a code co
 to worry about — costs exactly **0.0000 pp** on a 2-dp grid and shows up only at
 4 dp (+0.21 pp). The risk I annotated was harmless; the mechanism that actually
 degraded the guard was routine growth, and it had no comment at all.
+
+And the rate was still measuring the wrong set. @Reviewer, `a7fe31c8`: the
+accept rule is `tok in cited or tok in measured`, but the self-assessment
+counted only `measured`. **A permissiveness metric that excludes the hand-
+maintained half of its own accept-set** — the half that grows precisely when
+someone wants a particular number to pass. Five allowlist strings sit on the
+2-dp grid uncovered by any computed field, so the published figure was low by a
+quarter of a point. The magnitude is nothing; the blind spot was aimed exactly
+at the mechanism by which a guard gets loosened, and every future allowlist
+entry would have been invisible to it for free. Now `10.345%`, with
+`of_which_only_the_citation_allowlist_explains: 5` broken out so an entry to the
+allowlist visibly costs something. **A self-monitoring check must monitor the
+part of itself a person edits, not just the part that grows on its own.**
 
 The section below was written to argue that copy is too *low* to be a ceiling,
 which is true and insufficient — the stronger objection is that it is not stable
