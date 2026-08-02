@@ -937,19 +937,26 @@ def _unambiguous_layout(tensor: torch.Tensor) -> torch.Tensor:
 
     Relabelling the offending axes is enough and costs nothing. For a size-1
     axis the stride is unobservable -- there is no second element to step to --
-    so any value describes the same memory, and any value above the row extent
-    moves it out of the way of the search.
+    so any value describes the same memory, and any non-unit value moves it out
+    of the way of the search.
 
     Dropping the axis and putting it back is what does the relabelling.
     ``unsqueeze`` derives the reinserted stride as ``size * stride`` of the axis
-    within. For the supported inputs (``N >= 8``) that is above 1, which is all
-    this helper needs: the offending axis no longer carries the row's unit
-    stride, so the descriptor search cannot mistake it for the row.
+    within. What that guarantees is only that the result is **non-unit** --
+    not that it is above 1. It can be 0: ``(1,1,8)`` stride ``(1,0,1)``
+    relabels to ``(0,0,1)``, values preserved, and the predicate below then
+    rejects the zero stride and copies. Non-unit is all this helper needs,
+    because the offending axis no longer carries the row's unit stride and the
+    descriptor search cannot mistake it for the row. An earlier version of this
+    paragraph said "above 1"; @Reviewer supplied the broadcast counterexample.
 
-    It is *not* in general "at least the extent of everything inside it" -- an
-    earlier version of this paragraph claimed that, and @Reviewer produced the
+    It is *not* in general "at least the extent of everything inside it" --
+    an earlier version claimed that too, and @Reviewer produced the
     counterexample. ``(1,2,2,8)`` stride ``(1,8,100,1)`` relabels to stride
-    ``(16,8,100,1)``, and 16 is well under the inner physical span of 108. That
+    ``(16,8,100,1)``, and 16 is well under the inner occupied span of 116 --
+    max reachable offset ``8*1 + 100*1 + 1*7 = 115``, plus one. (I first wrote
+    108, having dropped the ``8*(2-1)`` term; the inequality holds either way,
+    but the number in a worked counterexample should be the right one.) That
     layout has no alias and is row-packed, so ``_packed_rows`` keeps it and the
     result is correct -- the stronger nested-span property is neither true nor
     required here. Likewise ``(1,2,8)`` stride ``(1,1,2)`` relabels to
@@ -957,9 +964,11 @@ def _unambiguous_layout(tensor: torch.Tensor) -> torch.Tensor:
     below then rejects it and copies. The contract is the pair: this helper
     removes the ambiguous unit stride on the offending singleton, and
     ``_rows_are_disjoint_and_packed`` plus the copy close everything else. This
-    helper alone guarantees nothing about arbitrary exotic layouts. An earlier version called
-    ``as_strided(..., tensor.storage_offset())`` instead. That is correct
-    eagerly and breaks under ``fullgraph=True``: ``storage_offset()`` returns a
+    helper alone guarantees nothing about arbitrary exotic layouts.
+
+    An earlier version called ``as_strided(..., tensor.storage_offset())``
+    instead. That is correct eagerly and breaks under
+    ``fullgraph=True``: ``storage_offset()`` returns a
     Python scalar, Dynamo cannot keep a non-Tensor from a ``torch.*`` op, and
     both static and dynamic compiles raised ``Unsupported`` on exactly the
     singleton this function exists to handle. @Reviewer caught it -- the test I
