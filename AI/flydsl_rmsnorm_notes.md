@@ -560,6 +560,36 @@ defect, and it is not yet measured on the cutedsl side here (cutedsl does not
 import on ROCm). What is measured is that the FlyDSL kernel is ahead and the
 FlyDSL wrapper is behind, and that the harness reports only the first.
 
+**Most of that 26 us is not ours to remove, and the ceiling is worth knowing
+before anyone tries.** Calling the cached compiled function directly -- no
+validation, no allocation, no autograd, no key construction, stream hoisted --
+still costs **6.38 us**, and that is FlyDSL's own dispatch: the profile at that
+level is all `<flydsl-dispatch>`, `ptr_fill` and `pack_into`, with no frame of
+ours in it. For scale, `torch.nn.functional.rms_norm` end-to-end is 6.27 us and
+a bare `out.add_(1.0)` launch is 4.52. So **the framework's launch floor alone
+already equals torch's entire call**, and no amount of tightening the Quack
+wrapper reaches parity at small shapes.
+
+What *is* recoverable, measured by neutralizing each in situ: ~3.3 us from
+`_validate_inputs` and ~3.0 us from the per-call `torch.empty(0)` absent-tensor
+allocations, taking 26.5 us to 20.3. Real, worth doing eventually, and about a
+third of the gap. The rest is `autograd.Function.apply` plus the FlyDSL floor.
+
+This is the part that decides what to do about it: the finding is a **property
+of the FlyDSL dispatch path, not a Quack defect**, so it belongs upstream or in
+the vendoring notes rather than in a wrapper micro-optimization.
+
+**CUDA-graph capture removes it; `torch.compile` does not.** I wrote the
+opposite here first, on the strength of "compiled paths don't pay Python", and
+measuring took one command: at `256x4096`, eager is 26.9 us of host time and
+`torch.compile` is **52.9** -- twice as bad, not zero. Device time is identical
+either way (2.66 us under graph replay, both, one `rmsnorm_kernel_0` per call),
+so dynamo is adding ~26 us of its own host overhead on top of ours rather than
+folding ours away. Under graph capture the host path is excluded by
+construction and the call is the 2.66 us it should be. So the mitigation to
+recommend is capture, and `torch.compile` is a pessimization at these shapes --
+the reverse of what I assumed and nearly committed.
+
 **A canary agreeing to a fraction of a percent is not stability evidence.**
 The habit is to re-run one cell after a change, see it land within a percent
 of an archived value, and read that as "nothing regressed". It supports a
