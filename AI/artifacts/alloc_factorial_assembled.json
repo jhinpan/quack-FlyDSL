@@ -422,7 +422,16 @@
       "diagonal_on_spread": -0.05377,
       "why_it_is_recorded_here_and_not_promoted": "cell mean spreads shrink monotonically (see per_cell), which suggests using spread as the outcome. Route at fixed total bytes then gives the largest F in this artifact, against the pre-registered mean's -- both above. It is an artefact of construction. Spread is very nearly the min reflected across these 16 processes, and the min and max diagonals have OPPOSITE signs, so spread = max - min SUBTRACTS two contrasts that disagree and their magnitudes ADD. The biggest F here is the two weakest contrasts stacked because they point opposite ways. Every figure in this dict is computed by _slot_structure; the first draft of this paragraph quoted them from a scratch shell instead, which is the defect assemble_copy_axes.py's citation guard rejected in another file a day earlier. Not adopted, not quoted as support."
     },
-    "what_this_does_not_explain": "why a given slot is slow, or why the treatment relabels which one is. Placement past the MALL is the standing hypothesis and this is consistent with it, but consistency is not evidence for it over any other mechanism that also reorders buffers. No decomposition of this data can supply that."
+    "what_this_does_not_explain": "why a given slot is slow, or why the treatment relabels which one is. Placement past the MALL is the standing hypothesis and this is consistent with it, but consistency is not evidence for it over any other mechanism that also reorders buffers. No decomposition of this data can supply that.",
+    "argmin_slot_by_cell": {
+      "hi_hi": 0,
+      "hi_lo": 1,
+      "lo_hi": 3,
+      "lo_lo": 2
+    },
+    "the_argmin_is_NOT_a_function_of_total_prior_bytes": "the two cells that reach 24 GiB by different routes give DIFFERENT slowest slots (24x1GiB -> 3, 48x512MiB -> 1), unanimously across all four processes each. So no rule in total prior bytes alone can reproduce this column, which is a genuine constraint and not a curve fit: it is a refutation, and refutations survive saturation. Set against the rate, where total bytes explains ~94.5% and the route contrast is equivocal, the two outcomes disagree about which factor is doing the work -- and the argmin is the one that separates the routes cleanly.",
+    "why_that_is_a_hypothesis_and_not_a_result": "four cells with four distinct argmin values is SATURATED -- zero residual degrees of freedom, so some rule fits perfectly no matter what the values were, and several mutually incompatible rules fit this one equally well. The only claim with content here is the negative one above, because ruling a family OUT does not need spare df. Reading a positive rule off these four numbers would be the saturated-model version of the mistake this file keeps finding: a fit that cannot fail is not evidence.",
+    "declared_followup_for_the_anchor_run": "the count=0 / count=13 anchor run is already declared in anchor_limitation. This pre-registers a SECOND outcome to record from it, before those numbers exist: the argmin slot index per process, with the prediction that count=0 differs from every count>0 cell, and the test that the two routes to a fixed total continue to disagree. Two added cells give back the residual df this grid lacks. Declared here rather than after the run for the same reason the rest of the analysis was: an outcome chosen once the data is visible is not a test of anything. Nothing about it requires new probe code -- probe_alloc_factorial already stores the whole spread dict."
   },
   "band": {
     "band_TBps": [
@@ -485,19 +494,17 @@
       },
       {
         "path": "AI/assemble_alloc_factorial.py",
-        "sha256": "838c5bd985a41cdf4d790ea4121b59e3776b371cec2879096eeaccc380bd8b93",
-        "bytes": 62017
+        "sha256": "0f1196162dcf796ad8c8070abfd73281a02c62b6c5c6575885b230ba4e794c5f",
+        "bytes": 64376
       }
     ],
     "what_this_proves": "the assembler read exactly these bytes. It does not prove they came from a GPU, and a manifest cannot."
   },
   "git": {
-    "commit": "c8d7a68",
+    "commit": "ca0c66f",
     "worktree_dirty": true,
     "worktree_dirty_paths": [
-      "AI/artifacts/alloc_factorial_assembled.json",
-      "AI/assemble_alloc_factorial.py",
-      "AI/flydsl_rmsnorm_notes.md"
+      "AI/assemble_alloc_factorial.py"
     ],
     "worktree_dirty_note": "cannot read clean in the commit that contains this artifact: writing the file dirties the tree the flag describes. The path list is what makes the flag checkable."
   }

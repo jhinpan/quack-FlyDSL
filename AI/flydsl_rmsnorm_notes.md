@@ -1265,6 +1265,24 @@ relabels which one is. Placement past the MALL is consistent with it; so is any
 other mechanism that reorders buffers. No decomposition of this data can choose
 between them.
 
+**One asymmetry is worth pre-registering on, though.** The rate is 94.5295%
+explained by total prior bytes, with the route contrast equivocal. The *argmin
+slot* is provably **not** a function of total prior bytes: the two cells that
+reach 24 GiB by different routes give different slowest slots (24×1 GiB → 3,
+48×512 MiB → 1), unanimously across all four processes each. The two outcomes
+disagree about which factor is doing the work, and the argmin is the one that
+separates the routes cleanly.
+
+That negative claim has content. The positive one does not: four cells with four
+distinct argmin values is **saturated** — zero residual df, so some rule fits
+perfectly regardless of the values, and several incompatible rules fit these
+equally well. Ruling a family *out* survives saturation; reading a rule *off* it
+does not. So the argmin slot is declared as a second outcome of the already-
+pre-registered count=0 / count=13 anchor run — before those numbers exist, with
+the prediction that count=0 differs from every count>0 cell. Two extra cells give
+back the residual df this grid lacks, and no new probe code is needed, because
+`_measure` already stores the whole dict.
+
 Three corrections found while reading my own output, all one defect:
 
 - **Both Type-II "main effects" came back significant** (p = 0.0000 and

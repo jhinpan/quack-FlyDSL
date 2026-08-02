@@ -635,6 +635,37 @@ def _slot_structure(raw_rows):
             "with it, but consistency is not evidence for it over any other mechanism "
             "that also reorders buffers. No decomposition of this data can supply that."
         ),
+        "argmin_slot_by_cell": {f"{c}": per_cell[c]["argmin_slot_each_process"][0] for c in cells},
+        "the_argmin_is_NOT_a_function_of_total_prior_bytes": (
+            "the two cells that reach 24 GiB by different routes give DIFFERENT slowest "
+            "slots (24x1GiB -> 3, 48x512MiB -> 1), unanimously across all four processes "
+            "each. So no rule in total prior bytes alone can reproduce this column, which "
+            "is a genuine constraint and not a curve fit: it is a refutation, and "
+            "refutations survive saturation. Set against the rate, where total bytes "
+            "explains ~94.5% and the route contrast is equivocal, the two outcomes "
+            "disagree about which factor is doing the work -- and the argmin is the one "
+            "that separates the routes cleanly."
+        ),
+        "why_that_is_a_hypothesis_and_not_a_result": (
+            "four cells with four distinct argmin values is SATURATED -- zero residual "
+            "degrees of freedom, so some rule fits perfectly no matter what the values "
+            "were, and several mutually incompatible rules fit this one equally well. "
+            "The only claim with content here is the negative one above, because ruling "
+            "a family OUT does not need spare df. Reading a positive rule off these four "
+            "numbers would be the saturated-model version of the mistake this file keeps "
+            "finding: a fit that cannot fail is not evidence."
+        ),
+        "declared_followup_for_the_anchor_run": (
+            "the count=0 / count=13 anchor run is already declared in anchor_limitation. "
+            "This pre-registers a SECOND outcome to record from it, before those numbers "
+            "exist: the argmin slot index per process, with the prediction that count=0 "
+            "differs from every count>0 cell, and the test that the two routes to a fixed "
+            "total continue to disagree. Two added cells give back the residual df this "
+            "grid lacks. Declared here rather than after the run for the same reason the "
+            "rest of the analysis was: an outcome chosen once the data is visible is not "
+            "a test of anything. Nothing about it requires new probe code -- "
+            "probe_alloc_factorial already stores the whole spread dict."
+        ),
     }
 
 
