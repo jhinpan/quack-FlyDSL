@@ -12,7 +12,16 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _run_python(source: str, *, cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
+def _run_python(
+    source: str, *, cwd: Path = ROOT, check: bool = True
+) -> subprocess.CompletedProcess[str]:
+    """Run ``source`` in a fresh interpreter.
+
+    ``check=False`` is for callers that treat the exit code as the result
+    rather than as a precondition; they must inspect ``returncode``
+    themselves. Every other caller keeps the default and gets the stdout and
+    stderr of a failed child in the assertion message.
+    """
     env = os.environ.copy()
     pythonpath = [str(ROOT)]
     if env.get("PYTHONPATH"):
@@ -26,7 +35,8 @@ def _run_python(source: str, *, cwd: Path = ROOT) -> subprocess.CompletedProcess
         text=True,
         timeout=30,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
+    if check:
+        assert result.returncode == 0, result.stdout + result.stderr
     return result
 
 
@@ -160,7 +170,19 @@ def test_simulated_cuda_preserves_eager_bootstrap_order_and_exports():
     )
 
 
-def test_simulated_cuda_broken_cutedsl_takes_the_flydsl_path_down_with_it():
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "DESIRED BEHAVIOUR, NOT CURRENT BEHAVIOUR. FlyDSL has no cutlass "
+        "dependency, so importing quack.rmsnorm_flydsl should survive a broken "
+        "cutedsl chain. Today it does not: quack/__init__.py:6 runs the CuTe "
+        "bootstrap unconditionally on CUDA. Written as a strict xfail per "
+        "@Reviewer, so that repairing the import boundary turns this GREEN "
+        "instead of red -- a plain green assertion on the broken behaviour "
+        "would make the fix look like a regression."
+    ),
+)
+def test_simulated_cuda_flydsl_import_survives_a_broken_cutedsl_chain():
     """The gate at ``quack/__init__.py:6`` is one-directional, and this pins it.
 
     On ROCm the ``torch.version.hip is None`` gate is what keeps the CuTe
@@ -188,8 +210,22 @@ def test_simulated_cuda_broken_cutedsl_takes_the_flydsl_path_down_with_it():
     The assertion is deliberately about the ERROR, not just the failure: a
     bare "it raises" would also pass if FlyDSL were merely missing. What is
     being pinned is that the cutedsl error propagates out of a FlyDSL import.
+
+    Why the assertion states the DESIRED outcome and the marker carries the
+    current one: @Reviewer's objection to the first version, and it is the
+    same defect I had just audited in ``f747907``. A plain green test asserting
+    that the import FAILS would make the obvious repair -- decoupling the
+    FlyDSL path from the cutedsl bootstrap -- show up as a red test, i.e. the
+    fix would look like the regression. Under ``xfail(strict=True)`` the file
+    reads as "this SHOULD work", XFAILs today, and turns XPASS -> failure the
+    moment the boundary is fixed, which is the signal that the successor
+    landed rather than a wall in front of it.
+
+    The ImportError branch is what currently runs, and it still checks the
+    message rather than the bare fact of raising, because an xfail that
+    triggers for the wrong reason is no better than a green one.
     """
-    _run_python(
+    result = _run_python(
         """
         import importlib.abc
         import importlib.util
@@ -225,20 +261,34 @@ def test_simulated_cuda_broken_cutedsl_takes_the_flydsl_path_down_with_it():
         torch.version.hip = None
         sys.meta_path.insert(0, BrokenCutedslFinder())
 
+        # The desired behaviour: FlyDSL does not import cutlass, so a broken
+        # cutedsl chain should be irrelevant to it. Today the package gate
+        # makes it fatal. Exit 3 is reserved for "failed, and failed for
+        # exactly the cutedsl reason" so the caller can tell that apart from
+        # an unrelated breakage, which exits 1 with a traceback.
         try:
             import quack.rmsnorm_flydsl
         except ImportError as exc:
             assert MESSAGE in str(exc), f"wrong failure: {exc!r}"
-        else:
-            raise AssertionError(
-                "quack.rmsnorm_flydsl imported despite a broken cutedsl chain; "
-                "the __init__ gate no longer runs the CuTe bootstrap on CUDA"
-            )
+            assert "quack.rmsnorm_flydsl" not in sys.modules
+            raise SystemExit(3)
 
-        # The FlyDSL module itself is never reached -- the failure is upstream
-        # of it, which is the whole point.
-        assert "quack.rmsnorm_flydsl" not in sys.modules
-        """
+        # Callable, not merely present in sys.modules: a half-initialised
+        # module object would satisfy the weaker check.
+        assert callable(quack.rmsnorm_flydsl.rmsnorm)
+        """,
+        check=False,
+    )
+
+    assert result.returncode in (0, 3), (
+        "the simulation broke for a reason that is neither outcome it "
+        f"distinguishes (rc={result.returncode}):\n" + result.stdout + result.stderr
+    )
+    # Today: 3. When the import boundary is fixed: 0, this passes, and the
+    # strict xfail turns that pass into a failure telling you to flip it.
+    assert result.returncode == 0, (
+        "import quack.rmsnorm_flydsl still dies inside the cutedsl bootstrap "
+        "it does not depend on (quack/__init__.py:6)"
     )
 
 

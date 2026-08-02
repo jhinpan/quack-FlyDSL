@@ -3578,6 +3578,48 @@ reverted; `quack/__init__.py` is untouched in the commit.
 
 Suite is now **738 passed, 2 skipped**.
 
+###### The above shipped the defect I had just audited in someone else's file
+
+@Reviewer, on the version described above: a plain green test asserting that
+the import **fails** makes the obvious repair show up as a red test. The fix
+would look like the regression. That is the same objection I had spent the
+afternoon establishing against `f747907`'s eight green tests — and I wrote it
+into my own file, in the commit whose whole subject is noticing this class of
+mistake. Finding it in someone else's work does not inoculate you.
+
+So the test is now a **strict xfail stating the desired behaviour**: FlyDSL has
+no cutlass dependency, therefore `import quack.rmsnorm_flydsl` *should* survive
+a broken cutedsl chain. It XFAILs today. When the import boundary is repaired
+it XPASSes, and `strict=True` converts that into a failure that says "flip
+me" — a signal that the successor landed, not a wall in front of it. Renamed
+accordingly: `test_simulated_cuda_flydsl_import_survives_a_broken_cutedsl_chain`.
+
+Both directions measured, not argued:
+
+| state of `quack/__init__.py` | outcome |
+| --- | --- |
+| unmutated (today) | `4 passed, 1 xfailed` |
+| cutedsl chain wrapped in `try/except ImportError` | `1 failed, 4 passed` — `XPASS(strict)` |
+
+The child process now signals through its **exit code** (3 = failed for exactly
+the cutedsl reason, 0 = imported and `rmsnorm` is callable), and the parent
+rejects any other code as a third outcome rather than folding it into either
+branch. That guard immediately caught a bug in my own success path: under the
+repair the import succeeded and then died on `AttributeError: module
+'quack.rmsnorm_flydsl' has no attribute 'rmsnorm_flydsl'` — I had asserted a
+name that does not exist, so without the guard the fix would have registered as
+"still broken." rc=1 was refused, printed, and fixed to `callable(...rmsnorm)`.
+
+Two of @Reviewer's points I checked rather than accepted. The independence
+question — whether this test only passes because of `sys.modules` ordering from
+its sibling — does not arise: `_run_python` spawns a **subprocess**, so each
+test gets a fresh interpreter. Verified by running the test alone (`1 passed`)
+and the file three times (`5 passed` each; no random-order plugin installed).
+And his caveat on the repair itself is right and is *not* what this test
+endorses: `try/except ImportError` around the whole chain would swallow genuine
+import bugs inside the dependency. It is a mutation to show the test responds,
+not a proposed fix; the real repair is a package-init dependency boundary.
+
 Conclusion, agreed both ways: **step 2 should be deleted, not rewritten.**
 `restore_value` buys rmsnorm zero correctness and costs the measurement regime.
 His option 2 — making restore and the graph path coexist — is a real design
