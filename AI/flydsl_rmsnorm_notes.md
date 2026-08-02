@@ -951,3 +951,34 @@ are unaffected; only the archived probes under `AI/archive/` reach for the
 lower-level pair. Worth noting because the benchmark harness times quack at
 `rmsnorm_fwd` and FlyDSL at `_launch_rmsnorm_fwd` -- different levels, which
 this file already flags as a measurement hazard elsewhere.
+
+### The harness times the two backends at different levels, and it matters below ~8192 rows
+
+`_QuackProvider`'s docstring says it calls "the same low-level `rmsnorm_fwd` /
+`rmsnorm_bwd` entry points ... which is also the level the FlyDSL provider
+measures." The second half is not true. `_FlyDSLProvider` calls
+`_launch_rmsnorm_fwd`, which is *below* `rmsnorm_fwd`: it skips the operand
+guards, the reshape, the autograd `Function`, and the custom-op dispatch.
+Quack's `rmsnorm_fwd` is a public entry point that includes its own equivalents.
+
+What the difference is worth, bf16 forward, min-of-7-rounds-of-50 on MI355X:
+
+| shape | `_launch` (what the harness times) | `rmsnorm()` | difference |
+| --- | --- | --- | --- |
+| 32768x4096 | 89.64 us | 90.15 us | +0.6% |
+| 8192x4096 | 20.46 us | 27.35 us | +33.7% |
+| 1024x1024 | 10.90 us | 27.29 us | +150.5% |
+| 256x512 | 10.84 us | 27.32 us | +152.0% |
+| 64x256 | 10.72 us | 27.68 us | +158.2% |
+
+The wrapper cost is a near-constant ~16.5 us, so it disappears into a 90 us
+kernel and dominates a 10 us one. At the shapes where the published tables show
+FlyDSL furthest ahead, the comparison is FlyDSL's kernel against quack's
+kernel-plus-wrapper. This is the same ~26 us host-dispatch floor recorded
+above, seen from the harness's side rather than the user's.
+
+It does not invalidate the large-shape results -- at 32768x4096 the level
+choice is worth 0.6%, well inside the run-to-run spread. It does mean any
+small-shape speedup quoted from this harness needs the level stated with it,
+and the honest fix is to time both providers at their public entry point, or
+both at their launcher, rather than one of each.
