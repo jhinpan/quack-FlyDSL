@@ -515,7 +515,30 @@ Large shapes are decided by HBM; mid shapes by the kernel; small batches are
 pure launch path, where the CuTe kernel is about 2.2x ahead (6.1 us against
 13.0 us at M=1, against a ~3.5 us Python/FFI floor).
 
+**Provenance of the two Quack columns** (added 2026-08-01 after this table was
+challenged as unsourced, then verified and cleared). Both halves come from the
+schema-v1 sweep of 2026-07-26, not from Experiment No.001:
+
+- H100: `timing-audit/xbench-archive/h100-full-20260726-results.csv`, 180 rows,
+  `copy_roofline_gbps = 2974.420002`.
+- H200: `h200-v061-results.csv` from the same sweep,
+  `copy_roofline_gbps = 4148.155822` — the two numbers already quoted above.
+
+The rule that reproduces every cell: median of `copy_roofline_pct` over rows
+with `provider=quack`, bucketed by `m==32768` / `m==4096` / `m<=512` and by
+operation, rounded to whole percent. Reproduced independently on both files:
+88.695/87.185, 60.952/41.220, 18.359/12.039 for H100 and 79.647/74.317,
+32.899/27.149, 13.792/9.146 for H200. The M=1 forward figure of 6.1 us above is
+the same file's `quack` `m=1` `fwd` median.
+
+Do not attempt to re-derive this table from the No.001 archive — that is a
+later, differently-configured run and it will not reproduce these numbers.
+
 Caveat worth keeping: at 4096x3000 and 4096x4096 Quack is slower on the H200
 than on the H100 despite 1.39x more bandwidth, while torch on the same two
 boxes moves the right way. That is Quack tuning on H200, not the machine, and
-those cells are excluded from any median quoted above.
+those cells are excluded from any median quoted above. Re-checked against the
+v1 files: it holds on every dtype, forward and backward — Quack H200/H100 runs
+1.03–1.33x while torch runs 0.78–0.88x. Note that this caveat is *specific to
+the v1 run*; in the later No.001 archive the H200 is faster in these same cells
+on every provider, so do not carry the caveat across to that dataset.
