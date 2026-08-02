@@ -557,16 +557,50 @@ numerator, and the denominator is the cheaper half to check first.**
 
 **Below about 26 us of device work, the public API measures Python, not the
 kernel.** One `rmsnorm(x, w)` costs ~26 us of *host* time at `256x4096`, against
-~6.4 us for `torch.nn.functional.rms_norm`. It is genuinely asynchronous -- the
+~6.4 us for `torch.nn.functional.rms_norm` (regenerated: 30.14 vs 5.73 us,
+sidecar `AI/data/rmsnorm_call_decomposition.json`, generator
+`AI/probe_rmsnorm_call_decomposition.py`). It is genuinely asynchronous -- the
 cost does not move when ~1.2 ms of device work is queued ahead of it -- so it is
 host dispatch, not a stall. Localized by stubbing each stage in situ: the cached
 launcher is 11.3 us, the four `torch.empty*` allocations bring it to 16.3, the
 `autograd.Function.apply` to 19.4, and `_validate_inputs` adds 2.9 for 26.1
-total. Under CUDA-graph replay, which excludes host cost entirely, the same call
-is **2.11 us against torch's 3.88** at `1x4096`, confirmed by rocprofv3 kernel
-times (2.11 vs 4.77 us). So the kernel wins roughly 2x at every shape measured
-while the end-to-end call loses ~4x at small ones -- 27.9 vs 6.7 us per norm
-over a 64-norm stack at `m=1`, which is decode-shaped and where it hurts most.
+total. (**Still unbacked**: the stage split needs in-situ stubbing of quack
+internals and is not in the sidecar. The 26 us total it sums to *is* backed.)
+
+**The "roughly 2x kernel advantage" was a ratio taken across a floor, and it is
+K-dependent.** The published figures were 2.11 us for FlyDSL against torch's
+3.88 at `1x4096` under graph replay. Both reproduce -- but only at large K, and
+both sit *below* the 9.47 us cost of replaying a single captured call, so they
+cannot have been taken one-call-per-graph and the K was never recorded. Graph
+replay has its own floor, measured here from a 64-element `add_` that moves 512
+bytes:
+
+| K (calls captured per graph) | 1 | 4 | 16 | 64 | 256 |
+| --- | --- | --- | --- | --- | --- |
+| empty-kernel floor | 9.48 | 3.54 | 2.08 | 1.61 | 1.48 |
+| flydsl `1x4096` | 9.50 | 4.00 | 2.53 | 2.07 | 1.96 |
+| torch `1x4096` | 9.50 | 5.27 | 4.15 | 3.75 | 3.66 |
+| **net of floor, torch/flydsl** | n/a | 3.77x | 4.60x | 4.59x | **4.58x** |
+
+At K=1 the two backends are **indistinguishable** -- the floor is 99.8% of each
+measurement. Net of the shared floor at K>=16 the gap is stable at 4.6x, and at
+`256x4096` it is 2.8x. The raw quotient 3.66/1.96 = 1.87x is arithmetically
+right and mechanically misleading, because most of what it divides is a
+constant both sides pay. So the honest statements are: **the advantage is 4.6x
+at `1x4096` and 2.8x at `256x4096`, net of a floor that must be quoted with
+it**, and any single "2x" is an artifact of the K nobody wrote down. The
+sidecar publishes raw, floor and net at every K and deliberately publishes no
+headline ratio.
+
+This is the same defect as the retired starvation table one section down: a
+number divided by another number, where a fixed cost neither of them is about
+dominates both. It is worth stating as a rule -- **before quoting a ratio,
+measure what the ratio reads when the two things being compared are identical.
+If it does not read 1.0, the floor is in the answer.**
+
+So the end-to-end call loses ~5x at small shapes while the kernel wins by
+several -- 27.9 vs 6.7 us per norm over a 64-norm stack at `m=1`, which is
+decode-shaped and where it hurts most.
 
 The reason the harness does not show this: it times FlyDSL through
 `_launch_rmsnorm_fwd` (`provider_detail: "FlyDSL low-level forward"`, and quack
@@ -589,7 +623,9 @@ FlyDSL wrapper is behind, and that the harness reports only the first.
 **Most of that 26 us is not ours to remove, and the ceiling is worth knowing
 before anyone tries.** Calling the cached compiled function directly -- no
 validation, no allocation, no autograd, no key construction, stream hoisted --
-still costs **6.38 us**, and that is FlyDSL's own dispatch: the profile at that
+still costs **6.38 us** (**unbacked**: not regenerated in the sidecar, which
+covers the host total and the graph series but not the stubbed-stage figures),
+and that is FlyDSL's own dispatch: the profile at that
 level is all `<flydsl-dispatch>`, `ptr_fill` and `pack_into`, with no frame of
 ours in it. For scale, `torch.nn.functional.rms_norm` end-to-end is 6.27 us and
 a bare `out.add_(1.0)` launch is 4.52. So **the framework's launch floor alone
@@ -608,11 +644,16 @@ the vendoring notes rather than in a wrapper micro-optimization.
 **CUDA-graph capture removes it; `torch.compile` does not.** I wrote the
 opposite here first, on the strength of "compiled paths don't pay Python", and
 measuring took one command: at `256x4096`, eager is 26.9 us of host time and
-`torch.compile` is **52.9** -- twice as bad, not zero. Device time is identical
+`torch.compile` is **52.9** -- twice as bad, not zero (both **unbacked**; the
+sidecar does not run dynamo). Device time is identical
 either way (2.66 us under graph replay, both, one `rmsnorm_kernel_0` per call),
 so dynamo is adding ~26 us of its own host overhead on top of ours rather than
-folding ours away. Under graph capture the host path is excluded by
-construction and the call is the 2.66 us it should be. So the mitigation to
+folding ours away. That 2.66 us carries the same caveat as the pair above: the
+regenerated value at `256x4096` is 2.46 us at K=256 against a 1.48 us floor, so
+**most of it is replay overhead rather than the kernel** -- it is the right
+number for "what a captured call costs" and the wrong one for "what the kernel
+costs". Under graph capture the host path is excluded by
+construction and the call is the ~2.5 us it should be. So the mitigation to
 recommend is capture, and `torch.compile` is a pessimization at these shapes --
 the reverse of what I assumed and nearly committed.
 
