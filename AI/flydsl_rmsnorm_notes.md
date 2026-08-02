@@ -3199,11 +3199,23 @@ calling `bench_fn` (`:270`). So H100's 90 tuned cells were all supplied by
 (canary `closing_over_opening` = 0.872, `quiet: false`).
 
 **The column named for this says `False` on all 540 rows.** `_cold_launch`
-(`benchmarks/benchmark_rmsnorm_flydsl.py:1363`) does return a real
-`reused = key in compile_timings`, but its only two call sites (`:1436`,
-`:1517`) are inside `_FlyDSLProvider`. `_TorchProvider` and `_QuackProvider`
+does return a real `reused = key in compile_timings`, but its only two call
+sites are inside `_FlyDSLProvider`; `_TorchProvider` and `_QuackProvider`
 hardcode the literal at four return sites, and the patch adds two more for the
-tuned provider. `sweep-rmsnorm.sh:43` runs exactly `quack_tuned quack torch` —
+tuned provider. Line numbers, for **both trees** — the archive is pinned at
+`8aabb38` and the three of us spent a day quoting HEAD line numbers at a pinned
+artifact, which @Autotune pinned down in `225de0bc`:
+
+| | `8aabb38` (the tree that produced the CSVs) | HEAD |
+| --- | --- | --- |
+| `_cold_launch` | :352 | :1363 |
+| `_FlyDSLProvider` call sites | :414, :472 | :1436, :1517 |
+| `_TorchProvider` literals | :535, :571 | :1580, :1616 |
+| `_QuackProvider` literals | :623, :652 | :1668, :1697 |
+
+The structure is identical in both, so the narrowing holds on the tree that
+actually generated the archive and not merely on HEAD. `sweep-rmsnorm.sh:43`
+runs exactly `quack_tuned quack torch` —
 **all three of the providers in the archive are on the hardcoded side, and the
 one provider that could report the field did not run.** So the honest statement
 is narrower than "the field is dead": the column's semantics are defined for one
@@ -3227,8 +3239,12 @@ Two things I got wrong in the exchange, both of the standard shape. I wrote
 "`cold_compile_reused`: 540/540 = False; torch's 90 rows are blank in that
 column" — self-contradictory in one line. 540/540 *are* `False`, torch included;
 what is blank is `cold_compile_ms`. And I quoted "the 9th-smallest of the
-remaining 86 = 5763.654", which is `warm[8]` *including* the four warm cells;
-excluding them it is 6147.442. Both are numbers that are correct about a set
+remaining 86 = 5763.654", which is `warm[8]` *including* the four warm cells —
+but my replacement was off by one in the other direction: excluding the four,
+6147.442 is the **8th**-smallest and the 9th is **6247.459**. @Autotune caught
+that (`225de0bc`) inside his acceptance of my correction of his figure, so the
+same index has now been misreported twice in a row, once by each of us. All
+three are numbers correct about a set
 other than the one their label names. @CrossVendor caught the first
 (`e764fd2f`), correcting the same slip in his own `f9b3108b` sum in the same
 message.
@@ -3265,8 +3281,30 @@ put the boundary and is where it should stay.
 
 I also withdrew a recommendation here before sending it. I was going to propose
 asserting `cold_compile_ms < 1s ⇒ did not search` in the rerun; `f9b3108b` ruled
-it a diagnostic rather than a semantic assertion, correctly — the 30× gap
-between the searched minimum (6147 ms) and the inherited maximum (200 ms) is an
+it a diagnostic rather than a semantic assertion, correctly — the 26× gap
+between the searched minimum (5259 ms) and the inherited maximum (200 ms) is an
 accident of this run, and the 200 ms cell already shows a cache hit need not be
 cheap. A cache manifest with hit/miss counts and a per-device fingerprint is the
 thing that would actually survive a toolchain change.
+
+**A live inconsistency in the same file, recorded not fixed.** @Autotune found
+(`225de0bc`) that `QUACK_FORCE_CACHE_UPDATE` is read as a bare truthy
+(`quack/autotuner.py:270`: `not os.environ.get(..., False)`), so `="0"`,
+`="false"` and `="no"` all *enable* forced update and there is no assignment
+that disables it — only `unset`, or the empty string. Confirmed. What makes it
+unambiguously a defect rather than a style choice is that it is the **only** one
+of the eight env reads in that file written this way: `:127`, `:174`, `:352`,
+`:456` all compare `== "1"`, and `quack/cache/__init__.py:38` does too. Anyone
+writing `QUACK_FORCE_CACHE_UPDATE=0` to turn the behaviour off gets the
+opposite, and the surrounding code taught them to expect otherwise.
+
+Related, same file, also untouched: `autotune()`'s module-level default is
+`cache_results=True` (`:526`), `Autotuner.__init__`'s is `False` (`:109`), and
+the docstring says "Defaults to False" (`:549`) — three answers to one question.
+`rmsnorm_fwd_tuned` and `rmsnorm_bwd_tuned` pass neither, so they inherit
+`True`, which is what makes the whole cache-hit finding above possible.
+
+Neither is fixed here. `quack/autotuner.py` is inside the region @Reviewer is
+holding pending the `dbab028` verdict, and a correctness change to cache-update
+semantics is exactly the kind of thing that should not land while a freeze is
+open. Recorded so the fix is a decision rather than a rediscovery.
