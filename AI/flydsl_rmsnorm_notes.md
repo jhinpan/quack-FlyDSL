@@ -990,10 +990,11 @@ sidecar now says so.
 That cliff does look like occupancy collapse from per-thread live state -- so
 the comment's *mechanism* is plausible while its *value* is off by 6x. The
 register counts and spill reports have since been read out (see the
-register-budget section at the end of this file) and they put a computed
-capacity step on this same boundary. The occupancy figure itself has still not
-been measured, so what is established is that two boundaries coincide, not that
-one causes the other. **The cap is not raised on the strength of this.** A
+register-budget section at the end of this file) and they put a capacity step
+on this same boundary. Occupancy has since been measured there too: it halves
+from 1.96 to 1.00 waves/SIMD between 49152 and 57344, matching the computed
+bound. So both edges are now measured, but what is established is still that
+two boundaries coincide, not that one causes the other. **The cap is not raised on the strength of this.** A
 constant that is conservative by 6x costs reachable shapes; a constant moved on
 an unconfirmed mechanism costs correctness somewhere unmeasured. The finding is
 that 8192 is not where the hardware objects, and that whoever raises it should
@@ -1338,37 +1339,81 @@ missing cap. It also means the register file is not the binding constraint until
 N=16384; below that the bound is set by the hardware maximum, and what the
 kernel actually achieves there is not in this table.
 
-And the deeper problem is that **none of this column is measured.** It is
+And the deeper problem was that **none of this column was measured.** It is
 arithmetic on a register count -- an upper bound that ignores workgroup slots,
 LDS and barriers. Calling a derived bound "waves/SIMD" is how the uncapped
 version survived review in the first place: a measured number would have been
-checked against the hardware maximum, and a derived one was not. The occupancy
-half of the mechanism claim is therefore still owed a rocprofv3 measurement, and
-until it exists the paragraph below is a register-count argument wearing an
-occupancy label.
+checked against the hardware maximum, and a derived one was not.
 
-**The register-capacity step coincides with the bandwidth cliff.** VGPR
-allocation crosses 256 of the 512 per-SIMD budget between 49152 and 57344,
-halving the computed capacity from 2 waves/SIMD to 1, and the bandwidth drop
-sits at the same boundary.
+**That measurement now exists.** `AI/probe_rmsnorm_measured_occupancy.py` reads
+rocprofv3's `MeanOccupancyPerActiveCU`; raw at
+`AI/data/rmsnorm_fwd_measured_occupancy.json`. At the cliff's own m=4096:
 
-That is a coincidence of boundaries between one computed quantity and one
-measured one. It is **not** established that occupancy actually halves there,
-nor that the capacity change causes the bandwidth change. This paragraph
-previously said "a halving of occupancy against a halving of achieved
-bandwidth ... that is the mechanism, and it is no longer a story", which
-asserts residency and causality from a register count and a coincident edge.
-@Reviewer struck it and he is right: I hedged this correctly one paragraph
-above and then wrote the unhedged version immediately below, which makes the
-hedge decorative. Two further gaps in the same sentence: "latency-hiding-bound"
-is an assumption about the kernel, not a finding; and the bandwidth cliff it
-refers to is itself unarchived -- there is no committed sidecar behind it.
+| N | vgpr | alloc | computed bound | **measured waves/SIMD** | measured/bound | bandwidth % of ceiling |
+|---|------|-------|----------------|-------------------------|----------------|------------------------|
+| 32768 | 156 | 160 | 3 | 2.784 | 0.93 | -- |
+| 40960 | 226 | 232 | 2 | 1.955 | 0.98 | -- |
+| 49152 | 230 | 232 | 2 | 1.958 | 0.98 | 77.5 |
+| 57344 | 264 | 264 | 1 | **1.000** | 1.00 | 37.8 |
+| 65536 | 300 | 304 | 1 | **1.000** | 1.00 | 39.2 |
 
-What would settle it: measured occupancy per N from rocprofv3, and an
-intervention showing the direction (force the allocation across the boundary at
-fixed N and watch the bandwidth follow). Both are bounded work. Until then this
-is a correlation of two edges, and the mechanism remains the leading
-explanation rather than a result.
+**Occupancy does halve at the boundary, and it is now observed rather than
+derived.** The 2 → 1 step falls between 49152 and 57344, the same edge as the
+bandwidth drop. Measured tracks the computed bound to within 7% everywhere and
+to within 2% from 40960 up, sitting just under it as an average over active CUs
+and over the kernel's life should.
+
+The step is a register-file threshold, not a width effect: `vgpr_alloc` crosses
+256 of the 512-entry budget there, so `floor(512/232)=2` becomes
+`floor(512/264)=1`. N itself rises smoothly through it -- 49152 → 57344 is a
+factor of 1.17 -- while occupancy halves.
+
+Two things this does **not** settle. It is still a coincidence of two edges:
+occupancy halving and bandwidth halving at the same N does not establish that
+the first causes the second. And "latency-hiding-bound" remains an assumption
+about the kernel rather than a finding. What would settle direction is an
+intervention -- force the allocation across the boundary at fixed N and watch
+the bandwidth follow. That is still owed. What has changed is that the
+occupancy half is no longer a register-count argument wearing an occupancy
+label; the bandwidth half is now archived too (`rmsnorm_fwd_width_cliff.json`),
+so both edges are measured and the open question is narrowed to causality.
+
+**Two traps had to be cleared to get this number, and both are worth recording
+because either would have produced a confident wrong answer.**
+
+*rocprofv3 and the compiled artifact disagree about VGPR count, and neither is
+wrong.* At N=49152 the artifact says 230, rocprof says 116. The relation is
+`rocprof = roundup(ceil(artifact / 2), 4)`, exact on 10 of 10 widths -- and
+five of those (2048/16384/24576/32768/40960) were **held out**: the relation was
+fitted on the other five and predicted these before they were measured. The
+factor of 2 is wave64 architectural VGPRs against 32-lane physical
+register-file entries. My first instinct was that one source must be wrong and
+the cliff's register half might move; instead the sidecar was missing a unit.
+The probe asserts the relation on every row and aborts rather than publish if a
+future toolchain breaks it. All register arithmetic here uses the wave64
+numbers, which is the pair the hardware behaves like: on the three widths where
+the two unit systems predict *different* occupancies (16384/32768/49152 at
+m=16384) the artifact predicts 5/3/2 and rocprof-units predict 8/6/4, against
+measured 3.97/2.64/1.97.
+
+*A register bound is invisible unless it is the binding constraint.* My first
+occupancy reading was taken at m=1024, where the grid supplies only 4
+waves/SIMD -- any register limit of 4 or more is unobservable there, and the
+reading would have "confirmed" whichever bound it was compared against. Every
+row now carries `grid_supply_waves_per_simd` and a `register_bound_is_binding`
+flag; all ten reported rows are binding. This is the same defect class as the
+starvation control that turned out to be measuring the host: **a number that
+agrees with your hypothesis for a reason other than the one you think.** The
+new rule from the floor work generalises to it -- before trusting a bound,
+check what the measurement reads when the bound is not the constraint.
+
+A third trap the probe caught on its own: flydsl memoizes compilation
+*in-process* as well as on disk, so pointing `FLYDSL_RUNTIME_CACHE_DIR` at an
+empty directory is not sufficient when one process runs two sweeps over
+overlapping widths. The second sweep wrote no pickle and the row would have
+reported a stale kernel's registers. Register extraction now runs in a
+subprocess per sweep, and each row still asserts that something was compiled --
+both guards are needed, either alone lets a hit through.
 
 Two things the table does settle. **Nothing spills, anywhere** -- not at 65536,
 not at 8192. So "register budget" was the right family and "spill cliff" would
