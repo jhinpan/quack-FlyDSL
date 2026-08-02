@@ -1936,6 +1936,59 @@ def test_the_singleton_layout_compiles_with_fullgraph(dynamic):
         _assert_close(got, _reference(tensor, weight, 1e-6))
 
 
+def test_a_compiled_singleton_backward_does_not_poison_later_gradients():
+    """The backward path, which the forward tests do not reach.
+
+    @Reviewer listed missing backward singleton coverage as a gap. Closing it
+    turned up something worth recording about how it has to be written: the
+    obvious eager version of this test **cannot fail**. Removing
+    ``_unambiguous_layout`` entirely leaves eager gradients bit-identical --
+    measured, dx and dw maxdiff 0.0 -- because in eager the singleton survives
+    the wrong leading dimension, the same incidental escape the forward
+    singleton test already documents. An eager backward test here would have
+    reported "clean" against a live defect.
+
+    Compiled, the poison is real: without the guard, dx differs by 0.469 and dw
+    by 0.719 between a run that follows a singleton and the same run on a clean
+    cache. So this test is compiled only, and the eager case is deliberately
+    not parametrized rather than silently included as if it were evidence.
+    """
+    torch.manual_seed(0)
+    n = 64
+    weight = torch.randn(n, device="cuda", dtype=torch.bfloat16)
+    singleton = torch.randn((n, 1), device="cuda", dtype=torch.bfloat16).t()
+    ordinary = torch.randn((8, n), device="cuda", dtype=torch.bfloat16)
+    function = torch.compile(rmsnorm, dynamic=True)
+
+    def gradients(tensor):
+        tensor = tensor.detach().clone().requires_grad_(True)
+        parameter = weight.detach().clone().requires_grad_(True)
+        function(tensor, parameter).backward(torch.ones_like(tensor))
+        return tensor.grad, parameter.grad
+
+    rmsnorm_flydsl_impl._FWD_CACHE.clear()
+    rmsnorm_flydsl_impl._BWD_CACHE.clear()
+    gradients(singleton)
+    dx_after_singleton, dweight_after_singleton = gradients(ordinary)
+
+    rmsnorm_flydsl_impl._FWD_CACHE.clear()
+    rmsnorm_flydsl_impl._BWD_CACHE.clear()
+    dx_clean, dweight_clean = gradients(ordinary)
+
+    assert torch.equal(dx_after_singleton, dx_clean), (
+        "the backward launcher built for the singleton was reused for the ordinary call"
+    )
+    assert torch.equal(dweight_after_singleton, dweight_clean), (
+        "the singleton poisoned the weight gradient"
+    )
+
+    _, dx_reference, dweight_reference = _reference_with_grads(
+        ordinary, weight, torch.ones_like(ordinary), 1e-6
+    )
+    _assert_grad_close(dx_after_singleton, dx_reference)
+    _assert_grad_close(dweight_after_singleton, dweight_reference)
+
+
 def test_broadcast_and_reversed_views_are_copied():
     """Aliasing is not only row overlap; a zero stride repeats one row entirely."""
     torch.manual_seed(0)
