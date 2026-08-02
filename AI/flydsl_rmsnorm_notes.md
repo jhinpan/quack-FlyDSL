@@ -770,11 +770,42 @@ No allocator-state or per-operation story predicts that identical buffers stop
 disagreeing exactly when they start fitting in cache. A pointer that read 5.010
 read 5.582 after a free and realloc to the same address, so it is not a stable
 per-buffer label either — it is re-rolled per allocation. Ranges rather than
-single values above because these are three runs, and the whole point is that
-one draw is not the quantity.
+single values above because these are six runs, and the whole point is that one
+draw is not the quantity.
 
 The rule is unchanged and now rests on the reason that is true: **do not use
 copy as a denominator.** It was already correct, for a reason that was wrong.
+
+### What this retires: single-draw copy values cannot authenticate anything
+
+A consequence worth stating separately, because it removes an argument that was
+being used *against* a historical figure rather than for one. @Autotune derived
+a feasible band of `[4.8850, 4.8950]` — 0.2% wide — for the unarchived `4.89`
+copy denominator, and observed that every committed copy value misses it: the
+crossvendor probe by −5.03%, the roofline median and min by +13.91% and +14.10%.
+Read as exclusion, that says 4.89 is unreconstructable.
+
+Every one of those three is a **single allocation's draw**: the roofline probe
+allocates one source and one destination and times that pair, and so does the
+crossvendor probe. Pooling all 25 of the 512 MiB draws behind the table above
+gives min 4.701, max 5.597 — a **19.06%** range, with 6 draws below the band, 18
+above, and one at 4.895 sitting on its upper edge.
+
+So the band is not excluded by the data; it is straddled by it. The three
+distances the argument relies on (5–14%) are each smaller than the spread
+between *identical buffers in a single process* (16–18%). This is the same rule
+that retired the equal-occupancy ratio's third digit: **a comparison must
+discriminate a gap larger than the confounds it cannot see.**
+
+None of this restores `4.89` — its provenance is still absent, which is
+@Reviewer's disposition and is untouched. What changes is the reason: a single
+committed copy value at 512 MiB can neither confirm nor exclude any historical
+copy figure, because a ±10% allocation confound sits under a 0.2% band.
+
+The asymmetry is the useful part. `two_read_one_write` gets *stronger* under the
+same sweep — four committed values within 0.55%, 1.37% across processes, against
+copy's 13.35%. Copy is unreconstructable not because the committed values are
+far from the band, but because copy at that size is not a repeatable quantity.
 
 `write` and `two_read_one_write` are the denominators to use, and their
 advantage is now measured rather than assumed: across three roofline processes

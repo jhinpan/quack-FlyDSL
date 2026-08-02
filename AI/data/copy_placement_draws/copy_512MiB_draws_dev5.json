@@ -1,0 +1,78 @@
+{
+  "what": "every 512 MiB copy draw behind the placement finding, pooled, so the claim rests on a committed artifact rather than on a chat message",
+  "why": "@Autotune's feasible band for the unarchived 4.89 copy denominator is [4.8850, 4.8950], 0.2% wide, and he observed that every committed copy value misses it. Each of those values is a SINGLE allocation's draw. These 25 draws show what a single draw is worth at this size: the distribution straddles the band. The band is not excluded by the data.",
+  "device": "physical 5 (MI355X, gfx950)",
+  "buffer_bytes": 536870912,
+  "op": "c.copy_(a), five identically-sized identically-filled sources, one fixed destination",
+  "commit_at_collection": "4d5a6f7633c563f2b4840706c10ba1978efc46c4",
+  "runs": [
+    {
+      "source": "ad-hoc size sweep, ascending",
+      "draws": [
+        4.816,
+        5.009,
+        5.026,
+        5.597,
+        5.581
+      ]
+    },
+    {
+      "source": "ad-hoc size sweep, descending",
+      "draws": [
+        4.701,
+        4.977,
+        4.952,
+        5.57,
+        5.561
+      ]
+    },
+    {
+      "source": "ad-hoc size sweep, ascending",
+      "draws": [
+        4.747,
+        5.001,
+        4.99,
+        5.592,
+        5.586
+      ]
+    },
+    {
+      "source": "roofline generator, superseded run",
+      "draws": [
+        5.338,
+        4.768,
+        5.582,
+        5.583,
+        4.837
+      ]
+    },
+    {
+      "source": "roofline generator, shipped artifact at this commit",
+      "draws": [
+        5.349,
+        4.76,
+        5.581,
+        5.587,
+        4.895
+      ]
+    }
+  ],
+  "provenance_note": "The first four runs came from throwaway scripts, which is the same defect class this section is about -- a number whose only home was a message. They are recorded here verbatim as transcribed from those runs' stdout; only the fifth is regenerable from committed code (copy_variability in the roofline sidecar). Treat the first four as transcribed, and re-derive the finding from the fifth plus any new run if the distinction matters.",
+  "pooled": {
+    "n_draws": 25,
+    "min": 4.701,
+    "max": 5.597,
+    "range_pct_of_min": 19.06,
+    "band_tested": [
+      4.885,
+      4.895
+    ],
+    "draws_below_band": 6,
+    "draws_inside_band": 1,
+    "draws_above_band": 18,
+    "band_is_straddled": true,
+    "widest_gap_the_band_argument_uses_pct": 14.1,
+    "confound_pct": 19.06,
+    "verdict": "The confound exceeds every gap the argument discriminates, so a single committed copy value can neither confirm nor exclude a historical copy figure at this size. This removes an argument against 4.89; it does not restore it, whose provenance remains absent."
+  }
+}
