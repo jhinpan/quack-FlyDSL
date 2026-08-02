@@ -248,8 +248,12 @@ sides of every boundary step were sampled unequally, and the *high* buffer
 count side, which is where the post-boundary rows live, always got less data.
 `ROUNDS` is now a constant 15 (75 rounds per point) regardless of buffer count.
 
-Across runs the same step measures **1.298x, 1.323x, 1.324x, 1.328x, 1.345x,
-1.349x, 1.354x**. Quote
+Across runs the same step measures **1.298x, 1.323x, 1.324x, 1.328x, 1.334x,
+1.344x, 1.349x, 1.354x** — eight values, each recomputable from a JSON sidecar
+committed in this repo's history (`46d9095`, `85ade0c`, `250502a`, `1b53896`
+generating commits). An earlier list of these quoted a `1.345x` that appears in
+no committed artifact: it came from a console line in an intermediate run whose
+sidecar was overwritten before commit, and it is withdrawn. Quote
 this as **~1.3x**; the third significant figure is not reproducible and my
 earlier "1.32x at two buffer sizes, independently" claimed a precision and an
 agreement the data never supported. The qualitative result — a step of roughly
