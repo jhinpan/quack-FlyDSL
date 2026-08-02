@@ -455,7 +455,9 @@ def _sweep(m, ns, tag, hw_cap, num_cus):
                 "counter_samples": [float(c["Counter_Value"]) for c in chunk],
                 "dispatch_ids": [int(c["Dispatch_Id"]) for c in chunk],
                 "bandwidth_pct_of_ceiling_at_m4096": bandwidth.get(n) if m == BOUNDARY_M else None,
-                "bandwidth_regime": BANDWIDTH_REGIME if (m == BOUNDARY_M and n in bandwidth) else None,
+                "bandwidth_regime": BANDWIDTH_REGIME
+                if (m == BOUNDARY_M and n in bandwidth)
+                else None,
             }
         )
     return out

@@ -44,6 +44,7 @@ import torch
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+
 # Must follow the sys.path insert above, so it cannot sit in the header. The
 # repo's pinned ruff config does not enable E402 while @Reviewer's invocation
 # does, and an inline suppression for it trips RUF100 under the repo config --

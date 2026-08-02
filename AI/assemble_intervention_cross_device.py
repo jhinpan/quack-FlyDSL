@@ -138,8 +138,7 @@ def _reduce(per_die):
         raise SystemExit("need at least two dies to reduce across dies")
     pairs = [(x, y) for i, x in enumerate(dies) for y in dies[i + 1 :]]
     closest = min(
-        min(abs(u - v) / min(u, v) * 100 for u in per_die[x] for v in per_die[y])
-        for x, y in pairs
+        min(abs(u - v) / min(u, v) * 100 for u in per_die[x] for v in per_die[y]) for x, y in pairs
     )
     means = {d: statistics.fmean(per_die[d]) for d in dies}
     worst_mean_pair = max(
@@ -181,9 +180,7 @@ def _ratios(d):
         "treatment_none_to_2_lift_pct": (t[2]["tbs"] - t["none"]["tbs"]) / t["none"]["tbs"] * 100,
         "control_none_to_2_change_pct": (c[2]["tbs"] - c["none"]["tbs"]) / c["none"]["tbs"] * 100,
         "equal_occupancy_bandwidth_ratio": c["none"]["tbs"] / t[2]["tbs"],
-        "highest_occ_vs_unhinted_margin_pct": (t["none"]["tbs"] - t[4]["tbs"])
-        / t[4]["tbs"]
-        * 100,
+        "highest_occ_vs_unhinted_margin_pct": (t["none"]["tbs"] - t[4]["tbs"]) / t[4]["tbs"] * 100,
     }
 
 

@@ -230,18 +230,18 @@
       },
       {
         "path": "AI/probe_copy_size_draws.py",
-        "sha256": "dafeba4a46b12444a484ce0e98316a0682c300098e4f98a2def9beaf77823a4a",
-        "bytes": 17274
+        "sha256": "bbfd2e798ac5d8084bccc9850fd0d8d2651082c82a6d7c5ea28f040871eee078",
+        "bytes": 17746
       },
       {
         "path": "AI/assemble_copy_axes.py",
-        "sha256": "6582c5d767c640fdc26b163dc4ec61ab2d65377a54377ce365404f6a4f52bb16",
-        "bytes": 50829
+        "sha256": "032e028bba4f47027fc9cc3c8f23b7c182c4020b86d418b19eaf6f2ea96dac53",
+        "bytes": 50815
       }
     ],
     "what_this_proves": "the assembler read exactly these bytes. It does not prove they came from a GPU, and a manifest cannot: it is a binding between artifact and raw runs, not an attestation."
   },
-  "commit": "ef05f0c",
+  "commit": "62fcef5",
   "worktree_dirty": true,
   "historical_table": {
     "source": "AI/flydsl_rmsnorm_notes.md:869",

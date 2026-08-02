@@ -102,7 +102,9 @@ def _offsets(runs):
         "distinct_offset_vectors": len(vecs),
         "distinct_dst_bases_by_1TiB_region": len(bases),
         "n_processes": len(runs),
-        "offset_vector_bytes": [str(x) for x in sorted(next(iter(vecs)))] if len(vecs) == 1 else None,
+        "offset_vector_bytes": [str(x) for x in sorted(next(iter(vecs)))]
+        if len(vecs) == 1
+        else None,
         "offset_vector_GiB": (
             [round(x / 2**30, 3) for x in sorted(next(iter(vecs)))] if len(vecs) == 1 else None
         ),

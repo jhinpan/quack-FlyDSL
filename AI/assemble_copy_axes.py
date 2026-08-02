@@ -318,9 +318,7 @@ def _decompose(runs, size):
         for r in rs
         if (k := "rounds_us_per_identical_buffer") in r["identical_buffers_by_size"][size]
     ]
-    within = [
-        (max(s) / min(s) - 1) * 100.0 for per_run in rounds for s in per_run if min(s) > 0
-    ]
+    within = [(max(s) / min(s) - 1) * 100.0 for per_run in rounds for s in per_run if min(s) > 0]
     floor = (
         {
             "n_draws_with_rounds": len(within),

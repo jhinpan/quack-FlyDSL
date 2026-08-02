@@ -356,8 +356,12 @@ def _timing_regime():
     # Assembled from fragments so the needles do not appear literally in this
     # file: written out whole, the tuple below would match itself and the
     # probe would abort on every run. A self-matching guard is not a guard.
-    markers = ("CUDA" + "Graph", "torch.cuda." + "graph", "make_" + "graphed_callables",
-               "graph_" + "pool_handle")
+    markers = (
+        "CUDA" + "Graph",
+        "torch.cuda." + "graph",
+        "make_" + "graphed_callables",
+        "graph_" + "pool_handle",
+    )
     hits = sorted(m for m in markers if m in src)
     if hits:
         raise SystemExit(

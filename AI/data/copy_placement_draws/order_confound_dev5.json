@@ -117,45 +117,30 @@
       },
       {
         "path": "AI/probe_order_confound.py",
-        "sha256": "0c6dee4426354efcebe17021895de890c83e31f116e071fd93a2488684c76a76",
-        "bytes": 4231
+        "sha256": "08d1d630653c405f3bb5fae1ec8a27efd97ed7dd1d6a28c2e31844b3a4b64898",
+        "bytes": 4232
       },
       {
         "path": "AI/assemble_order_confound.py",
-        "sha256": "de51ea952faa6d170e2225a21ddece8aa99cdd1ad27946d68e426de6f251224d",
-        "bytes": 15623
+        "sha256": "118359a356f32c37c489fe1aeb0181fa3515c25d8aa39eaf5db2628481ae383b",
+        "bytes": 15639
       }
     ],
     "what_this_proves": "the assembler read exactly these bytes. It does not prove they came from a GPU, and a manifest cannot: it is a binding between artifact and raw runs, not an attestation."
   },
-  "commit": "e5924c1",
+  "commit": "62fcef5",
   "worktree_dirty": true,
   "worktree_dirty_paths": [
-    ".gitignore",
+    "AI/assemble_copy_axes.py",
+    "AI/assemble_intervention_cross_device.py",
     "AI/assemble_order_confound.py",
+    "AI/data/copy_placement_draws/copy_axes_dev5.json",
     "AI/data/copy_placement_draws/order_confound_dev5.json",
-    "AI/data/copy_placement_draws/raw_order_dev5/s1.json",
-    "AI/data/copy_placement_draws/raw_order_dev5/s10.json",
-    "AI/data/copy_placement_draws/raw_order_dev5/s11.json",
-    "AI/data/copy_placement_draws/raw_order_dev5/s12.json",
-    "AI/data/copy_placement_draws/raw_order_dev5/s13.json",
-    "AI/data/copy_placement_draws/raw_order_dev5/s14.json",
-    "AI/data/copy_placement_draws/raw_order_dev5/s15.json",
-    "AI/data/copy_placement_draws/raw_order_dev5/s16.json",
-    "AI/data/copy_placement_draws/raw_order_dev5/s17.json",
-    "AI/data/copy_placement_draws/raw_order_dev5/s18.json",
-    "AI/data/copy_placement_draws/raw_order_dev5/s19.json",
-    "AI/data/copy_placement_draws/raw_order_dev5/s2.json",
-    "AI/data/copy_placement_draws/raw_order_dev5/s20.json",
-    "AI/data/copy_placement_draws/raw_order_dev5/s3.json",
-    "AI/data/copy_placement_draws/raw_order_dev5/s4.json",
-    "AI/data/copy_placement_draws/raw_order_dev5/s5.json",
-    "AI/data/copy_placement_draws/raw_order_dev5/s6.json",
-    "AI/data/copy_placement_draws/raw_order_dev5/s7.json",
-    "AI/data/copy_placement_draws/raw_order_dev5/s8.json",
-    "AI/data/copy_placement_draws/raw_order_dev5/s9.json",
-    "AI/flydsl_rmsnorm_notes.md",
-    "AI/probe_order_confound.py"
+    "AI/probe_copy_size_draws.py",
+    "AI/probe_order_confound.py",
+    "AI/probe_rmsnorm_measured_occupancy.py",
+    "AI/probe_rmsnorm_occupancy_intervention.py",
+    "AI/probe_rmsnorm_roofline.py"
   ],
   "worktree_dirty_note": "a dirty ancestor means the commit above does not pin the code that produced this artifact. The paths are listed so a reader can see whether the difference touches the probe or the assembler.",
   "by_alloc_ordinal": {
