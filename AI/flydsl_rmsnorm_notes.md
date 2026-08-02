@@ -1178,8 +1178,23 @@ weight only:
 | 57344 | 264 | 264 | 1 | **1** | 0 | 0 | 0 |
 | 65536 | 300 | 304 | 1 | 1 | 0 | 0 | 0 |
 
-Bit-identical across two fresh processes.
-Raw at `AI/data/rmsnorm_fwd_vgpr_by_n.json`.
+Bit-identical across two fresh processes, and reproduced again from a
+committed generator, `AI/probe_rmsnorm_vgpr_by_n.py`: every `vgpr_count` and
+`sgpr_count` above comes back identical, nothing spills anywhere, and the
+sidecar now carries host, device UUID, commit, source hashes and the shipped
+`MAX_N` alongside. Raw at `AI/data/rmsnorm_fwd_vgpr_by_n.json`. The counts are
+parsed from the `gpu.kernel_metadata` attribute dictionary in FlyDSL's jit
+cache pickle, and each row asserts that a compile actually happened, so a
+stale cache entry cannot be reported as a fresh measurement.
+
+**The regenerated sidecar records one thing the old one could not: `agpr_count`.**
+It is 0 everywhere up to N=49152, then 8 at 57344 and 44 at 65536. On gfx950
+the VGPR and AGPR banks share one 512-slot file per SIMD, so a nonzero AGPR
+count is not free -- the honest allocation at 65536 is 344, not 300. It happens
+not to move either bound here (both rows are already at 1 wave/SIMD either
+way), so no conclusion changes. But the old artifact could not have told anyone
+that, and the AGPRs appear *exactly* at the cliff, which is the kind of
+coincidence worth having in the record rather than discovering later.
 
 **The first three rows used to read 21, 21 and 12 waves/SIMD, which the hardware
 cannot do.** `floor(512 / vgpr_alloc)` is the register file's limit and I stored
