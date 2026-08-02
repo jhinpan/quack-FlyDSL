@@ -1346,8 +1346,10 @@ headline, and never depended on df at all.
 ##### The anchored run refutes the bytes headline — and confirms both predictions
 
 Six cells in one shuffle, 24 processes, GPU5. The P1/P2 rules and the six-cell
-grid were pushed to origin at `da64f32` and `613a2e6`, **before the run was
-launched** — that much is witnessed by Git and by the push.
+grid were declared at `da64f32` and `613a2e6`, both of which are **earlier in
+commit ancestry** than `7a8f571`, the commit that first introduced the raw — 4
+and 6 commits earlier respectively, recomputed into `git_ancestry` on every
+assembly rather than restated here.
 
 **What that check does *not* establish (@Reviewer, `53f9258b`).** I also wrote
 that the assembler was committed with the data "deliberately left untracked, so
@@ -1359,8 +1361,20 @@ unread when the Welch and permutation rules were fixed; that rests on *"none of
 its numbers have been read"*, a statement about conduct no tree can witness.
 Worth stating as a general limit rather than patching per instance: **a
 tree-absence check establishes "not staged at commit time", and where the run has
-already completed, that is compatible with full knowledge of the result.** The
-pre-push of `da64f32`/`613a2e6` is the part that carries weight here.
+already completed, that is compatible with full knowledge of the result.**
+
+**And the sentence I replaced it with overreached too (@Reviewer, `8714d13e`).**
+I wrote that the pre-push of `da64f32`/`613a2e6` happened *before the run was
+launched*. A pushed commit can witness a remote publication time, but this raw
+carries **no authenticated collection timestamp** — I checked, and the artifact
+has no time field at any level, top or row; the assembler now recomputes that
+check into `raw_timestamp_fields_found` (`[]`) instead of my asserting it.
+Without one there is nothing to order the push *against*. Proving that ordering
+would need a push receipt and an independently timestamped collection record,
+archived and bound together, and neither exists. The durable in-tree claim is the
+weaker one, and it is the only one now made: **the design and predictions are
+earlier in commit ancestry than the raw's first committed appearance.** That is a
+fact about the commit graph, not about wall clocks.
 
 **Both pre-registered predictions held, exactly.**
 
@@ -1384,10 +1398,15 @@ advance, correct in every cell.
 
 The permutation p was published as **0.0 on 20 000 draws**, and that was wrong in
 kind, not degree (@Reviewer, `53f9258b`). The run scored *zero hits*, so
-`round(0/20000, 5)` printed `0.0` — which reads as an exact probability when a
-finite-draw run can only bound one from above, here ≤ 1/20 001. This null admits
-a closed form, so no bound is needed: the sample space is the multiset
-permutations of the observed argmins over 24 processes, 24!/(4!·8!·4!·4!·4!) =
+`round(0/20000, 5)` printed `0.0` — which reads as an exact probability and is
+not one. My fix then labelled `1/20 001` a bound, and **that was wrong too
+(@Reviewer, `8714d13e`)**: `(b+1)/(B+1)` is the standard conservative *add-one
+Monte Carlo p-value*, an estimate. Zero hits in B draws does not deterministically
+bound the true p by `1/(B+1)`. The honest one-sided 95% Clopper–Pearson upper
+limit at zero hits is `1 − 0.05^(1/20000)` = **1.497754 × 10⁻⁴** ≈ 3/20 000 — the
+rule of three — which is 3.00× the figure I had called a bound. Fortunately this
+null admits a closed form, so neither estimate is needed: the sample space is the
+multiset permutations of the observed argmins over 24 processes, 24!/(4!·8!·4!·4!·4!) =
 46 381 007 673 000, and matching the observed score requires all six cells
 unanimous — which forces the eight copies of slot 1 into exactly two cells and
 each other value into one, giving 6!/2! = 360 favourable. **Exact p = 360 /

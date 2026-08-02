@@ -77,6 +77,10 @@ REPO = Path(__file__).resolve().parent.parent
 PERM_SEED = 20260806
 PERM_DRAWS = 20000
 
+# The commits that declared P1, P2 and the six-cell grid. Named here so the
+# ancestry check is recomputed against the tree rather than restated in prose.
+DECLARING_COMMITS = ("da64f32", "613a2e6")
+
 # The measurement's own live set. Anchors below this are pinned by the
 # measurement rather than by their prefix.
 MEASUREMENT_LIVE_GIB = 12.0
@@ -287,6 +291,12 @@ def _p2_argmin(rows):
         favourable //= math.factorial(k // reps)
     exact = Fraction(favourable, denom)
 
+    # With `ge` = 0 hits the one-sided Clopper-Pearson upper limit collapses to
+    # 1 - alpha**(1/B), which is computed rather than quoted so it tracks
+    # PERM_DRAWS. Only valid at zero hits; anything else needs the beta
+    # quantile, so the general case is refused rather than approximated.
+    cp95 = 1.0 - 0.05 ** (1.0 / PERM_DRAWS) if ge == 0 else None
+
     return {
         "per_cell": per_cell,
         "prediction_A_zero_differs_from_every_count_gt_0": pred_a,
@@ -294,16 +304,34 @@ def _p2_argmin(rows):
         "permutation_p_EXACT": f"{favourable}/{denom} = 1/{denom // favourable}",
         "permutation_p_exact_float": float(exact),
         "permutation_p_monte_carlo_hits": ge,
-        "permutation_p_monte_carlo_bound": f"<= 1/{PERM_DRAWS + 1}",
+        "permutation_p_monte_carlo_add_one_pvalue": f"(b+1)/(B+1) = 1/{PERM_DRAWS + 1}",
+        "permutation_p_monte_carlo_add_one_float": (ge + 1) / (PERM_DRAWS + 1),
+        "permutation_p_monte_carlo_upper_bound_95_clopper_pearson": cp95,
         "why_the_exact_p_and_not_0.0": (
             "the Monte Carlo run scored zero hits in "
             f"{PERM_DRAWS} draws, and the field used to report round(0/{PERM_DRAWS}, 5) "
             "= 0.0, which reads as an exact probability and is not one "
-            "(@Reviewer, 53f9258b). A finite-draw run can only bound p from above, "
-            f"here <= 1/{PERM_DRAWS + 1}. This null happens to admit a closed form -- "
+            "(@Reviewer, 53f9258b). This null happens to admit a closed form -- "
             "the multiset permutations of the observed argmins over the processes -- "
-            "so the exact value is reported instead of any bound. The Monte Carlo hit "
-            "count is kept so the two are checkable against each other."
+            "so the exact value is reported and no estimate is needed. The Monte Carlo "
+            "hit count is kept so the two are checkable against each other."
+        ),
+        "a_correction_to_the_monte_carlo_field": (
+            f"this field read '<= 1/{PERM_DRAWS + 1}' and called that a bound. It is not "
+            "one (@Reviewer, 8714d13e): (b+1)/(B+1) is the standard conservative add-one "
+            "Monte Carlo p-value, an estimate, and zero hits in B draws does not "
+            "deterministically bound the true p by 1/(B+1). The actual one-sided 95% "
+            f"upper confidence limit at zero hits is 1 - 0.05**(1/{PERM_DRAWS}) = "
+            f"{cp95:.6e}, about 3/{PERM_DRAWS} -- the rule of three -- which is "
+            f"{cp95 * (PERM_DRAWS + 1) / (ge + 1):.2f}x the number that was labelled a "
+            "bound. Both are superseded here by the exact closed form, smaller than the "
+            f"95% limit by a factor of about {cp95 / float(exact):.3g}, so the exact "
+            "value is what this package publishes. The two estimates are kept only to "
+            "show what a finite-draw run could and could not have established alone. "
+            "Every multiplier in this sentence is computed from the fields above rather "
+            "than typed: the first draft of it said 'three thousand times larger', "
+            "having reached for the exact-vs-limit factor while describing the "
+            "limit-vs-add-one one, inside the sentence correcting a misdescribed number."
         ),
         "what_the_permutation_shuffles": (
             "cell LABELS across processes, holding the observed multiset of argmin "
@@ -587,21 +615,70 @@ def _manifest(src, extra):
     return out
 
 
-def _git():
-    def run(*a):
-        try:
-            return subprocess.run(
-                ["git", *a], cwd=str(REPO), capture_output=True, text=True, check=True
-            ).stdout.strip()
-        except (subprocess.CalledProcessError, OSError):
-            return None
+def _run_git(*a):
+    try:
+        return subprocess.run(
+            ["git", *a], cwd=str(REPO), capture_output=True, text=True, check=True
+        ).stdout.strip()
+    except (subprocess.CalledProcessError, OSError):
+        return None
 
-    dirty = run("status", "--porcelain") or ""
+
+def _git():
+    dirty = _run_git("status", "--porcelain") or ""
     return {
-        "commit": run("rev-parse", "--short", "HEAD"),
+        "commit": _run_git("rev-parse", "--short", "HEAD"),
         "worktree_dirty": bool(dirty),
         "worktree_dirty_paths": sorted(x[3:] for x in dirty.splitlines()) if dirty else [],
     }
+
+
+def _timestamp_fields(raw):
+    """Whether the raw carries any authenticated collection time. Checked, not claimed.
+
+    The prose above asserts the artifact has no timestamp at any level. That
+    assertion is exactly the kind that goes stale silently if the collector
+    later starts emitting one, so it is computed here and the prose points at
+    the result.
+    """
+    pat = ("time", "date", "stamp", "clock", "epoch", "utc", "when", "start", "end")
+    hits = sorted({k for k in raw if any(p in k.lower() for p in pat)})
+    for row in raw.get("rows", []):
+        hits.extend(k for k in row if any(p in k.lower() for p in pat) and k not in hits)
+    return sorted(set(hits))
+
+
+def _ancestry(src):
+    """The one provenance fact a tree can actually witness, computed not asserted.
+
+    Not "pushed before the run was launched" -- see
+    what_git_can_and_cannot_witness_here for why that overreached. This is the
+    weaker durable claim: the declaring commits are earlier in the ancestry of
+    the commit that first introduced the raw file. Recomputed on every assembly
+    so it cannot drift from the repository it describes.
+    """
+    rel = Path(src)
+    if rel.is_absolute():
+        try:
+            rel = rel.relative_to(REPO)
+        except ValueError:
+            return {"unavailable": "raw file is outside the repository"}
+    log = _run_git("log", "--diff-filter=A", "--format=%h", "--", str(rel))
+    if not log:
+        return {"unavailable": "no adding commit found for the raw file"}
+    first = log.splitlines()[-1]
+    out = {"raw_first_committed_at": first, "declaring_commits": {}}
+    for c in DECLARING_COMMITS:
+        anc = _run_git("merge-base", "--is-ancestor", c, first) is not None
+        n = _run_git("rev-list", "--count", f"{c}..{first}") if anc else None
+        out["declaring_commits"][c] = {
+            "is_ancestor_of_first_raw_commit": anc,
+            "commits_between": int(n) if n is not None else None,
+        }
+    out["all_declaring_commits_are_ancestors"] = all(
+        v["is_ancestor_of_first_raw_commit"] for v in out["declaring_commits"].values()
+    )
+    return out
 
 
 def main():
@@ -621,9 +698,11 @@ def main():
         "preregistration": (
             "the two questions this answers were declared in the FOUR-cell artifact -- "
             "anchor_limitation.declared_followup and "
-            "slot_structure.declared_followup_for_the_anchor_run -- in commits pushed "
-            "before the anchored run existed at all. That part is witnessed by Git and "
-            "by the push, since the declaring commits predate the raw file's mtime."
+            "slot_structure.declared_followup_for_the_anchor_run. What a reader can "
+            "check without trusting the author is ancestry: those declaring commits are "
+            "earlier in the ancestry of the commit that first introduced this raw file. "
+            "See git_ancestry for the computed form, and "
+            "what_git_can_and_cannot_witness_here for what that does and does not mean."
         ),
         "what_git_can_and_cannot_witness_here": (
             "this field used to say the assembler was 'written and committed before "
@@ -637,9 +716,22 @@ def main():
             "The general limit, worth stating once rather than per-instance: a "
             "tree-absence check establishes 'not staged at commit time', and where the "
             "run has already completed that is compatible with full knowledge of the "
-            "result. What IS witnessed here: the P1/P2 rules and the six-cell grid were "
-            "pushed to origin at da64f32 and 613a2e6, before the run was launched."
+            "result. The replacement sentence -- 'the P1/P2 rules and the six-cell grid "
+            "were pushed to origin at da64f32 and 613a2e6, BEFORE THE RUN WAS LAUNCHED' "
+            "-- was itself an overreach (@Reviewer, 8714d13e). A pushed commit can "
+            "witness a remote publication time, but this raw carries no authenticated "
+            "collection start or end timestamp -- verified: the artifact has no "
+            "timestamp field at any level, top or row. So the package cannot order the "
+            "push against the run at all; that would need a push receipt and an "
+            "independently timestamped collection record, archived and bound together. "
+            "Neither exists here. The durable in-tree claim, and the only one made now, "
+            "is the one in git_ancestry: the design and predictions are earlier in "
+            "commit ancestry than the raw's first committed appearance. That is a fact "
+            "about the commit graph, recomputed on each assembly, and it is strictly "
+            "weaker than a wall-clock ordering."
         ),
+        "git_ancestry": _ancestry(args.src),
+        "raw_timestamp_fields_found": _timestamp_fields(raw),
         "device_name": raw.get("device_name"),
         "shuffle_seed": raw.get("shuffle_seed"),
         "anchored": raw.get("anchored"),
