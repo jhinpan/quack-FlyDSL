@@ -22,18 +22,28 @@ This probe removes the confound by holding the kernel *exactly* fixed and
 varying only how many distinct buffers we rotate through. Every timed call is
 the same operation on the same shape; the only thing that changes is whether
 the round-robin working set fits in the 256 MiB MALL. That is also precisely
-the pattern `benchmarks/benchmark_rmsnorm_flydsl.py` uses, so a positive result
-here transfers directly to the harness.
+the rotation pattern `benchmarks/benchmark_rmsnorm_flydsl.py` uses.
 
-Every number quoted in `AI/gfx950_mall_evictor_defect.md` is produced by this
-script, including the evictor-control block. Raw per-round samples and the full
-environment are written to a JSON sidecar so the note is recomputable from the
+What transfers: a positive result here shows the harness's rotation-and-gate
+*method* reads the MALL rather than HBM on this access pattern, which is enough
+to invalidate the method on MALL-resident shapes. What does NOT transfer: the
+magnitude. This is a `copy_` stream, not RMSNorm, so the ratios below are not
+per-cell correction factors for any RMSNorm number and must not be applied to
+the 90-cell matrix. That needs an RMSNorm before/after, which has not been run.
+
+Every number quoted in the *measurement sections* of
+`AI/gfx950_mall_evictor_defect.md` is produced by this script -- the rotation
+sweeps, the evictor control and the fine-boundary sweep. Byte counts, cell
+classifications and the 90-cell exposure arithmetic in that note come from the
+harness source and are not outputs of this probe. Raw per-round samples and the
+full environment are written to a JSON sidecar so the note is recomputable from the
 commit rather than from a shell history.
 
 Run:  python3 AI/probe_gfx950_mall_rotation.py [--json OUT.json] [--repeats R]
 """
 
 import argparse
+import datetime
 import json
 import os
 import platform
@@ -298,8 +308,12 @@ def environment():
         # into one nameless field cannot show which variable was actually set,
         # and the mask value is an *index into the visible set*, not a physical
         # GPU id -- so pin identity with UUID/BDF instead.
+        "schema_version": 2,
+        "utc_timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "argv": sys.argv,
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "hip_visible_devices": os.environ.get("HIP_VISIBLE_DEVICES"),
+        "rocr_visible_devices": os.environ.get("ROCR_VISIBLE_DEVICES"),
         "torch_device_index": torch.cuda.current_device(),
         "device_pci_bus_id": getattr(props, "pci_bus_id", None),
         "device_uuid": str(getattr(props, "uuid", "")) or None,

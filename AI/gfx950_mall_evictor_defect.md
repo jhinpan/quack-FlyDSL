@@ -2,7 +2,11 @@
 
 Status: **confirmed by measurement**, fix not yet written. Blocks Experiment
 No.002 (MI355X flydsl-vs-torch matrix) — any MI355X numbers taken before this
-is fixed overstate bandwidth on **37 of the 90 benchmarked cells**. Those 37
+is fixed are **unsound on 37 of the 90 benchmarked cells** — those cells are
+un-evicted and inside nominal MALL capacity, so the measurement method does not
+establish HBM bandwidth there. This is an exposure count, not a per-cell
+result: without an RMSNorm before/after nobody knows how far any individual
+cell moves. Those 37
 contain **no `m=32768` cell** — an earlier version of this line said they
 included one, which conflated two different sets (see the `32768x1024` note
 below: those cells sit just *past* the MALL and are inflated for a related but
@@ -69,8 +73,10 @@ eviction happens, and 128 MiB fits comfortably in the 256 MiB MALL.
 The evictor is also only 12 MiB, which on the face of it cannot flush a 256 MiB
 cache even when it does run. That reasoning turns out not to survive
 measurement: forcing a 12 MiB evictor to run at the boundary recovers almost
-all of the gap — 4873 GB/s against a 4970 GB/s HBM reference, 1.95% below it,
-and in fact 1.95% *above* the 4780 GB/s that a 256 MiB evictor reaches. A
+all of the gap — 4834.85 GB/s against a 4951.72 GB/s HBM reference, 2.36%
+below it, and in fact 0.57% *above* the 4807.23 GB/s that a 256 MiB evictor
+reaches. (Percentages are computed from the raw medians in the sidecar, not
+from rounded GB/s; rounding first shifted these by ~1.4 points.) A
 copy-based evictor evidently disturbs MALL
 residency out of proportion to its own footprint. The binding problem is the
 gate, not the size.
@@ -166,7 +172,11 @@ is the smallest `n` with `n*B > C` for per-buffer bytes `B` and MALL capacity
 `C/B` is **not** an integer — the common case — and is correct only when the
 division happens to be exact. I had it the other way round.
 
-Recomputed with the real per-buffer bytes (input + output + weight + rstd),
+Recomputed with the real per-buffer bytes. All three rows below are the
+**forward-only** set — `input + output + weight`, no `rstd`, because
+`benchmarks/benchmark_rmsnorm_flydsl.py:411` passes `store_rstd=False`. The
+autograd path (`store_rstd=need_grad`) adds a 4-byte `rstd`, which only changes
+the count at `m=1`; see the note under the table.
 `C = 256 MiB`:
 
 | cell | B | C/B | buffers to exceed |
@@ -264,17 +274,18 @@ probe on a shared box, not a PR-grade number.
 
 A correctly-sized evictor recovers the HBM number:
 
-    64 MiB x2 bufs (WS=256 MiB), evictor=0 MiB      6440 GB/s   <- current behaviour
-    64 MiB x2 bufs (WS=256 MiB), evictor=12 MiB     4873 GB/s   <- current evictor size
-    64 MiB x2 bufs (WS=256 MiB), evictor=256 MiB    4780 GB/s
-    64 MiB x2 bufs (WS=256 MiB), evictor=512 MiB    4638 GB/s
-    64 MiB x2 bufs (WS=256 MiB), evictor=1024 MiB   4807 GB/s
-    64 MiB x8 bufs (WS=1024 MiB), no evictor        4970 GB/s   <- HBM reference
+    64 MiB x2 bufs (WS=256 MiB), evictor=0 MiB      6452.78 GB/s  <- current behaviour
+    64 MiB x2 bufs (WS=256 MiB), evictor=12 MiB     4834.85 GB/s  <- current evictor size
+    64 MiB x2 bufs (WS=256 MiB), evictor=256 MiB    4807.23 GB/s
+    64 MiB x2 bufs (WS=256 MiB), evictor=512 MiB    4699.50 GB/s
+    64 MiB x2 bufs (WS=256 MiB), evictor=1024 MiB   4735.98 GB/s
+    64 MiB x8 bufs (WS=1024 MiB), no evictor        4951.72 GB/s  <- HBM reference
 
 Evicting at all is what matters here: with no evictor the boundary cell reads
-6440 GB/s against a 4970 GB/s HBM reference (1.30x), and *any* of the evictor
-sizes brings it to 4638–4873 GB/s. The worst of those, the 512 MiB evictor, is
-6.68% below the reference; the best, the 12 MiB one, is 1.95% below it. Which
+6452.78 GB/s against a 4951.72 GB/s HBM reference (1.303x), and *any* of the
+evictor sizes brings it to 4699.50–4834.85 GB/s. The worst of those, the
+512 MiB evictor, is 5.09% below the reference; the best, the 12 MiB one, is
+2.36% below it. Which
 of the large evictors comes last is not stable across runs (the 1 GiB one was
 worst last run, mid-pack this one), so read only the grouping, not the order. The
 12 MiB evictor is not obviously worse than the 256–1024 MiB ones on this
@@ -376,8 +387,8 @@ agent, and it parses cleanly:
    The gate is the part the measurement actually indicts. `use_evictor =
    ws < l2_target_bytes` switches eviction off precisely where it is needed, and
    the evictor-control block shows that *running an evictor at all* is what
-   recovers the HBM number — the 12 MiB evictor lands 1.95% above the 256 MiB
-   one and 1.95% below the HBM reference.
+   recovers the HBM number — the 12 MiB evictor lands 0.57% above the 256 MiB
+   one and 2.36% below the HBM reference.
    So the gate should be driven by whether the working set fits the effective
    LLC, not by whether it is smaller than a multiple of the per-XCD L2.
 
