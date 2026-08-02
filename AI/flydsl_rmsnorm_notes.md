@@ -4119,3 +4119,60 @@ environment is kept at `/tmp/c452env` and the recipe is in the message to
 @CrossVendor: the whole chain is import-level, so it needs no GPU and no
 NVIDIA hardware, which means every "what does a CUDA box do here" question on
 this branch was answerable on g23 the entire time.
+
+### The real wheel found a second defect nobody knew about
+
+@Reviewer's merge boundary: the simulation must let the real `quack.dsl`,
+`quack.rmsnorm` and `quack.pipeline` code execute and produce the failure at
+the `cutlass.pipeline` dependency edge, because a whole-module loader hides
+any narrow repair made *inside* those files. He is right, and with a real
+4.5.2 install the answer is simpler than any simulation: **intercept nothing
+at all.** Real 4.5.2 genuinely lacks the symbol, so the whole chain runs and
+Python raises the error itself. That is
+`test_real_cutlass_452_flydsl_import_survives_the_missing_symbol`, gated on
+`QUACK_CUTLASS_452_ENV` and skipped without it.
+
+Then the mutation he asked for — a narrow repair *inside* `quack/pipeline.py:13`:
+
+```
+try:
+    from cutlass.pipeline import agent_sync, alloc_reserved_mbarrier
+except ImportError:
+    from cutlass.pipeline import agent_sync
+    alloc_reserved_mbarrier = None
+```
+
+It is visible to the test, which is what he wanted proven. But it did not
+produce XPASS — it moved the failure to a **different, previously unknown
+one**:
+
+```
+quack/rounding.py:25 -> from cutlass._mlir_helpers.arith import bitcast
+ImportError: No module named 'cutlass._mlir_helpers'
+```
+
+4.5.2 ships `cutlass/_mlir`, not `cutlass/_mlir_helpers`. So **the 4.5.2 gap
+is at least two independent symbols in two different files**, and every
+statement on this branch describing it as "the missing `alloc_reserved_mbarrier`"
+— including the marker reason, the docstrings and the notes above — has been
+describing one member of a set with more than one member. Nobody knew because
+nobody had the wheel; it was inferred from source the whole time.
+
+That also falsified an assertion I had just written. The real-wheel test
+pinned `exc_name == "cutlass.pipeline"` and the exact three-frame chain, so
+the inner repair read as "the real failure was not the cutlass.pipeline one"
+— a repair reported as an unrelated breakage. Widened to
+`exc_name.startswith("cutlass")`, with the specific edge reported rather than
+asserted: what this test is about is the *coupling*, a FlyDSL import dying
+anywhere inside a cutedsl bootstrap it does not use, and that is now what it
+asserts. With both inner repairs applied it goes `XPASS(strict)`.
+
+| | real-wheel test |
+|---|---|
+| unpatched | `1 xfailed` |
+| repair inside `quack/pipeline.py` only | `1 xfailed` (moved to rounding.py) |
+| repairs in `pipeline.py` + `rounding.py` | `XPASS(strict)` |
+| no `QUACK_CUTLASS_452_ENV` | `1 skipped` |
+
+Gate with the env var set: `4 passed, 2 xfailed`; without it,
+`4 passed, 1 skipped, 1 xfailed`.

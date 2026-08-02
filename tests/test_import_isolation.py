@@ -524,6 +524,144 @@ def test_simulated_cuda_flydsl_import_survives_a_broken_cutedsl_chain():
     )
 
 
+CUTLASS_452_ENV = os.environ.get("QUACK_CUTLASS_452_ENV")
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=CutedslGateStillCouplesFlydsl,
+    reason=(
+        "Same desired behaviour as the simulated test above, with nothing "
+        "simulated: real quack.dsl, quack.rmsnorm and quack.pipeline all "
+        "execute and a real cutlass 4.5.2 raises the real ImportError. Skips "
+        "unless QUACK_CUTLASS_452_ENV points at such an install."
+    ),
+)
+def test_real_cutlass_452_flydsl_import_survives_the_missing_symbol():
+    """The simulated test's claim, checked with no meta_path fiction at all.
+
+    @Reviewer's merge boundary, and he is right that the simulation could not
+    reach it on its own: a loader that replaces ``quack.pipeline`` wholesale
+    hides any narrow repair made *inside* ``quack/pipeline.py``, and a
+    hand-built ``path`` only fixes the shape of the metadata rather than
+    letting the import machinery produce it.
+
+    Nothing here is stubbed. Real ``nvidia-cutlass-dsl==4.5.2`` genuinely does
+    not export ``alloc_reserved_mbarrier``, so the whole chain runs and Python
+    raises the error itself:
+
+        quack/__init__.py:22 -> quack/rmsnorm.py:24 -> quack/pipeline.py:13
+        ImportError: cannot import name 'alloc_reserved_mbarrier'
+                     from 'cutlass.pipeline'
+        name='cutlass.pipeline'  path='.../cutlass/pipeline/__init__.py'
+
+    So this is the same assertion as its simulated sibling with every prop
+    removed, and a repair inside ``quack/pipeline.py`` or ``quack/rmsnorm.py``
+    is visible to it because that code actually executes.
+
+    Recipe for the environment, verified against wheels whose sha256 matched
+    @Reviewer's independently (``nvidia-cutlass-dsl==4.5.2``
+    ``68ed1b63ca74aae87955012da9dfd7fdaae471329d0028b229b841c7192ccf52``;
+    ``nvidia-cutlass-dsl-libs-base==4.5.2`` cp310
+    ``386e832427e3670479049a1560e4d8d2e565d8c0f37a6852c6d7043d046548f1``)::
+
+        pip install --target $D --no-deps <those two> \\
+            cuda-python==12.9.7 cuda-bindings cuda-pathfinder
+        QUACK_CUTLASS_452_ENV=$D
+
+    It needs no GPU and no NVIDIA hardware -- the failure is import-level, so
+    it runs on the ROCm box. That is worth stating plainly because every
+    earlier claim on this branch about 4.5.2 was inferred from reading source
+    when it could have been observed here all along.
+    """
+    if not CUTLASS_452_ENV:
+        pytest.skip("set QUACK_CUTLASS_452_ENV to a real cutlass 4.5.2 install")
+    env_root = Path(CUTLASS_452_ENV)
+    packages = env_root / "nvidia_cutlass_dsl" / "python_packages"
+    if not packages.is_dir():
+        pytest.skip(f"{packages} is not a cutlass install")
+
+    result = _run_python(
+        f"""
+        import json
+        import sys
+
+        sys.path.insert(0, {str(packages)!r})
+        sys.path.insert(0, {str(env_root)!r})
+
+        import cutlass.pipeline
+
+        # Precondition, not an assumption: this environment must actually be
+        # the broken one. If a future cutlass here grows the symbol, this test
+        # has nothing to say and must say so rather than pass vacuously.
+        assert not hasattr(cutlass.pipeline, "alloc_reserved_mbarrier"), (
+            "this cutlass exports alloc_reserved_mbarrier; it is not 4.5.2-like"
+        )
+
+        import torch
+
+        torch.version.hip = None
+
+        outcome = {{"branch": None, "exc_name": None, "chain": None}}
+        try:
+            import quack.rmsnorm_flydsl
+        except ImportError as exc:
+            import traceback
+
+            frames = traceback.extract_tb(sys.exc_info()[2])
+            outcome["branch"] = "cutedsl_gate_still_couples_flydsl"
+            outcome["exc_name"] = exc.name
+            outcome["chain"] = [f.filename.split("/")[-1] + ":" + str(f.lineno)
+                                for f in frames[-3:]]
+            print("SENTINEL " + json.dumps(outcome))
+            raise SystemExit(3)
+
+        assert callable(quack.rmsnorm_flydsl.rmsnorm)
+        outcome["branch"] = "flydsl_import_survived"
+        print("SENTINEL " + json.dumps(outcome))
+        """,
+        check=False,
+    )
+    assert result.returncode in (0, 3), (
+        f"the real-wheel run broke for a third reason (rc={result.returncode}):\n"
+        + result.stdout
+        + result.stderr
+    )
+    sentinels = [ln for ln in result.stdout.splitlines() if ln.startswith("SENTINEL ")]
+    assert len(sentinels) == 1, f"no single outcome reported:\n{result.stdout}{result.stderr}"
+    outcome = json.loads(sentinels[0][len("SENTINEL ") :])
+
+    if result.returncode == 3:
+        assert outcome["branch"] == "cutedsl_gate_still_couples_flydsl", (
+            f"exit 3 from an unexpected branch {outcome['branch']!r}"
+        )
+        # Any cutlass-attributed failure counts, not just the first one.
+        #
+        # Deliberately wider than ``== "cutlass.pipeline"``, which is what this
+        # assertion said until a mutation proved it wrong. Applying the narrow
+        # repair inside quack/pipeline.py:13 moved the failure to
+        # quack/rounding.py:25 -> ``cutlass._mlir_helpers.arith``, which 4.5.2
+        # also does not have (it ships ``cutlass/_mlir``). So the 4.5.2 gap is
+        # at least two independent symbols, and pinning the first one would
+        # make an inner repair look like an unrelated breakage rather than
+        # progress. What this test is about is the coupling -- a FlyDSL import
+        # dying anywhere inside a cutedsl bootstrap it does not use -- so the
+        # assertion is about that, and the specific edge is reported for the
+        # reader rather than asserted.
+        assert (outcome["exc_name"] or "").startswith("cutlass"), (
+            f"the real failure was not attributed to cutlass at all: {outcome!r}"
+        )
+        raise CutedslGateStillCouplesFlydsl(
+            "against real cutlass 4.5.2, import quack.rmsnorm_flydsl still "
+            f"dies inside the cutedsl bootstrap it does not depend on: "
+            f"{outcome['exc_name']} via {outcome['chain']}"
+        )
+
+    assert outcome["branch"] == "flydsl_import_survived", (
+        f"exit 0 from an unexpected branch {outcome['branch']!r}"
+    )
+
+
 def test_pytest_plugin_collects_on_rocm_without_cutlass(tmp_path):
     if not _is_rocm_build():
         pytest.skip("requires a real ROCm PyTorch build")
