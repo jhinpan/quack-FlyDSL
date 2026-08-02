@@ -956,16 +956,33 @@ def _rows_are_disjoint_and_packed(tensor: torch.Tensor) -> bool:
     the descriptor is sized to the row and never addresses the gap. A stride
     *smaller* than the enclosed extent means two positions alias -- overlapping
     rows, or a zero-stride broadcast -- which is what this rejects.
+
+    The span of an axis is ``stride * (size - 1) + inner``, not ``stride *
+    size``: the last block along the axis occupies only ``inner`` elements, and
+    any padding after it is beyond the tensor. An earlier version used the
+    latter and so counted trailing padding as occupied, rejecting layouts that
+    do not alias -- @Reviewer's example is shape ``(2, 2, 64)`` stride ``(144,
+    80, 1)``, whose true span is ``80 * 1 + 64 = 144``, exactly the outer
+    stride, but which the old arithmetic scored as 160 and copied. That was
+    conservative rather than wrong, and it cost a needless copy on padded
+    per-head inputs.
+
+    Even corrected, this remains **sufficient rather than equivalent** to "no
+    two elements share storage". It tests a nested-containment property, which
+    every layout the kernels can address satisfies, but a sufficiently exotic
+    stride set could be alias-free and still be rejected. Rejection costs a
+    copy, never correctness, so the asymmetry is the safe way round -- but the
+    predicate should not be described as deciding aliasing in general.
     """
     if tensor.stride(-1) != 1:
         return False
-    extent = tensor.shape[-1]
+    span = tensor.shape[-1]
     for stride, size in sorted(
         zip(tensor.stride()[:-1], tensor.shape[:-1]), key=lambda axis: axis[0]
     ):
-        if stride < extent:
+        if stride < span:
             return False
-        extent = stride * size
+        span = stride * (size - 1) + span
     return True
 
 

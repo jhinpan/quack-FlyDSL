@@ -1742,8 +1742,22 @@ def test_overlapping_rows_are_copied_and_do_not_poison_the_cache():
     assert copied.data_ptr() != overlapping.data_ptr()
     _assert_close(rmsnorm(overlapping, weight), _reference(overlapping, weight, 1e-6))
 
+    # Compare against a reference, and against the same call on a *clean*
+    # cache. An earlier version asserted
+    #     torch.equal(rmsnorm(plain, weight), rmsnorm(plain.contiguous(), weight))
+    # which proves nothing: `plain` is already contiguous, so `.contiguous()`
+    # returns the same tensor and both sides go through the same cache entry.
+    # Two identically poisoned answers compare equal. @Reviewer demonstrated it
+    # -- both sides were bit-identical at (16,256) while each was wrong by
+    # 10.875. Any no-poison assertion has to reach outside the suspect cache.
     plain = torch.randn((m, n), device="cuda", dtype=torch.bfloat16)
-    assert torch.equal(rmsnorm(plain, weight), rmsnorm(plain.contiguous(), weight))
+    poisoned_maybe = rmsnorm(plain, weight)
+    rmsnorm_flydsl_impl._FWD_CACHE.clear()
+    rmsnorm_flydsl_impl._BWD_CACHE.clear()
+    assert torch.equal(poisoned_maybe, rmsnorm(plain, weight)), (
+        "the launcher built for the overlapping view was reused for a plain call"
+    )
+    _assert_close(poisoned_maybe, _reference(plain, weight, 1e-6))
 
 
 @pytest.mark.parametrize("use_compile", [False, True])
@@ -1790,6 +1804,68 @@ def test_a_contiguous_singleton_row_does_not_poison_the_cache(use_compile):
             "a launcher built for one layout was reused for the other"
         )
         _assert_close(function(second, weight), _reference(second, weight, 1e-6))
+
+
+@pytest.mark.parametrize("variant", ["ordinary", "residual", "per_head"])
+def test_compiled_singleton_first_does_not_poison_other_variants(variant):
+    """The singleton-first order, compiled, across the variants that reuse a key.
+
+    @Reviewer reproduced the poison independently through a compiled
+    residual-first sequence (next ordinary call wrong by 7.227) and a per-head
+    singleton-row sequence (6.359), and noted that no permanent compiled test
+    started with a single row -- the dynamic row loops all begin at 8. Each
+    variant here builds its launcher from a singleton, then runs an ordinary
+    call, then re-runs it on a cleared cache and demands the same answer *and*
+    agreement with the reference. The cleared-cache comparison alone would pass
+    if both runs were wrong identically -- that is the failure mode @Reviewer
+    found in the test above, so this one does not repeat it.
+    """
+    torch.manual_seed(0)
+    heads, dim = 4, 64
+    n = heads * dim
+    function = torch.compile(rmsnorm, dynamic=True)
+
+    if variant == "per_head":
+        weight = torch.randn((heads, dim), device="cuda", dtype=torch.bfloat16)
+        singleton = torch.randn((dim, 1, heads), device="cuda", dtype=torch.bfloat16).permute(
+            1, 2, 0
+        )
+        ordinary = torch.randn((16, heads, dim), device="cuda", dtype=torch.bfloat16)
+        call = lambda t: function(t, weight)
+        reference = lambda t: _full_reference(t, weight)[0]
+    else:
+        weight = torch.randn(n, device="cuda", dtype=torch.bfloat16)
+        singleton = torch.randn((n, 1), device="cuda", dtype=torch.bfloat16).t()
+        ordinary = torch.randn((16, n), device="cuda", dtype=torch.bfloat16)
+        if variant == "residual":
+            # One residual per row count, drawn once, so repeat calls are
+            # bit-comparable; a fresh randn per call would differ on values
+            # alone and the assertion would say nothing about the cache.
+            residuals = {
+                rows: torch.randn((rows, n), device="cuda", dtype=torch.bfloat16)
+                for rows in (1, 16)
+            }
+
+            def call(t):
+                out, _ = function(t, weight, residual=residuals[t.shape[0]], prenorm=True)
+                return out
+
+            reference = lambda t: _full_reference(t, weight, residual=residuals[t.shape[0]])[0]
+        else:
+            call = lambda t: function(t, weight)
+            reference = lambda t: _full_reference(t, weight)[0]
+
+    rmsnorm_flydsl_impl._FWD_CACHE.clear()
+    rmsnorm_flydsl_impl._BWD_CACHE.clear()
+    call(singleton)
+    after_singleton = call(ordinary)
+
+    rmsnorm_flydsl_impl._FWD_CACHE.clear()
+    rmsnorm_flydsl_impl._BWD_CACHE.clear()
+    assert torch.equal(after_singleton, call(ordinary)), (
+        f"{variant}: the singleton launcher was reused for the ordinary call"
+    )
+    _assert_close(after_singleton, reference(ordinary))
 
 
 def test_restriding_a_size_one_axis_preserves_storage_and_values():
