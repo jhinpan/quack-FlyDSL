@@ -1,0 +1,236 @@
+{
+  "what": "the occupancy intervention re-run twice on each of two MI355X dies, to separate run-to-run noise from a per-card difference",
+  "generator": "AI/probe_rmsnorm_occupancy_intervention.py, run 2x on HIP_VISIBLE_DEVICES=5 and 2x on 4; this file assembled from the four sidecars",
+  "commit": "6d4ab9c4a7279702f0132a95df2b36f17cfc261a",
+  "why": "I published, and told the team, that this intervention 'reproduces across two GPUs to within 0.2% on every bandwidth figure'. That was devices 6 and 5. Device 4 breaks it: every row is faster there, by 1.7% to 11.0%, reproducibly. Two runs per device separate the two candidate explanations and the answer is not noise -- worst within-device spread 1.08%, worst between-device gap 10.96%.",
+  "worst_within_device_spread_pct": 1.08,
+  "worst_between_device_gap_pct": 10.96,
+  "direction": "device 4 is faster on every row, despite a LOWER streaming ceiling than device 5",
+  "streaming_ceiling_tbps_two_read_one_write": {
+    "device4": 6.004,
+    "device5": 6.086,
+    "device6": 6.074,
+    "note": "same probe as the cliff sidecar's ceiling, 512 MiB, min of 10x20. Device 4 is the slowest of the three at pure streaming and the fastest at this kernel, so normalising by a per-device ceiling would WIDEN the gap, not close it. Whatever device 4 is doing better is not raw bandwidth."
+  },
+  "what_does_reproduce": {
+    "registers_and_spills": "identical on every row across all four runs -- the compiler output does not depend on which die runs it, as expected, which is why the register story is unaffected",
+    "occupancy": "within 0.6% on every row; see per-row occupancy_device4/5",
+    "relative_conclusions": {
+      "device5": {
+        "treatment_none_to_2_lift_pct": 38.44,
+        "control_none_to_2_change_pct": 0.37,
+        "equal_occupancy_bandwidth_ratio": 1.455
+      },
+      "device4": {
+        "treatment_none_to_2_lift_pct": 39.57,
+        "control_none_to_2_change_pct": 0.44,
+        "equal_occupancy_bandwidth_ratio": 1.453
+      }
+    },
+    "reading": "the claims this experiment makes are all ratios -- the none->2 lift, the flat control, the equal-occupancy pair -- and those agree across dies to about a percentage point. It is the ABSOLUTE pct_of_ceiling figures that are per-card."
+  },
+  "unexplained": "why device 4 is faster. Idle sclk/mclk/fclk/socclk are identical across 4/5/6 and junction temperatures are within 2C. Not investigated further: it does not bear on any conclusion here, and saying 'reproduces across GPUs' without checking a third die is what produced the wrong claim in the first place.",
+  "bonus": "this is a third, unplanned instance of the equal-occupancy argument. Occupancy matches across dies to 0.6% while bandwidth differs by up to 11%, so occupancy again fails to determine bandwidth -- this time with the kernel, the registers and the spills all held exactly fixed.",
+  "rows": [
+    {
+      "sweep": "control_sweep",
+      "n": 49152,
+      "waves_per_eu_hint": 2,
+      "pct_of_ceiling_device5": [
+        77.0,
+        77.08
+      ],
+      "pct_of_ceiling_device4": [
+        79.45,
+        79.4
+      ],
+      "worst_within_device_spread_pct": 0.1,
+      "between_device_gap_pct": 3.01,
+      "registers_identical_across_devices": true,
+      "spills_identical_across_devices": true,
+      "occupancy_device5": [
+        1.9518,
+        1.9545
+      ],
+      "occupancy_device4": [
+        1.9583,
+        1.9602
+      ]
+    },
+    {
+      "sweep": "control_sweep",
+      "n": 49152,
+      "waves_per_eu_hint": 3,
+      "pct_of_ceiling_device5": [
+        46.48,
+        46.06
+      ],
+      "pct_of_ceiling_device4": [
+        48.6,
+        48.77
+      ],
+      "worst_within_device_spread_pct": 0.91,
+      "between_device_gap_pct": 4.56,
+      "registers_identical_across_devices": true,
+      "spills_identical_across_devices": true,
+      "occupancy_device5": [
+        2.8195,
+        2.8199
+      ],
+      "occupancy_device4": [
+        2.7969,
+        2.8052
+      ]
+    },
+    {
+      "sweep": "control_sweep",
+      "n": 49152,
+      "waves_per_eu_hint": 4,
+      "pct_of_ceiling_device5": [
+        43.22,
+        43.42
+      ],
+      "pct_of_ceiling_device4": [
+        47.01,
+        47.52
+      ],
+      "worst_within_device_spread_pct": 1.08,
+      "between_device_gap_pct": 8.27,
+      "registers_identical_across_devices": true,
+      "spills_identical_across_devices": true,
+      "occupancy_device5": [
+        3.8841,
+        3.9052
+      ],
+      "occupancy_device4": [
+        3.8987,
+        3.9134
+      ]
+    },
+    {
+      "sweep": "control_sweep",
+      "n": 49152,
+      "waves_per_eu_hint": "none",
+      "pct_of_ceiling_device5": [
+        76.72,
+        76.81
+      ],
+      "pct_of_ceiling_device4": [
+        79.1,
+        79.09
+      ],
+      "worst_within_device_spread_pct": 0.12,
+      "between_device_gap_pct": 2.97,
+      "registers_identical_across_devices": true,
+      "spills_identical_across_devices": true,
+      "occupancy_device5": [
+        1.9595,
+        1.9617
+      ],
+      "occupancy_device4": [
+        1.9627,
+        1.9626
+      ]
+    },
+    {
+      "sweep": "treatment_sweep",
+      "n": 57344,
+      "waves_per_eu_hint": 2,
+      "pct_of_ceiling_device5": [
+        52.72,
+        52.79
+      ],
+      "pct_of_ceiling_device4": [
+        54.42,
+        54.42
+      ],
+      "worst_within_device_spread_pct": 0.13,
+      "between_device_gap_pct": 3.09,
+      "registers_identical_across_devices": true,
+      "spills_identical_across_devices": true,
+      "occupancy_device5": [
+        1.9371,
+        1.9381
+      ],
+      "occupancy_device4": [
+        1.9372,
+        1.9389
+      ]
+    },
+    {
+      "sweep": "treatment_sweep",
+      "n": 57344,
+      "waves_per_eu_hint": 3,
+      "pct_of_ceiling_device5": [
+        43.21,
+        43.26
+      ],
+      "pct_of_ceiling_device4": [
+        44.01,
+        44.09
+      ],
+      "worst_within_device_spread_pct": 0.18,
+      "between_device_gap_pct": 1.73,
+      "registers_identical_across_devices": true,
+      "spills_identical_across_devices": true,
+      "occupancy_device5": [
+        2.7963,
+        2.8068
+      ],
+      "occupancy_device4": [
+        2.7999,
+        2.8069
+      ]
+    },
+    {
+      "sweep": "treatment_sweep",
+      "n": 57344,
+      "waves_per_eu_hint": 4,
+      "pct_of_ceiling_device5": [
+        34.41,
+        34.38
+      ],
+      "pct_of_ceiling_device4": [
+        38.22,
+        38.18
+      ],
+      "worst_within_device_spread_pct": 0.1,
+      "between_device_gap_pct": 10.96,
+      "registers_identical_across_devices": true,
+      "spills_identical_across_devices": true,
+      "occupancy_device5": [
+        3.6874,
+        3.672
+      ],
+      "occupancy_device4": [
+        3.7086,
+        3.7188
+      ]
+    },
+    {
+      "sweep": "treatment_sweep",
+      "n": 57344,
+      "waves_per_eu_hint": "none",
+      "pct_of_ceiling_device5": [
+        38.08,
+        38.08
+      ],
+      "pct_of_ceiling_device4": [
+        38.99,
+        38.97
+      ],
+      "worst_within_device_spread_pct": 0.05,
+      "between_device_gap_pct": 2.34,
+      "registers_identical_across_devices": true,
+      "spills_identical_across_devices": true,
+      "occupancy_device5": [
+        1.0004,
+        1.0004
+      ],
+      "occupancy_device4": [
+        1.0004,
+        1.0004
+      ]
+    }
+  ]
+}

@@ -75,11 +75,22 @@ alongside, so a reader can see how well matched the held-fixed axis actually
 is; @Reviewer identified it.
 
 Provenance: @Reviewer noted that only the occupancy sidecar had been
-reproduced across GPUs while this had not, and the two were easy to read as
-both cross-checked. Rerunning the extended ladder on device 5 closes that: the
-four treatment rows from device 6 (commit 276398f) reproduce to within 0.2% on
-every bandwidth figure, with identical vgpr/spill/scratch counts, which is
-expected for the static half and worth stating for the timed half.
+reproduced across GPUs while this had not. Rerunning on device 5 matched device
+6 to within 0.2%, and I wrote that up as "reproduces across two GPUs". A third
+die falsified it. Device 4 is faster on every row, by 1.7% to 11.0%, and it
+reproduces -- two runs per die, worst within-device spread 1.08% against a
+worst between-device gap of 10.96%. See
+AI/data/rmsnorm_fwd_occupancy_intervention_cross_device.json.
+
+Two dies agreeing is one comparison, not a property of the hardware. What does
+carry across all three is what this experiment actually claims, all of which
+are ratios: the none->2 lift (+38.4% dev5, +39.6% dev4), the flat control
+(+0.37%, +0.44%), the equal-occupancy ratio (1.455, 1.453), and bit-identical
+vgpr/spill/scratch counts. The absolute pct_of_ceiling numbers are per-card.
+The gap is not the streaming ceiling either: device 4 measures 6.004 TB/s on
+two_read_one_write against 6.086 (dev5) and 6.074 (dev6), so it is the slowest
+of the three at streaming and the fastest here, and normalising per-die would
+widen the gap. Left unexplained rather than given a mechanism.
 
 Run:  HIP_VISIBLE_DEVICES=<idle> python AI/probe_rmsnorm_occupancy_intervention.py
 Writes AI/data/rmsnorm_fwd_occupancy_intervention.json.
@@ -336,15 +347,27 @@ def main():
     if not which("rocprofv3"):
         raise SystemExit("rocprofv3 not on PATH")
 
-    head = subprocess.run(
+    head_run = subprocess.run(
         ["git", "-C", str(REPO), "rev-parse", "HEAD"], capture_output=True, text=True, check=False
-    ).stdout.strip()
-    dirty = subprocess.run(
+    )
+    dirty_run = subprocess.run(
         ["git", "-C", str(REPO), "status", "--porcelain"],
         capture_output=True,
         text=True,
         check=False,
-    ).stdout.strip()
+    )
+    # Fail closed. commit="" with worktree_dirty=false reads as a clean
+    # checkout when the truth is "git did not answer" -- a failure mode
+    # indistinguishable from success, and quotable. The occupancy probe was
+    # fixed for this in e5efbe1; this one had the same hole.
+    if head_run.returncode or dirty_run.returncode or not head_run.stdout.strip():
+        raise SystemExit(
+            f"cannot read git provenance for {REPO} (rev-parse rc={head_run.returncode}, "
+            f"status rc={dirty_run.returncode}). Refusing to write a sidecar whose commit "
+            "field would be empty and whose dirty flag would read clean by default."
+        )
+    head = head_run.stdout.strip()
+    dirty = dirty_run.stdout.strip()
 
     treatment = []
     for hint in HINTS:
@@ -516,9 +539,21 @@ def main():
         "still_open": (
             "Directional only. A clean lever would change occupancy at constant spills; "
             "none is available here. Restoring occupancy recovers part of the lost "
-            "bandwidth, not all of it. Cross-device: the four treatment rows reproduce "
-            "device 6 (commit 276398f) to within 0.2 pct on bandwidth with identical "
-            "register and spill counts; the control's 3/4 rows are single-device so far."
+            "bandwidth, not all of it. Unexplained: why device 4 runs every row of this "
+            "sweep 1.7-11.0 pct faster than device 5 with identical code and a lower "
+            "streaming ceiling."
+        ),
+        "cross_device": (
+            "Run on three dies. Devices 5 and 6 agree to 0.2 pct on bandwidth; device 4 is "
+            "faster on EVERY row by 1.7-11.0 pct, reproducibly (two runs per die: worst "
+            "within-device spread 1.08 pct, worst between-device gap 10.96 pct). So the "
+            "earlier 'reproduces across two GPUs to within 0.2 pct' was one comparison "
+            "generalised into a hardware property. The absolute pct_of_ceiling figures are "
+            "per-card. Everything this experiment claims is a ratio and the ratios hold on "
+            "both dies to about a point -- none->2 lift +38.4/+39.6 pct, control none->2 "
+            "+0.37/+0.44 pct, equal-occupancy bandwidth ratio 1.455/1.453 -- with "
+            "bit-identical register and spill counts throughout. Full rows in "
+            "AI/data/rmsnorm_fwd_occupancy_intervention_cross_device.json."
         ),
         "treatment_sweep": treatment,
         "control_sweep": control,

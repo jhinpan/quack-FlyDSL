@@ -1578,12 +1578,40 @@ What remains unestablished is the *magnitude* of the occupancy contribution, and
 "latency-hiding-bound" is still an assumption about the kernel rather than a
 finding.
 
-Provenance: the treatment ladder now reproduces across two GPUs — device 6 in
-`276398f` and device 5 here — to within 0.2% on every bandwidth figure, with
-identical register and spill counts. The control's 3/4 rows are single-device so
-far. This distinction is worth stating because the previous version of this
-section sat next to a cross-reproduced occupancy table and was easy to read as
-having the same backing.
+**Provenance, and a claim of mine that a third die falsified.** I published, and
+told the team, that the treatment ladder "reproduces across two GPUs — device 6
+in `276398f` and device 5 here — to within 0.2% on every bandwidth figure". That
+was true of 6 and 5 and it is false in general. Device 4 is faster on *every*
+row, by 1.7% to 11.0%, and it reproduces: two runs per die give a worst
+within-device spread of 1.08% against a worst between-device gap of 10.96%. The
+data is in `AI/data/rmsnorm_fwd_occupancy_intervention_cross_device.json`.
+
+Two GPUs agreeing is one comparison, not a property of the hardware, and I had
+already been caught this session generalising exactly this way — the *reverse*
+direction, calling a same-device spread a cross-device reproduction. Having
+corrected that, I went on to quote "reproduces across two GPUs" as a provenance
+guarantee in the very next section, and in the message I sent the team an hour
+ago. Same fault, opposite sign, one file apart.
+
+The gap is not the streaming ceiling. Measuring `two_read_one_write` on each
+die: device 4 is **6.004** TB/s, device 5 **6.086**, device 6 **6.074**. Device
+4 is the *slowest* of the three at pure streaming and the fastest at this
+kernel, so a per-device ceiling would widen the gap rather than close it. Idle
+sclk/mclk/fclk/socclk are identical across the three and junction temperatures
+sit within 2 °C. I have not chased it further: it bears on no conclusion here,
+and inventing a mechanism for it is how the last two retractions started.
+
+What does survive, and is the reason nothing above changes: **every claim this
+experiment makes is a ratio.** The none→2 lift is +38.4% on device 5 and +39.6%
+on device 4; the control's none→2 is +0.37% and +0.44%; the equal-occupancy
+bandwidth ratio is 1.455 and 1.453. Registers and spills are bit-identical on
+all four runs. It is the absolute `pct_of_ceiling` figures that are per-card,
+and those appear in this file as context rather than as the argument.
+
+It also hands the equal-occupancy point a third instance for free: occupancy
+matches across dies to within 0.6% while bandwidth differs by up to 11%, with
+kernel, registers and spills all held exactly fixed. Occupancy does not
+determine bandwidth even across two copies of the same silicon.
 
 **The timing regimes line up, and that is checkable rather than asserted.**
 @Reviewer verified it on the device-6 run and it holds here: the intervention
