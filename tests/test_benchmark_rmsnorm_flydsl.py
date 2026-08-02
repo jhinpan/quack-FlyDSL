@@ -1913,8 +1913,35 @@ def test_the_uid_shape_check_still_accepts_what_the_runtime_reports(tmp_path):
     # must keep resolving -- the driver prints unique_id in lowercase but the
     # hex text itself is case-insensitive, so refusing uppercase would be
     # inventing a constraint rather than enforcing one.
+    #
+    # @Autotune raised uppercase as a residual in the sibling module on
+    # 2026-08-02: two byte strings mapping to one identity. Checked here rather
+    # than assumed to transfer, because it is a different defect class from the
+    # four shapes above and the difference is the whole argument. Those decoded
+    # a string the driver *cannot emit* into a valid id, so a match was against
+    # a value nothing measured. Case folding maps two spellings of the *same*
+    # sixteen hex digits onto the same card -- many-to-one on notation, not on
+    # identity -- so it cannot produce a false match with a different device.
+    # Live torch emits lowercase on all 8 (measured), so tightening would only
+    # refuse input nothing sends; that is the over-refusal @Autotune's own
+    # commit was undoing. Left accepting, deliberately, with the reason stated.
     assert benchmark._torch_unique_id(_properties()) == REAL_UID
     assert benchmark._torch_unique_id(_properties(uuid_text=b"A60C2956CD9DD4C5")) == REAL_UID
+    assert benchmark._torch_unique_id(_properties(uuid_text=b"A60c2956Cd9dD4c5")) == REAL_UID
+    # The claim that makes case folding safe, asserted rather than argued: a
+    # spelling change must not move the answer to another card. Both cases
+    # resolve against the same tree, and neither goes ambiguous.
+    folded = tmp_path / "folded"
+    folded.mkdir()
+    _node(folded, 2, GPU_AT_BDF, ((3, 262144),))
+    for text in (b"a60c2956cd9dd4c5", b"A60C2956CD9DD4C5"):
+        value, provenance = benchmark._last_level_cache_bytes(
+            _hip_torch(), _properties(uuid_text=text), str(folded)
+        )
+        assert value == 256 * 1024**2, text
+        assert provenance["matched_by"] == "unique_id", text
+        assert provenance["matched_node"].endswith("/2"), text
+        assert "degraded" not in provenance, text
     root = tmp_path / "nodes"
     root.mkdir()
     _node(root, 2, GPU_AT_BDF, ((3, 262144),))
