@@ -2,6 +2,7 @@
 
 import ast
 import inspect
+import itertools
 import math
 import threading
 from pathlib import Path
@@ -1669,7 +1670,9 @@ def test_the_copy_still_happens_where_upstream_takes_it():
 
     theirs = predicates(upstream)
     assert theirs, "quack.rmsnorm._ensure_contiguous no longer branches"
-    assert theirs.issubset(predicates(ours)), (theirs, predicates(ours))
+    assert "torch.compiler.is_compiling()" in predicates(ours), (
+        "the torch.compile guard must survive; dynamo cannot inspect strides"
+    )
 
     torch.manual_seed(0)
     n, m = 512, 64
@@ -1678,6 +1681,159 @@ def test_the_copy_still_happens_where_upstream_takes_it():
     weight = torch.randn(n, device="cuda", dtype=torch.bfloat16)
     assert rmsnorm_flydsl_impl._packed_rows(transposed).data_ptr() != transposed.data_ptr()
     _assert_close(rmsnorm(transposed, weight), _reference(transposed, weight, 1e-6))
+
+
+def test_our_copy_predicate_is_a_subset_of_upstreams():
+    """Anything ``quack.rmsnorm`` copies, this backend must copy too.
+
+    The previous version of this compared the *text* of the two predicates,
+    which tied the test to how the condition was spelled: moving it into a
+    named helper broke the test without changing behaviour, and -- worse -- a
+    matching spelling would have proved nothing about what the functions do.
+    This enumerates real views instead and compares the two decisions on each.
+
+    The subset may be proper. Upstream copies a shape like ``(N, 1)``, whose
+    last stride is not 1 but which is nonetheless fully packed; keeping it is
+    safe. The direction that matters is the other one, and it is exact: no view
+    that upstream copies may be kept here.
+    """
+    upstream_keeps = lambda t: t.stride(-1) == 1  # noqa: E731 -- quack/rmsnorm.py
+    base = torch.randn(1 << 16, device="cuda", dtype=torch.bfloat16)
+    kept_by_us_only = []
+    for m, n in itertools.product((1, 2, 4, 16, 64), (8, 16, 64, 256)):
+        square = base[: m * n].view(m, n)
+        candidates = [
+            square,
+            square.t(),
+            square[:, : n - 8] if n > 8 else square,
+            square[:1].expand(m, n),
+            base[: m * n + m].unfold(0, n, 1)[:m],
+            square.flip(0),
+            base[: m * (n + 8)].view(m, n + 8)[:, :n],
+        ]
+        for view in candidates:
+            ours_keeps = rmsnorm_flydsl_impl._packed_rows(view).data_ptr() == view.data_ptr()
+            if ours_keeps and not upstream_keeps(view):
+                if not view.is_contiguous():
+                    kept_by_us_only.append((tuple(view.shape), view.stride()))
+    assert not kept_by_us_only, kept_by_us_only
+
+
+def test_overlapping_rows_are_copied_and_do_not_poison_the_cache():
+    """A unit last stride does not imply the rows are disjoint.
+
+    ``storage.unfold(0, n, 1)`` has stride ``(1, 1)``: each row is contiguous,
+    so ``stride(-1) == 1`` holds, yet consecutive rows share storage. FlyDSL
+    builds its ABI from the first unit-stride axis, and ``_FWD_CACHE``'s key
+    carries no layout term, so admitting one of these was not merely a wrong
+    answer for that call -- the launcher it built was cached and **the next
+    ordinary contiguous call silently reused it**. That second assertion is the
+    one that matters: a fix that only corrected the overlapping call itself
+    would still leave every later caller wrong.
+    """
+    torch.manual_seed(0)
+    n, m = 256, 64
+    storage = torch.randn(n + m, device="cuda", dtype=torch.bfloat16)
+    overlapping = storage.unfold(0, n, 1)[:m]
+    assert overlapping.stride() == (1, 1) and overlapping.stride(-1) == 1
+    weight = torch.randn(n, device="cuda", dtype=torch.bfloat16)
+
+    copied = rmsnorm_flydsl_impl._packed_rows(overlapping)
+    assert copied.data_ptr() != overlapping.data_ptr()
+    _assert_close(rmsnorm(overlapping, weight), _reference(overlapping, weight, 1e-6))
+
+    plain = torch.randn((m, n), device="cuda", dtype=torch.bfloat16)
+    assert torch.equal(rmsnorm(plain, weight), rmsnorm(plain.contiguous(), weight))
+
+
+def test_broadcast_and_reversed_views_are_copied():
+    """Aliasing is not only row overlap; a zero stride repeats one row entirely."""
+    torch.manual_seed(0)
+    n, m = 256, 8
+    row = torch.randn((1, n), device="cuda", dtype=torch.bfloat16)
+    broadcast = row.expand(m, n)
+    assert broadcast.stride() == (0, 1)
+    assert rmsnorm_flydsl_impl._packed_rows(broadcast).data_ptr() != broadcast.data_ptr()
+    weight = torch.randn(n, device="cuda", dtype=torch.bfloat16)
+    _assert_close(rmsnorm(broadcast, weight), _reference(broadcast, weight, 1e-6))
+
+
+@pytest.mark.parametrize("operand", ["x", "weight", "bias", "residual", "dout", "dresidual_out"])
+def test_every_operand_rejects_an_overlapping_view(operand):
+    """The helper guards each operand, not just the activation.
+
+    @Reviewer's point: the earlier tests covered a 2-D bf16 ``x`` on the
+    forward and nothing else, so a call site left un-guarded would not have
+    been caught.
+
+    Every case asserts the same thing, and it is deliberately *exact*: feeding
+    an overlapping view must produce bit-for-bit what feeding its packed copy
+    produces. That is the whole content of "the helper copies it" -- a copy
+    cannot change the arithmetic, so any difference at all is the guard having
+    been skipped. An earlier draft of this test compared against a recomputed
+    reference through ``_assert_close`` instead, and it was too weak to do the
+    job: with the guard reverted, the corrupted ``residual`` output was off by
+    0.031, comfortably inside bf16's 2e-2 relative tolerance at these
+    magnitudes, and the test passed while reading corrupt memory. Only ``x``
+    and ``dout`` failed, so five of the six cases were decoration.
+
+    The other half of that draft's mistake was handing ``weight`` and ``bias``
+    a 1-D vector. Overlap needs two axes to exist, so those cases could not
+    have caught anything; the ``weight`` failure in the suite-wide run was the
+    ``x`` case's poisoned cache leaking across tests, not detection. Both are
+    per-head 2-D here, which is a shape the kernel genuinely accepts.
+    """
+    torch.manual_seed(0)
+    heads, dim = 4, 64
+    n, m = heads * dim, 16
+    storage = torch.randn(n + m, device="cuda", dtype=torch.bfloat16)
+    # stride (1, 1): every row contiguous, consecutive rows sharing storage.
+    overlapping_rows = storage.unfold(0, n, 1)[:m]
+    overlapping_affine = storage.unfold(0, dim, 1)[:heads]
+    packed_rows = overlapping_rows.contiguous()
+    packed_affine = overlapping_affine.contiguous()
+
+    x_flat = torch.randn((m, n), device="cuda", dtype=torch.bfloat16)
+    x_heads = x_flat.view(m, heads, dim)
+    weight = torch.randn(n, device="cuda", dtype=torch.bfloat16)
+
+    def forward(**kwargs):
+        return rmsnorm(**kwargs)
+
+    if operand == "x":
+        got = forward(x=overlapping_rows, weight=weight)
+        expected = forward(x=packed_rows, weight=weight)
+    elif operand == "weight":
+        got = forward(x=x_heads, weight=overlapping_affine)
+        expected = forward(x=x_heads, weight=packed_affine)
+    elif operand == "bias":
+        got = forward(x=x_heads, weight=packed_affine, bias=overlapping_affine)
+        expected = forward(x=x_heads, weight=packed_affine, bias=packed_affine)
+    elif operand == "residual":
+        got, _ = rmsnorm(x_flat, weight, residual=overlapping_rows, prenorm=True)
+        expected, _ = rmsnorm(x_flat, weight, residual=packed_rows, prenorm=True)
+    else:
+        torch.manual_seed(7)
+        seed_grad = torch.randn((m, n), device="cuda", dtype=torch.bfloat16)
+
+        def backward(residual_grad):
+            grad_x = x_flat.clone().requires_grad_()
+            grad_w = weight.clone().requires_grad_()
+            if operand == "dout":
+                rmsnorm(grad_x, grad_w).backward(residual_grad)
+            else:
+                out, pre = rmsnorm(grad_x, grad_w, prenorm=True)
+                torch.autograd.backward([out, pre], [seed_grad, residual_grad])
+            return grad_x.grad, grad_w.grad
+
+        got = torch.cat([grad.reshape(-1) for grad in backward(overlapping_rows)])
+        expected = torch.cat([grad.reshape(-1) for grad in backward(packed_rows)])
+
+    assert torch.equal(got, expected), (
+        f"{operand}: an overlapping view disagreed with its packed copy by "
+        f"{(got.float() - expected.float()).abs().max().item()}, so it reached "
+        f"the kernel unguarded"
+    )
 
 
 def test_unsupported_architectures_are_named(monkeypatch):

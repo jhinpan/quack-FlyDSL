@@ -857,17 +857,66 @@ def _packed_rows(tensor: torch.Tensor) -> torch.Tensor:
     ``torch.cuda.set_device(6)``, and the packed baseline of 89.9 us is
     5967 GB/s of logical traffic, which is under the roofline.
 
-    The predicate is ``stride(-1) != 1``, matching ``_ensure_contiguous`` in
-    :mod:`quack.rmsnorm` exactly, so both backends copy on the same inputs. A
-    transposed view does have ``stride(-1) != 1``, and it is copied -- driving
-    the kernel with one directly produces a wrong answer, so this is the case
-    the copy exists for. Under ``torch.compile`` the copy stays unconditional
-    because dynamo cannot inspect strides on fake tensors; that is upstream's
-    reasoning and it applies here unchanged.
+    A unit last stride is necessary but **not sufficient**, and the first
+    version of this helper tested only that. ``storage.unfold(0, n, 1)`` gives
+    stride ``(1, 1)``: every row is contiguous, ``stride(-1) == 1`` holds, and
+    consecutive rows *overlap in storage*. FlyDSL builds the ABI from the first
+    unit-stride axis, so such a tensor is not merely computed wrong -- the
+    launcher built for it is cached under ``_FWD_CACHE``'s key, which carries
+    no layout term, and the **next ordinary contiguous call reuses it and is
+    silently wrong too**, until the cache is cleared. Measured at 64x256 bf16:
+    the overlapping call reads max abs error 11.75, and the plain call right
+    after it reads 11.79 where it should read 0. @Reviewer found this.
+
+    So the predicate also requires ``stride(0) >= size(-1)`` -- rows that do not
+    tread on each other. That admits exactly the row-padded views this helper
+    exists for (``(pitch, 1)`` with ``pitch >= n``) and rejects the overlapping
+    ones, which is the distinction the buffer descriptor actually needs. For
+    dimensions above 2 the same must hold at every level, so the general test is
+    that each stride be at least the extent of everything inside it.
+
+    ``quack.rmsnorm._ensure_contiguous`` admits the overlapping view too, so
+    upstream shares the hole -- but upstream never claims a row-only contract:
+    it copies every non-``stride(-1)==1`` input and its correctness does not
+    rest on the weaker property. This helper's does, so the obligation to close
+    it is here. The predicate remains a strict subset of upstream's: everything
+    upstream copies, this copies. Under ``torch.compile`` the copy stays
+    unconditional because dynamo cannot inspect strides on fake tensors; that is
+    upstream's reasoning and it applies here unchanged.
     """
     if torch.compiler.is_compiling():
         return tensor.contiguous()
-    return tensor if tensor.stride(-1) == 1 else tensor.contiguous()
+    return tensor if _rows_are_disjoint_and_packed(tensor) else tensor.contiguous()
+
+
+def _rows_are_disjoint_and_packed(tensor: torch.Tensor) -> bool:
+    """Whether the row is contiguous *and* no two elements share storage.
+
+    Two independent requirements, and an earlier draft of this dropped the
+    first. ``stride(-1) == 1`` is upstream's test and it stays, unweakened: the
+    descriptor reads a row as consecutive elements, and it also keeps this
+    predicate a strict subset of ``_ensure_contiguous``'s. Sorting the axes by
+    stride and checking only disjointness would accept a transposed view --
+    every element distinct, but the row scattered -- which upstream copies and
+    which produces a wrong answer here.
+
+    Given that, walk the remaining axes outwards from the row: each stride must
+    be at least the extent spanned by everything inside it. Equality is a packed
+    axis, a strict inequality is padding between rows, and both are fine because
+    the descriptor is sized to the row and never addresses the gap. A stride
+    *smaller* than the enclosed extent means two positions alias -- overlapping
+    rows, or a zero-stride broadcast -- which is what this rejects.
+    """
+    if tensor.stride(-1) != 1:
+        return False
+    extent = tensor.shape[-1]
+    for stride, size in sorted(
+        zip(tensor.stride()[:-1], tensor.shape[:-1]), key=lambda axis: axis[0]
+    ):
+        if stride < extent:
+            return False
+        extent = stride * size
+    return True
 
 
 def _rmsnorm_impl(
