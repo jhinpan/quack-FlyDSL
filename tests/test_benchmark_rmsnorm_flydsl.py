@@ -765,16 +765,27 @@ def test_the_rename_bumped_the_schema_so_a_reader_can_tell_the_versions_apart():
     # Asserted as an invariant rather than against the literal 4 it was written
     # for: the first version pinned `count('"schema_version": 4,') == 2` and
     # broke the moment v5 was added, which would have trained the next person
-    # to edit the number until the test went quiet. What actually has to hold
-    # is that the two emission sites agree, that the version only moves
-    # forward, and that no frozen artifact claims a version at or above the
-    # rename.
+    # to edit the number until the test went quiet.
+    #
+    # But that over-corrected, and @Reviewer caught it: `current >= 4` also
+    # passes when a NEW field is added and the version is left where it is.
+    # He constructed it -- peak_bw_probe present, both sites still 4 -- and all
+    # 79 tests passed. "Future bumps should not require editing the test" is a
+    # reason to assert the invariant; it is not a reason to stop guarding the
+    # bump in front of you. So both hold here: the invariant, and a floor that
+    # rises when a contract change lands. The floor is a separate assertion
+    # from the field checks so that a failure says which one broke.
+    #
+    # The two emission sites now read one constant, which is what makes "the
+    # sites agree" structural instead of textual.
+    assert benchmark.SCHEMA_VERSION >= 5, "peak_bw_probe added a field; v5 is the floor"
     source = Path(benchmark.__file__).read_text(encoding="utf-8")
-    emitted = re.findall(r'"schema_version": (\d+),', source)
+    emitted = re.findall(r'"schema_version": ([A-Za-z_0-9]+),', source)
     assert len(emitted) == 2, "row and environment are the two emission sites"
-    assert emitted[0] == emitted[1], f"the two sites disagree: {emitted}"
-    current = int(emitted[0])
-    assert current >= 4, "the rename must have bumped the schema past v3"
+    assert emitted[0] == emitted[1] == "SCHEMA_VERSION", (
+        f"both sites must read the single constant, got {emitted}"
+    )
+    current = benchmark.SCHEMA_VERSION
     frozen = Path(benchmark.__file__).resolve().parents[1] / "AI" / "gate_llc_before_after"
     for environment_path in sorted(frozen.glob("*/environment.json")):
         recorded = json.loads(environment_path.read_text(encoding="utf-8"))["schema_version"]
@@ -1357,3 +1368,175 @@ def test_the_over_read_figures_match_the_field_the_probe_actually_stores():
             record["per_rotation"]["over_read_vs_hardware"]
             < record["per_call"]["over_read_vs_hardware"]
         )
+
+
+def _scope_environment(
+    *,
+    name="AMD Instinct MI355X",
+    major=9,
+    minor=5,
+    hip="7.2",
+    cuda=None,
+    operations=("fwd",),
+    providers=("flydsl", "torch"),
+    modes=(("bfloat16", "same"),),
+):
+    torch = types.SimpleNamespace(
+        __version__="2.9.1",
+        version=types.SimpleNamespace(hip=hip, cuda=cuda),
+        cuda=types.SimpleNamespace(
+            device_count=lambda: 1,
+            get_device_properties=lambda _: types.SimpleNamespace(
+                name=name,
+                gcnArchName="gfx950:sramecc+:xnack-",
+                major=major,
+                minor=minor,
+                multi_processor_count=256,
+                total_memory=309220868096,
+                L2_cache_size=4 * 1024**2,
+            ),
+        ),
+    )
+    args = argparse.Namespace(
+        shapes=[(512, 4096)],
+        dtype_weight_modes=[list(mode) for mode in modes],
+        operations=list(operations),
+        providers=list(providers),
+        eps=1e-6,
+        seed=0,
+        warmup_rounds=3,
+        sample_rounds=10,
+        copy_mib=256,
+        copy_samples=5,
+        min_rotation_buffers=2,
+        max_rotation_buffers=8,
+        l2_target_ratio=4.0,
+        llc_bytes=None,
+        expected_arch=None,
+        output_dir="/tmp/unused",
+    )
+    return benchmark._environment(torch, args, Path("/tmp/unused"))
+
+
+def test_the_machine_contract_does_not_assert_measurements_this_run_did_not_make():
+    # @Reviewer's blocker 2 against fdf2530, reproduced with his construction:
+    # an H100 / bwd / fp32 / torch-only run emitted a comparison_scope naming
+    # 2026-08-02, H200 and MI355X, fwd bf16, 32768x8192 and +30.0/-32.7 -- an
+    # experiment it had no part in. A hard-coded paragraph in a
+    # machine-readable field is an assumed value that reads exactly like an
+    # observed one, which is the defect this very string was rewritten to warn
+    # about.
+    scope = _scope_environment(
+        name="NVIDIA H100 80GB HBM3",
+        major=9,
+        minor=0,
+        hip=None,
+        cuda="12.8",
+        operations=("bwd",),
+        providers=("torch",),
+        modes=(("float32", "same"),),
+    )["comparison_scope"]
+
+    for foreign in ("2026-08-02", "fwd bf16", "MI355X", "H200", "32768x8192", "+30.0", "-32.7"):
+        assert foreign not in scope, f"{foreign!r} is another run's result"
+    # The general caveat must survive -- the fix is to stop asserting a
+    # measurement, not to stop warning about the column.
+    assert "peak_bw_pct is NOT a cross-vendor fix" in scope
+    assert "peak_bw_probe" in scope
+
+
+def test_the_measured_half_of_the_scope_is_appended_from_the_probe_that_ran():
+    # And the numbers are not lost: they move to where they are true. The
+    # caveat carries no figure, so it cannot go stale; the measurement is
+    # written from live values once the probe exists.
+    peak_bw = {
+        "best_probe": "write",
+        "median_gbps": 6664.195243,
+        "probes": {
+            "copy": {"gbps": 4644.1},
+            "two_read_one_write": {"gbps": 6068.6},
+            "write": {"gbps": 6664.195243},
+        },
+    }
+    measured = benchmark._describe_measured_scope(peak_bw)
+    assert "divided by write at 6664.2 GB/s" in measured
+    for name in peak_bw["probes"]:
+        assert name in measured
+    assert "copy 4644.1" in measured and "two_read_one_write 6068.6" in measured
+
+
+@pytest.mark.parametrize(
+    "kwargs,absent,present",
+    [
+        # Blocker 7: the frozen H200 artifact said the LLC was "read from the
+        # KFD topology, matched by unique_id" while its own provenance in the
+        # same file said not_a_hip_build/torch_l2_fallback, asserted the gfx950
+        # MALL on an sm_90 card, and described FlyDSL JIT on a quack+torch run.
+        # A methodology that documents the template instead of the execution is
+        # a claim the artifact cannot support.
+        (
+            {
+                "hip": None,
+                "cuda": "12.8",
+                "providers": ("quack", "torch"),
+                "name": "NVIDIA H200",
+                "major": 9,
+                "minor": 0,
+            },
+            ("256 MiB MALL", "4 MiB per-XCD"),
+            ("last_level_cache_provenance",),
+        ),
+        (
+            {"providers": ("torch",)},
+            ("FlyDSL first-launch JIT synchronized",),
+            ("no FlyDSL provider in this run",),
+        ),
+    ],
+)
+def test_methodology_describes_the_run_and_not_the_template(kwargs, absent, present):
+    methodology = _scope_environment(**kwargs)["methodology"]
+    blob = json.dumps(methodology)
+    for text in absent:
+        assert text not in blob, f"{text!r} is asserted regardless of what ran"
+    for text in present:
+        assert text in blob
+
+
+def test_the_artifact_records_which_provider_code_was_imported():
+    # Blocker 5. The frozen H200 artifact carries ambient git_commit 4f36477,
+    # whose tree declares quack 0.6.1, while the run imported installed 0.5.0
+    # from dist-packages -- and that tree does not import at all on that host,
+    # so the recorded commit provably was not the provider under test. Nothing
+    # in the artifact said so; establishing it needed a shell on the machine.
+    # _executed_source already made the harness checkable rather than merely
+    # asserted; the providers are what the harness exists to measure and had
+    # weaker provenance than the file measuring them.
+    import quack  # noqa: F401  -- the point is that it is in sys.modules
+
+    modules = benchmark._imported_provider_modules()
+    assert "quack" in modules
+    entry = modules["quack"]
+    assert entry["path"] and entry["path"].endswith("__init__.py")
+    assert entry["init_sha256"] and len(entry["init_sha256"]) == 64
+    # version_attr comes from the imported module, versions.quack from installed
+    # distribution metadata. Recording both is the point: on the H200 they
+    # disagreed, and only one of them was the code that ran.
+    assert "version_attr" in entry
+
+
+def test_a_run_records_the_card_and_not_just_the_ordinal():
+    # The other half of blocker 5. visible_index 0 identifies a card only
+    # relative to a visibility mask the environment sets, so on an 8-GPU host
+    # it pins nothing. The MI355X artifact recorded ordinal 6 and node 8 while
+    # dropping the UID those were matched on -- the resolver established the
+    # identity and then did not carry it to the reader.
+    rocm = types.SimpleNamespace(bytes=b"a60c2956cd9dd4c5")
+    assert benchmark._reported_device_uuid(types.SimpleNamespace(uuid=rocm)) == "a60c2956cd9dd4c5"
+    # CUDA hands over a real UUID object rather than hex text; provenance has
+    # to survive either, so this must not go through the AMD-specific decode.
+    import uuid as uuid_module
+
+    nvidia = uuid_module.UUID("12345678-1234-5678-1234-567812345678")
+    assert benchmark._reported_device_uuid(types.SimpleNamespace(uuid=nvidia)) == str(nvidia)
+    # A runtime exposing nothing records None rather than a fabricated value.
+    assert benchmark._reported_device_uuid(types.SimpleNamespace()) is None

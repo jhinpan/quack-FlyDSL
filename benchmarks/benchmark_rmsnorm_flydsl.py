@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 from typing import Any, Callable, Iterable, Sequence
+import uuid
 import warnings
 
 
@@ -68,11 +69,22 @@ PROVIDERS = ("flydsl", "quack", "torch")
 # v5 is additive. It exists because `comparison_scope` told the reader to
 # compare `peak_bw_pct` across vendors, and that column's denominator is
 # whichever of the three probes won on that host -- two_read_one_write on H200,
-# write on MI355X, measured the same day with this harness on both. A reader
-# with only results.csv could not see that the two percentages divide by
-# different references. Recording the probe does not make the columns
-# comparable; it makes their incomparability visible, which is the part that
-# was missing.
+# write on MI355X, measured the same day with this harness on both.
+#
+# What v5 adds is the probe's *name*. The first version of this note claimed a
+# reader with only results.csv "could not see that the two percentages divide
+# by different references", and that was false: v4 already wrote peak_bw_gbps
+# on every row, 4314.018124 on the H200 file and 6664.195243 on the MI355X one,
+# so the difference was visible and pct was recomputable from the CSV alone.
+# @Reviewer checked and refused the overstatement. The real gain is semantic:
+# 4314 vs 6664 shows the denominators differ, while `two_read_one_write` vs
+# `write` says *why*, and distinguishes "different probe won" from "same probe,
+# different hardware" -- which are different facts about the comparison and
+# were not separable from the numbers alone. Recording it still does not make
+# the columns comparable; it makes the incomparability legible instead of
+# merely visible. Overstating an increment as an absence is the same failure
+# this schema exists to prevent, pointed the other way.
+SCHEMA_VERSION = 5
 RESULT_FIELDS = (
     "schema_version",
     "provider",
@@ -243,6 +255,39 @@ def _torch_unique_id(properties: Any) -> int | None:
         return int(text, 16)
     except ValueError:
         return None
+
+
+def _reported_device_uuid(properties: Any) -> str | None:
+    """The device identity as torch reports it, for the artifact to record.
+
+    Deliberately not ``_torch_unique_id``: that decodes the field the AMD way
+    to match KFD's ``unique_id``, whereas this is provenance and has to work on
+    whatever the runtime hands over. On ROCm the attribute is a bytes-like of
+    ASCII hex text; on CUDA it is a real ``uuid.UUID``. A build exposing
+    neither records ``None`` rather than a fabricated value.
+
+    ``uuid.UUID`` also has a ``.bytes``, and the first version of this function
+    reached for it first -- which decoded a CUDA UUID's raw binary as ASCII and
+    returned mojibake where the artifact should have carried
+    ``12345678-1234-...``. A test written for the vendor I was not on caught
+    it. ``UUID`` is therefore checked by type before anything duck-typed: the
+    two objects answer the same attribute name with different kinds of thing,
+    which is exactly the case a hasattr check cannot distinguish.
+    """
+    raw = getattr(properties, "uuid", None)
+    if raw is None:
+        return None
+    if isinstance(raw, uuid.UUID):
+        return str(raw)
+    data = getattr(raw, "bytes", None)
+    if data is not None:
+        try:
+            text = bytes(data).decode("ascii").strip()
+        except (UnicodeDecodeError, TypeError, ValueError):
+            return str(raw)
+        if text:
+            return text
+    return str(raw)
 
 
 def evictor_is_needed(rotation_working_set_bytes: int, llc_bytes: int) -> bool:
@@ -1515,6 +1560,44 @@ def _package_version(name: str) -> str | None:
         return None
 
 
+def _imported_provider_modules() -> dict[str, Any]:
+    """Where the provider packages were actually imported from, and their hash.
+
+    ``git_commit`` records the repository the harness was launched inside,
+    which is not the same thing and on the cross-vendor H200 run was not even
+    consistent with it: the artifact carries ambient commit 4f36477, whose
+    tree declares ``quack.__version__ = "0.6.1"``, while the run imported
+    installed ``quack`` 0.5.0 from ``dist-packages`` -- and the repo tree at
+    that commit does not import at all on that host. So the recorded commit
+    could not have been the provider under test, and nothing in the artifact
+    said so. @Reviewer's blocker 5.
+
+    ``_executed_source`` already applies this principle to the harness; the
+    providers are the code the benchmark exists to measure and had weaker
+    provenance than the file measuring them. Hashing ``__init__.py`` rather
+    than the whole package is deliberate: it is cheap, it is stable, and it is
+    enough to tell two installs apart. It is not a build fingerprint, and this
+    field should not be read as one.
+    """
+    modules: dict[str, Any] = {}
+    for name in ("quack", "flydsl"):
+        module = sys.modules.get(name)
+        if module is None:
+            continue
+        entry: dict[str, Any] = {
+            "path": getattr(module, "__file__", None),
+            "version_attr": getattr(module, "__version__", None),
+        }
+        path = entry["path"]
+        if path:
+            try:
+                entry["init_sha256"] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            except OSError:
+                entry["init_sha256"] = None
+        modules[name] = entry
+    return modules
+
+
 def _git_commit() -> str | None:
     try:
         return subprocess.run(
@@ -1575,10 +1658,30 @@ def _device_arch(torch: Any) -> str:
     return f"sm_{properties.major}{properties.minor}"
 
 
+def _describe_measured_scope(peak_bw: dict[str, Any]) -> str:
+    """The part of ``comparison_scope`` that is a measurement, not a caveat.
+
+    Split out and appended after the probe runs, rather than interpolated into
+    the literal in ``_environment``, because ``_environment`` is built before
+    any measurement exists -- so the only numbers available to it are ones from
+    somewhere else, which is precisely how the v5 string came to quote another
+    host's results in every artifact. Keeping the two apart makes that mistake
+    hard to repeat: the caveat cannot cite a number, and this cannot be written
+    without one in hand.
+    """
+    probes = ", ".join(
+        f"{name} {probe['gbps']:.1f}" for name, probe in sorted(peak_bw["probes"].items())
+    )
+    return (
+        f". This run divided by {peak_bw['best_probe']} at "
+        f"{peak_bw['median_gbps']:.1f} GB/s; the probes measured here were {probes} GB/s"
+    )
+
+
 def _environment(torch: Any, args: argparse.Namespace, output_dir: Path) -> dict[str, Any]:
     properties = torch.cuda.get_device_properties(0)
     return {
-        "schema_version": 5,
+        "schema_version": SCHEMA_VERSION,
         "status": "running",
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         # Every provider is checked against the fp32 reference before it is
@@ -1586,20 +1689,31 @@ def _environment(torch: Any, args: argparse.Namespace, output_dir: Path) -> dict
         # than as a per-row column that could only ever say "passed".
         "correctness_gate": "required",
         "runtime_scope": f"{properties.name} / {_device_arch(torch)}",
+        # Only what is true of every run. The v5 version of this string
+        # hard-coded one experiment -- a date, two host names, fwd bf16, one
+        # shape and three deltas -- into every artifact the harness would ever
+        # write. @Reviewer constructed an H100 / bwd / fp32 / torch-only run and
+        # got the entire paragraph verbatim, including "Measured 2026-08-02,
+        # fwd bf16" and both vendors' probe winners. That is a machine-readable
+        # field asserting measurements the run did not make, which is this
+        # defect class exactly, committed by the person who had just written a
+        # commit message about it.
+        #
+        # The measured numbers that motivated it belong in
+        # AI/crossvendor_rmsnorm_fwd_bf16/README.md, attached to the artifacts
+        # they came from. What THIS run observed is appended by
+        # `_describe_measured_scope` once the probe has actually run -- see
+        # there for why it cannot be interpolated here.
         "comparison_scope": (
             "same-device providers. RMSNorm is memory bound, so a cross-vendor "
             "comparison of microseconds mostly reports the HBM bandwidth ratio. "
-            "peak_bw_pct is NOT the cross-vendor fix: its denominator is "
-            "whichever of the three probes won on that host, and the winner "
-            "differs by host (two_read_one_write on H200, write on MI355X), so "
-            "the two percentages are ratios against different references. "
-            "Measured 2026-08-02, fwd bf16, this harness on both: the choice of "
-            "denominator moves 32768x8192 from FlyDSL +30.0 points (copy) to "
-            "+4.6 (two_read_one_write) to -32.7 (write) -- it inverts the "
-            "conclusion, it does not merely scale it. For a cross-vendor "
-            "statement pick one probe present on both hosts and divide by that "
-            "same probe on each; achievable_bandwidth.probes carries all three "
-            "for exactly this purpose"
+            "peak_bw_pct is NOT a cross-vendor fix: its denominator is whichever "
+            "achievable-bandwidth probe won on this host, and the winner can "
+            "differ by host, so two hosts' percentages may be ratios against "
+            "different references. For a cross-vendor statement pick one probe "
+            "present on both hosts and divide by that same probe on each; "
+            "achievable_bandwidth.probes carries all of them for exactly this "
+            "purpose, and peak_bw_probe records per row which one this run used"
         ),
         "command": [sys.executable, *sys.argv],
         "working_directory": str(Path.cwd()),
@@ -1623,6 +1737,21 @@ def _environment(torch: Any, args: argparse.Namespace, output_dir: Path) -> dict
             "compute_units": properties.multi_processor_count,
             "total_memory_bytes": properties.total_memory,
             "l2_cache_bytes_reported": properties.L2_cache_size,
+            # The ordinal identifies a card only relative to a visibility mask
+            # that is itself set by the environment, so an artifact saying
+            # "index 0" pins nothing -- on an 8-GPU host it is whichever card
+            # the mask happened to expose. @Reviewer's blocker 5: the frozen
+            # MI355X artifact recorded ordinal 6 and node 8 without ever
+            # storing the UID those were matched on, so the identity the
+            # resolver worked hard to establish was dropped before it reached
+            # the reader. None on a build whose runtime does not expose one,
+            # which is itself worth recording rather than omitting.
+            #
+            # Stored as torch reports it. _torch_unique_id's int decode is the
+            # AMD reading of this field and is what the KFD match uses; the raw
+            # text is what identifies the card on either vendor, so that is
+            # what goes in the artifact.
+            "uuid": _reported_device_uuid(properties),
         },
         "visibility": {
             name: os.environ.get(name)
@@ -1642,6 +1771,18 @@ def _environment(torch: Any, args: argparse.Namespace, output_dir: Path) -> dict
             "providers": args.providers,
             "eps": args.eps,
         },
+        # Each string describes what this run did, not what the gfx950/FlyDSL
+        # path does. @Reviewer's blocker 7 against the frozen H200 artifact:
+        # `last_level_cache` said the value was "read from the KFD topology,
+        # matched by unique_id" on a host with no HIP, whose own
+        # last_level_cache_provenance in the same file says
+        # not_a_hip_build/torch_l2_fallback; `cache` asserted the 256 MiB MALL
+        # and the 4 MiB per-XCD L2 on an sm_90 card; `steady_state` described
+        # FlyDSL first-launch JIT on a quack+torch run. A methodology field
+        # that documents the template rather than the execution is a claim the
+        # artifact cannot support -- the same defect as the hard-coded
+        # comparison_scope above, and it was in the very artifact I collected
+        # to close a different blocker.
         "methodology": {
             "steady_state": (
                 "one torch.cuda.Event pair per timed rotation, divided by the number "
@@ -1649,24 +1790,28 @@ def _environment(torch: Any, args: argparse.Namespace, output_dir: Path) -> dict
                 "semantics and over-reads short kernels. Magnitude is measured, not "
                 "asserted here: see AI/probe_event_timing_calibration.py and its "
                 "committed sidecar for the per-call and per-rotation over-read against "
-                "rocprofv3 hardware timestamps on this part. After provider warmup, "
-                "with FlyDSL first-launch JIT synchronized, recorded separately, and "
-                "excluded"
+                "rocprofv3 hardware timestamps on gfx950. After provider warmup"
+                + (
+                    ", with FlyDSL first-launch JIT synchronized, recorded separately, and excluded"
+                    if "flydsl" in args.providers
+                    else " (no FlyDSL provider in this run, so no JIT phase to exclude)"
+                )
             ),
             "cache": (
                 "round-robin cloned tensor sets sized against rotation_target_bytes "
-                "(= --l2-target-ratio x the last-level cache, which on gfx950 is the "
-                "256 MiB MALL and not the 4 MiB per-XCD L2 torch reports); when a "
-                "set's working set is at most evictor_threshold_bytes "
-                "(= EVICTOR_LLC_MARGIN x LLC) a device copy evicts the cache once "
-                "per timed rotation, before the event window opens, not between "
-                "individual calls"
+                "(= --l2-target-ratio x the last-level cache, taken from "
+                "last_level_cache_bytes with last_level_cache_provenance recording "
+                "where it came from); when a set's working set is at most "
+                "evictor_threshold_bytes (= EVICTOR_LLC_MARGIN x LLC) a device copy "
+                "evicts the cache once per timed rotation, before the event window "
+                "opens, not between individual calls"
             ),
             "last_level_cache": (
-                "read from the KFD topology, matched by unique_id and then by PCI "
-                "domain:bus:device; see last_level_cache_provenance for which key "
-                "matched. A gfx950 host that cannot be matched aborts rather than "
-                "falling back to torch's L2, which would silently measure cache-warm"
+                "on a HIP build, read from the KFD topology, matched by unique_id and "
+                "then by PCI domain:bus:device; a gfx950 host that cannot be matched "
+                "aborts rather than falling back to torch's L2, which would silently "
+                "measure cache-warm. Elsewhere torch's reported L2 is used. "
+                "last_level_cache_provenance records which of these this run did"
             ),
             "logical_bytes": {
                 "fwd": "read x + weight; write y",
@@ -1804,6 +1949,7 @@ def _run(
         sample_rounds=args.copy_samples,
     )
     environment["achievable_bandwidth"] = peak_bw
+    environment["comparison_scope"] += _describe_measured_scope(peak_bw)
     torch.cuda.empty_cache()
     evictor = _L2Evictor(torch, rotation_target_bytes)
 
@@ -1815,6 +1961,10 @@ def _run(
             "torch": _TorchProvider,
         }[name]
         providers[name] = factory(torch)
+
+    # After construction, so it reflects what the providers actually imported
+    # rather than what was importable before they ran.
+    environment["provider_modules"] = _imported_provider_modules()
 
     cells = build_matrix(
         args.shapes,
@@ -1889,7 +2039,7 @@ def _run(
             logical_gbps = byte_count / stats["median_us"] / 1000.0
             peak_bw_pct = logical_gbps / peak_bw["median_gbps"] * 100.0
             row = {
-                "schema_version": 5,
+                "schema_version": SCHEMA_VERSION,
                 "provider": provider_name,
                 "provider_detail": prepared.provider_detail,
                 "operation": cell.operation,
