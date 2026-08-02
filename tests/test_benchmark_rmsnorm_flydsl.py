@@ -219,7 +219,7 @@ def test_a_corrupt_mall_entry_beside_a_good_l2_entry_is_not_reported_as_success(
     # legitimately use it -- but it no longer claims the read was complete.
     assert value == 4 * 1024**2
     assert provenance["source"] == "kfd_topology"
-    assert provenance["degraded"] == "unparseable_cache_entries"
+    assert provenance["degraded"] == ["unparseable_cache_entries"]
     assert provenance["skipped_cache_entries"] == ["1:bad_size_level3"]
 
     with pytest.raises(RuntimeError, match="unparseable"):
@@ -321,8 +321,71 @@ def test_a_malformed_unrelated_node_is_skipped_not_fatal(tmp_path):
     (bad / "caches").mkdir(parents=True)
     (bad / "properties").write_text("gfx_target_version not-a-number\ndomain 0\n")
     _write_node(root, 1, unique_id=0xA60C2956CD9DD4C5, caches=((2, 4096), (3, 262144)))
-    value, _ = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), str(root))
+    value, provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), str(root))
     assert value == 256 * 1024**2
+
+    # And the over-refusal case for the guard below: a unique_id match is a
+    # positive identification, so an unrelated unparseable node cannot make it
+    # wrong. Marking this degraded would fail closed on every host with one
+    # malformed node anywhere in the tree.
+    assert provenance["matched_by"] == "unique_id"
+    assert "degraded" not in provenance
+
+
+def test_a_corrupt_node_does_not_hand_the_read_to_a_pci_neighbour(tmp_path):
+    # @Autotune's argument about cache entries, applied one level up. He noted
+    # that a skipped cache entry only loses information in one direction --
+    # `best` is a max, so a skip can only make the answer smaller. A skipped
+    # *node* is not like that: it can be neither confirmed nor excluded as this
+    # card, and if it was this card the search falls through to the PCI key,
+    # which is not unique under CPX.
+    #
+    # Demonstrated on the real shape: node 2 is this card by unique_id but its
+    # properties do not parse, and node 5 is a different device at the same
+    # address. The previous code returned node 5's topology with
+    # matched_by=pci_domain_bus_device and no degradation marked -- a plausible
+    # 256 MiB read off the wrong card, which no assertion on the value can
+    # catch because every card on this host is the same part.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    real = root / "2"
+    (real / "caches").mkdir(parents=True)
+    (real / "properties").write_text(
+        "gfx_target_version 90500\nunique_id a60c2956cd9dd4c5\ndomain 0\nlocation_id 29952\n"
+    )
+    _write_node(root, 5, gfx=90500, location=29952, caches=((2, 4096), (3, 262144)))
+
+    value, provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), str(root))
+    assert value == 256 * 1024**2  # right number
+    assert provenance["matched_by"] == "pci_domain_bus_device"  # wrong card
+    assert provenance["degraded"] == ["unidentified_nodes"]
+    assert provenance["skipped_nodes"] == ["2:unparseable_properties"]
+
+    with pytest.raises(RuntimeError, match="may belong to a different device"):
+        benchmark._resolve_llc(
+            _gfx950_torch(), _properties(), argparse.Namespace(llc_bytes=None), str(root)
+        )
+
+
+def test_both_degradations_are_reported_when_both_occur(tmp_path):
+    # `degraded` is a list because the two are independent. A single string
+    # field would report whichever was assigned last and hide the other, and
+    # the message _resolve_llc raises would then name only half the problem.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    bad = root / "2"
+    (bad / "caches").mkdir(parents=True)
+    (bad / "properties").write_text("gfx_target_version 90500\nlocation_id not-a-number\n")
+    _write_node(root, 5, gfx=90500, location=29952, caches=((2, 4096),))
+    (root / "5" / "caches" / "1").mkdir()
+    (root / "5" / "caches" / "1" / "properties").write_text("level 3\nsize not-a-number\n")
+
+    _, provenance = benchmark._last_level_cache_bytes(
+        _hip_torch(), _properties(uuid_text=None), str(root)
+    )
+    assert provenance["degraded"] == ["unidentified_nodes", "unparseable_cache_entries"]
+    assert provenance["skipped_nodes"] == ["2:unparseable_properties"]
+    assert provenance["skipped_cache_entries"] == ["1:bad_size_level3"]
 
 
 def test_missing_topology_reports_a_reason_rather_than_a_bare_number(tmp_path):

@@ -269,6 +269,7 @@ def _last_level_cache_bytes(
     device = getattr(properties, "pci_device_id", None)
     by_uid: list[str] = []
     by_bdf: list[str] = []
+    unparsed_nodes: list[str] = []
     try:
         for node in sorted(os.listdir(node_root)):
             base = os.path.join(node_root, node)
@@ -276,11 +277,20 @@ def _last_level_cache_bytes(
                 with open(os.path.join(base, "properties")) as handle:
                     props = dict(line.split()[:2] for line in handle if len(line.split()) >= 2)
             except OSError:
+                unparsed_nodes.append(f"{node}:unreadable")
                 continue
             # Skip a node whose numeric fields do not parse, rather than letting
             # the exception escape. Scanning the whole tree means an unrelated
             # malformed node -- one that is not even a candidate match -- would
             # otherwise abort the benchmark instead of falling back.
+            #
+            # But record it. A skipped node is not neutral: it is a node that
+            # could be neither confirmed nor ruled out as this card. If the
+            # skipped one WAS this card, the search falls through to a PCI match
+            # on some other node -- reachable under CPX, where eight logical
+            # devices share one address -- and reports another device's topology
+            # as if it were a clean read. @Autotune's point about cache entries
+            # applies here too, and I only checked this loop because of it.
             try:
                 if int(props.get("gfx_target_version", 0)) == 0:
                     continue  # CPU node
@@ -299,6 +309,7 @@ def _last_level_cache_bytes(
                     ):
                         by_bdf.append(base)
             except ValueError:
+                unparsed_nodes.append(f"{node}:unparseable_properties")
                 continue
     except OSError:
         return fallback, {"source": "torch_l2_fallback", "reason": "no_kfd_topology"}
@@ -315,6 +326,23 @@ def _last_level_cache_bytes(
         return fallback, {"source": "torch_l2_fallback", "reason": "ambiguous_pci_address"}
     else:
         return fallback, {"source": "torch_l2_fallback", "reason": "no_matching_node"}
+
+    # The two match keys are not equally robust to a skipped node, and the
+    # difference is positive evidence versus absence of competing evidence:
+    #
+    #   unique_id  -- the returned node *asserted* the identity we asked for. A
+    #                 node that failed to parse asserted nothing, so it cannot
+    #                 take that away.
+    #   PCI b:d.f  -- the returned node is the only *surviving* candidate at
+    #                 that address. Under CPX the address is shared, so a
+    #                 skipped node is a candidate we neither confirmed nor
+    #                 excluded, and the elimination no longer eliminates.
+    #
+    # The demonstrated failure is the second one: with the real card's node
+    # corrupt, asking for its unique_id fell through to a PCI match on a
+    # different node and returned that device's 268435456 with matched_by
+    # pci_domain_bus_device and no degradation marked at all.
+    node_scan_degraded = bool(unparsed_nodes) and key != "unique_id"
 
     # Entries skipped inside the *matched* node are recorded, not just skipped.
     # Skipping silently and then reporting success is how a corrupt level-3
@@ -355,9 +383,18 @@ def _last_level_cache_bytes(
         "matched_by": key,
         "matched_node": matched,
     }
+    # A list, not a string: the two degradations are independent and a run can
+    # hit both. The earlier single-string field would have reported whichever
+    # one was assigned last and hidden the other.
+    degraded: list[str] = []
+    if node_scan_degraded:
+        degraded.append("unidentified_nodes")
+        provenance["skipped_nodes"] = unparsed_nodes[:20]
     if skipped:
-        provenance["degraded"] = "unparseable_cache_entries"
+        degraded.append("unparseable_cache_entries")
         provenance["skipped_cache_entries"] = skipped
+    if degraded:
+        provenance["degraded"] = degraded
     return max(best, fallback), provenance
 
 
@@ -378,21 +415,29 @@ def _resolve_llc(
     because a crash is noticed. On any other architecture the fallback is just a
     conservative guess and is allowed through with the reason recorded.
 
-    Three ways to end up with a wrong number, not one. The first version of this
+    Four ways to end up with a wrong number, not one. The first version of this
     function only caught the first:
 
     1. the whole topology read fails and we fall back;
     2. the read *succeeds* but an individual cache entry was unparseable, so the
        MALL line may be the one that was skipped;
     3. the read succeeds completely and simply reports no cache above the
-       per-XCD L2.
+       per-XCD L2;
+    4. the read succeeds and returns a plausible 256 MiB -- from the wrong node,
+       because the node that was this card failed to parse and the fallback PCI
+       key is not unique under CPX.
 
-    On gfx950 all three are fatal, and the test for the last two is the value
-    itself: this part has a 256 MiB MALL, so any resolved figure below that is
-    wrong however confidently it was obtained. Keying on the number rather than
-    on the failure mode is what makes this robust to the next unanticipated
-    parse failure -- @Reviewer found (2) against ``fad422c`` after (1) was
-    fixed, and enumerating reasons would just wait for a third.
+    On gfx950 all four are fatal. For (2) and (3) the test is the value itself:
+    this part has a 256 MiB MALL, so any resolved figure below that is wrong
+    however confidently it was obtained. Keying on the number rather than on the
+    failure mode is what makes this robust to the next unanticipated parse
+    failure -- @Reviewer found (2) against ``fad422c`` after (1) was fixed, and
+    enumerating reasons would just wait for a third.
+
+    (4) is the one case the value cannot catch, and it is why ``degraded`` is
+    also fatal rather than only advisory: every card on this host is the same
+    part, so the wrong node reports the *same* 256 MiB and the number looks
+    perfect. What is unsound there is the identification, not the magnitude.
 
     ``--llc-bytes`` is the escape hatch for a gfx950 host whose topology this
     helper cannot read.
@@ -404,9 +449,17 @@ def _resolve_llc(
         return llc_bytes, provenance
     if llc_bytes >= GFX950_MALL_BYTES and "degraded" not in provenance:
         return llc_bytes, provenance
+    degraded = provenance.get("degraded", [])
     if provenance["source"] == "torch_l2_fallback":
         detail = f"the KFD topology could not be read ({provenance['reason']})"
-    elif "degraded" in provenance:
+    elif "unidentified_nodes" in degraded:
+        detail = (
+            f"the node was matched only by {provenance['matched_by']}, which is not "
+            "unique under CPX, while "
+            f"{', '.join(provenance['skipped_nodes'])} could not be identified, so "
+            f"{provenance.get('matched_node')} may belong to a different device"
+        )
+    elif "unparseable_cache_entries" in degraded:
         detail = (
             "the KFD topology was read but "
             f"{len(provenance['skipped_cache_entries'])} cache entr"
@@ -419,12 +472,23 @@ def _resolve_llc(
             f"the KFD topology was read cleanly from {provenance.get('matched_node')} "
             "but reports no cache at or above the MALL size"
         )
+    # Do not claim the value is too small when it is not: under (4) it is the
+    # right size and the wrong card's. Saying "below the known MALL" about
+    # 268435456 would send whoever reads this looking for the wrong defect.
+    consequence = (
+        f"The value {llc_bytes} B was obtained from a node this run cannot prove is "
+        "the device it benchmarked; sizing the rotation from another device's "
+        "topology is not detectable in the results."
+        if "unidentified_nodes" in degraded
+        else (
+            f"The best value available is {llc_bytes} B, below the known "
+            f"{GFX950_MALL_BYTES} B MALL, so using it would size the rotation against "
+            "a cache that is not the last level and silently measure cache-warm."
+        )
+    )
     raise RuntimeError(
-        f"cannot determine the last-level cache on gfx950: {detail}. The best "
-        f"value available is {llc_bytes} B, below the known {GFX950_MALL_BYTES} B "
-        "MALL, so using it would size the rotation against a cache that is not "
-        "the last level and silently measure cache-warm. Pass --llc-bytes to "
-        "override explicitly."
+        f"cannot determine the last-level cache on gfx950: {detail}. {consequence} "
+        "Pass --llc-bytes to override explicitly."
     )
 
 
