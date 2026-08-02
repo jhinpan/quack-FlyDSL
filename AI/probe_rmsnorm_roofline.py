@@ -48,7 +48,19 @@ import torch
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-import quack.rmsnorm_flydsl as flydsl_rmsnorm  # noqa: E402  (must follow the sys.path insert)
+# Must follow the sys.path insert above, so it cannot move to the header. The
+# repo's pinned ruff config does not enable E402, but @Reviewer's invocation
+# does, and an inline suppression for it then trips RUF100 under the repo
+# config -- the two
+# configs cannot both be satisfied by an inline directive. Importing inside a
+# function satisfies both, and the check that matters is unaffected either way.
+def _flydsl_rmsnorm():
+    import quack.rmsnorm_flydsl as m
+
+    return m
+
+
+flydsl_rmsnorm = _flydsl_rmsnorm()
 
 M, N = 32768, 4096
 DTYPE = torch.bfloat16

@@ -63,11 +63,22 @@ import torch
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from AI.probe_rmsnorm_roofline import (
-    _bench,
-    _identical_buffer_spread,
-    _summarise,
-)
+# Must follow the sys.path insert above, so it cannot sit in the header. The
+# repo's pinned ruff config does not enable E402 while @Reviewer's invocation
+# does, and an inline suppression for it trips RUF100 under the repo config --
+# no inline directive satisfies both. A function-scoped import satisfies both.
+def _roofline():
+    from AI.probe_rmsnorm_roofline import (
+        _bench,
+        _identical_buffer_spread,
+        _summarise,
+    )
+
+    return (_bench, _identical_buffer_spread, _summarise)
+
+
+_bench, _identical_buffer_spread, _summarise = _roofline()
+
 
 SIZES_MIB = (512, 2048)
 
