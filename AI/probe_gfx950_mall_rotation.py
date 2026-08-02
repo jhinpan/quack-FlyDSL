@@ -244,13 +244,35 @@ def environment():
                               if "L3:" in ln][:1]
     except Exception as exc:  # noqa: BLE001 - provenance only, never fatal
         env["rocminfo_l3"] = f"unavailable: {exc}"
+    # Provenance of the *script*, not just of the checkout. HEAD alone is
+    # misleading: a probe run before committing records its parent commit, which
+    # does not contain the code that produced the numbers.
+    here = os.path.dirname(os.path.abspath(__file__))
     try:
         env["git_commit"] = subprocess.run(
             ["git", "rev-parse", "HEAD"], capture_output=True, text=True,
-            cwd=os.path.dirname(os.path.abspath(__file__)), timeout=10
+            cwd=here, timeout=10
         ).stdout.strip() or None
     except Exception:  # noqa: BLE001
         env["git_commit"] = None
+    try:
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain"], capture_output=True, text=True,
+            cwd=here, timeout=10
+        ).stdout
+        env["git_dirty"] = bool(dirty.strip())
+        env["git_dirty_paths"] = [ln[3:] for ln in dirty.splitlines()][:20]
+    except Exception:  # noqa: BLE001
+        env["git_dirty"] = None
+    # Hash of this file, so the JSON identifies the code that produced it even
+    # when the working tree is dirty or the commit is the parent.
+    try:
+        import hashlib
+        with open(os.path.abspath(__file__), "rb") as fh:
+            env["script_sha256"] = hashlib.sha256(fh.read()).hexdigest()
+    except Exception:  # noqa: BLE001
+        env["script_sha256"] = None
+    env["script_path"] = os.path.relpath(os.path.abspath(__file__), here)
     return env
 
 
@@ -315,9 +337,14 @@ def main() -> None:
     print(f"max boundary step across sweeps: {worst:.3f}x")
     if worst > 1.15:
         print("VERDICT: confirmed. Rotation sets that fit the 256 MiB MALL are")
-        print("         measured against a cache, not HBM. The harness evictor")
-        print("         is sized from torch's 4 MiB per-XCD figure and therefore")
-        print("         under-sizes on gfx950. Fix before taking MI355X data.")
+        print("         measured against a cache, not HBM.")
+        print("         Attribution: the evictor-control block above shows a")
+        print("         12 MiB evictor recovering nearly as much as a 256 MiB")
+        print("         one, so the cause is the `ws < l2_target` gate leaving")
+        print("         eviction OFF on these shapes -- not the evictor's size.")
+        print("         Sizing it off the per-XCD L2 is a separate, real")
+        print("         mis-derivation, but it is not what this measures.")
+        print("         Fix before taking MI355X data.")
     else:
         print("VERDICT: not confirmed. With the kernel held fixed, fitting the")
         print("         MALL does not measurably inflate throughput for this")

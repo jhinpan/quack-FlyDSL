@@ -50,33 +50,78 @@ Defaults are `--min-rotation-buffers 2 --max-rotation-buffers 4`. Working set is
 abstract but **what the harness actually picks**, since `by_target` is derived
 from the same undersized 12 MiB figure. Simulating `_rotation_count` exactly:
 
+Earlier versions of this table used `m*n*2*{2,3}` as an approximation. That was
+wrong in a way that mattered — it dropped the weight and `rstd` terms and so
+placed cells on the wrong side of the boundary. The table below uses the
+harness's real `logical_bytes` (`benchmark_rmsnorm_flydsl.py:116`) and also
+accounts for `use_evictor`, which the earlier version ignored entirely. Shown
+for **bf16/same**; the other 16-bit modes give the same verdicts.
+
 | shape | op | B/call | picked | working set | vs MALL | regime |
 | --- | --- | --- | --- | --- | --- | --- |
-| `1x4096` | fwd | 0.02 MiB | 4 | 0.1 MiB | 0.00x | inflated |
-| `1x4096` | bwd | 0.02 MiB | 4 | 0.1 MiB | 0.00x | inflated |
-| `256x4096` | fwd | 4.0 MiB | 3 | 12.0 MiB | 0.05x | inflated |
-| `256x4096` | bwd | 6.0 MiB | 2 | 12.0 MiB | 0.05x | inflated |
-| `512x4096` | fwd | 8.0 MiB | 2 | 16.0 MiB | 0.06x | inflated |
-| `512x4096` | bwd | 12.0 MiB | 2 | 24.0 MiB | 0.09x | inflated |
-| `4096x3000` | fwd | 46.9 MiB | 2 | 93.8 MiB | 0.37x | inflated |
-| `4096x3000` | bwd | 70.3 MiB | 2 | 140.6 MiB | 0.55x | inflated |
-| `4096x4096` | fwd | 64.0 MiB | 2 | 128.0 MiB | 0.50x | inflated |
-| `4096x4096` | bwd | 96.0 MiB | 2 | 192.0 MiB | 0.75x | inflated |
-| **`32768x1024`** | **fwd** | 128.0 MiB | 2 | **256.0 MiB** | **1.00x** | **inflated** |
-| `32768x1024` | bwd | 192.0 MiB | 2 | 384.0 MiB | 1.50x | clean |
-| `32768x2048` | fwd | 256.0 MiB | 2 | 512.0 MiB | 2.00x | clean |
-| `32768x2048` | bwd | 384.0 MiB | 2 | 768.0 MiB | 3.00x | clean |
-| `32768x4096` | fwd | 512.0 MiB | 2 | 1024.0 MiB | 4.00x | clean |
-| `32768x4096` | bwd | 768.0 MiB | 2 | 1536.0 MiB | 6.00x | clean |
-| `32768x8192` | fwd | 1024.0 MiB | 2 | 2048.0 MiB | 8.00x | clean |
-| `32768x8192` | bwd | 1536.0 MiB | 2 | 3072.0 MiB | 12.00x | clean |
+| `1x4096` | fwd | 0.023 MiB | 4 | 0.094 MiB | 0.00x | evicted |
+| `1x4096` | bwd | 0.039 MiB | 4 | 0.156 MiB | 0.00x | evicted |
+| `256x4096` | fwd | 4.008 MiB | 3 | 12.023 MiB | 0.05x | inflated |
+| `256x4096` | bwd | 6.017 MiB | 2 | 12.033 MiB | 0.05x | inflated |
+| `512x4096` | fwd | 8.008 MiB | 2 | 16.016 MiB | 0.06x | inflated |
+| `512x4096` | bwd | 12.018 MiB | 2 | 24.035 MiB | 0.09x | inflated |
+| `4096x3000` | fwd | 46.881 MiB | 2 | 93.761 MiB | 0.37x | inflated |
+| `4096x3000` | bwd | 70.340 MiB | 2 | 140.679 MiB | 0.55x | inflated |
+| `4096x4096` | fwd | 64.008 MiB | 2 | 128.016 MiB | 0.50x | inflated |
+| `4096x4096` | bwd | 96.031 MiB | 2 | 192.062 MiB | 0.75x | inflated |
+| `32768x1024` | fwd | 128.002 MiB | 2 | **256.004 MiB** | 1.00x | see below |
+| `32768x1024` | bwd | 192.129 MiB | 2 | 384.258 MiB | 1.50x | clean |
+| `32768x2048` | fwd | 256.004 MiB | 2 | 512.008 MiB | 2.00x | clean |
+| `32768x2048` | bwd | 384.133 MiB | 2 | 768.266 MiB | 3.00x | clean |
+| `32768x4096` | fwd | 512.008 MiB | 2 | 1024.016 MiB | 4.00x | clean |
+| `32768x4096` | bwd | 768.141 MiB | 2 | 1536.281 MiB | 6.00x | clean |
+| `32768x8192` | fwd | 1024.016 MiB | 2 | 2048.031 MiB | 8.00x | clean |
+| `32768x8192` | bwd | 1536.156 MiB | 2 | 3072.312 MiB | 12.00x | clean |
 
-**`m=32768` is not uniformly safe.** `32768x1024` forward lands at *exactly*
-256.0 MiB — precisely the boundary, and the probe measured that point on the
-**inflated** side (6453 GB/s at 256 MiB vs 4896 at 384 MiB). So the affected set
-is "every cell whose picked working set is <= 256 MiB", which is 11 of 18 cells
-and includes one `m=32768` cell. An earlier version of this file said "only
-`m<=4096` is affected" and "`m=32768` is unaffected"; both are wrong.
+Counting the **full 90-cell matrix** (9 shapes x 2 ops x 5 dtype/weight modes)
+rather than one dtype:
+
+- 47 of 90 cells have a working set `<= 256 MiB`
+- of those, **10 actually run the evictor** — the `m=1` cells, whose sets are
+  small enough to satisfy `ws < 12 MiB`
+- so **37 of 90** are both un-evicted and MALL-resident
+
+Per mode that is **8 of 18** for each of the four 16-bit modes and **5 of 18**
+for `float32/same`. The previously published "11 of 18" was produced by the
+approximate byte count and by ignoring `use_evictor`; it is withdrawn.
+
+**`32768x1024` forward: measured, not inferred.** @Reviewer was right that the
+cell is at **256.004 MiB**, not exactly 256.0 — the extra 4 KiB is the weight
+row, which my approximate byte count had dropped — and right that a set
+marginally *over* capacity cannot be classified by a `<= 256 MiB` rule when the
+probe only sampled 256 and 384 MiB. So I measured it directly, at the exact
+harness working set of 268439552 bytes:
+
+    WS bytes       WS MiB      GB/s
+    268435456      256.00000   6394
+    268437504      256.00195   6385
+    268439552      256.00391   6325   <- 32768x1024 bf16/same fwd, x2 buffers
+    268439552      256.00391   6295   (repeat)
+    268443648      256.00781   6401
+    268500992      256.06250   6161
+    268697600      256.25000   5960
+    269484032      257.00000   5409
+    (for reference: 288 MiB 4987, 384 MiB 5055)
+
+The cell reads **6295–6325 GB/s**, firmly on the inflated side — being 4 KiB
+over capacity does not evict it. So the verdict "inflated" stands for this cell,
+but it now rests on a measurement of that specific working set rather than on a
+threshold rule.
+
+Worth recording that the boundary is **not a cliff**: throughput decays across
+roughly 256 → 288 MiB rather than stepping at one point. My earlier
+"exactly 256.0 MiB, precisely the boundary" framing implied a sharpness the data
+does not show, and the adjacent-rotation step figure (1.32x) is a chord across
+that decay, not the height of a discontinuity.
+
+Two earlier claims are withdrawn outright: "only `m<=4096` is affected" /
+"`m=32768` is unaffected", and the "11 of 18" count.
+
 
 That earlier version also carried an off-by-one in a "buffers needed" table
 (`ceil(MALL/bytes)+1`, which overshoots whenever the division is exact): it
@@ -163,42 +208,42 @@ itself, not the copy.
 different bounds: `min_buffers=4, max_buffers=16` against the harness's
 `min=2, max=4`.
 
-The different bounds change the outcome substantially. Because a 12 MiB target
-divided by any realistic per-call size yields `n_by_l2 == 1`, the
-`max(min_buffers, ...)` floor wins in **every** cell, so the autotuner always
-picks exactly 4 buffers. `target_ratio` and `max_buffers=16` are inert today.
-Simulating the same 18 cells:
-
-| path | picked | cells with WS <= 256 MiB |
-| --- | --- | --- |
-| harness `_rotation_count` (min=2) | 2 in most cells | 11 of 18, incl. `32768x1024` fwd at exactly 256.0 MiB |
-| autotuner `_pick_l2_rotate_count` (min=4) | 4 everywhere | 8 of 18, all `m=32768` cells clean |
-
-So the autotuner path is *less* affected than the harness, accidentally — the
-`min_buffers=4` floor absorbs the sizing error. Two consequences worth noting:
-
-- `4096x4096` forward lands at 4 x 64 MiB = **exactly 256.0 MiB**, the same
-  boundary the probe measured on the inflated side. Different cell from the
-  harness's, same trap.
-- Fixing the target to an effective LLC would make `n_by_l2` meaningful for the
-  first time, so it is a behavioural change here, not just a correctness one.
-  Unlike the harness, this path has **no evictor at all** — only rotation — so
-  the 8 affected cells have nothing else to fall back on.
+> **Retracted pending recomputation (raised by @Reviewer, verified).** This
+> section previously gave a per-cell count for the autotuner path. Two errors,
+> both mine:
+>
+> 1. **"`n_by_l2 == 1` in every cell / always picks 4 / `max_buffers=16` is
+>    inert" is false, and my own printed output contained the counterexample.**
+>    The formula is `ceil(12 MiB / tensor_bytes)`, so it grows as the tensors
+>    shrink. At `1x4096` a set is ~0.016 MiB, giving `n_by_l2 = 768`, which
+>    clips at **`max_buffers=16`** — the ceiling binds, not the floor. My table
+>    printed `nb=16` for that row while the prose beside it said "4 everywhere".
+>    The floor does win for the mid and large shapes, but "everywhere" was the
+>    same all/almost-all overreach I keep committing.
+> 2. **I substituted the harness's `logical_bytes` for what this helper actually
+>    counts.** `_pick_l2_rotate_count` sums *every* Tensor in both `args` and
+>    `kwargs` of the real tuned call — forward has at least `x`, `weight`, `out`;
+>    backward adds `dout`, `rstd`, `dx` and the partials. My 18-cell table used
+>    `m*n*2*{2,3}`, an approximation of a different quantity. So `8 of 18` and
+>    "`4096x4096` fwd lands at exactly 256.0 MiB" are not established, and the
+>    "affected count goes 8 → 6 under an LLC target" figure inherits the same
+>    defect.
+>
+> What survives: the helper does use `L2_cache_size` and therefore inherits the
+> per-XCD/MALL confusion; this path has **no evictor at all**, only rotation;
+> and `max_buffers` has to move together with any target change (see below,
+> which is a statement about the formula rather than a per-cell count). The
+> counts must be recomputed from the actual argument sets of a real tuned call,
+> instrumented rather than modelled. Not yet done.
 
 **Changing `l2_size` alone is not sufficient here, and `max_buffers` must move
-with it.** @Autotune raised this and it checks out. With the target at
-`3 x 256 MiB = 768 MiB`, any shape under 48 MiB per set wants more than 16
-buffers and is clipped by `max_buffers=16` — and small shapes are exactly the
-ones with the smallest per-set size. Simulating the same 18 cells with only the
-target corrected takes the affected count from 8 to 6, not to 0: `1x4096`,
-`256x4096` and `512x4096` (fwd and bwd) all remain inside the MALL, clipped at
-16 buffers. Clearing 256 MiB needs 65 buffers at `256x4096` fwd and ~16k at
-`1x4096` fwd. The memory is not the problem (~0.26 GiB at the crossing point,
-by construction); the buffer count is.
-
-The exact threshold on the *current* target: `n_by_l2 >= 4` only when a set is
-<= 4.00 MiB, and no real rmsnorm shape here is that small, which is why the
-`min_buffers=4` floor wins everywhere today.
+with it.** @Autotune raised this and the mechanism holds independently of the
+cell counts: with the target at `3 x 256 MiB = 768 MiB`, any call whose cloned
+tensor set is under 48 MiB wants more than 16 buffers and is clipped by
+`max_buffers=16` — and the smallest shapes have the smallest sets, so the
+clipping lands exactly where the most rotation is needed. Memory is not the
+obstacle: the working set at the crossing point is 256 MiB by construction
+(~0.26 GiB), so the awkward part is the buffer *count*, not the bytes.
 
 Scope note: `quack/autotuner.py` is not in PR #4's diff (that PR touches
 `quack/flydsl/rmsnorm_autotune.py`), so this is not blocked by the PR #4 fence.
@@ -272,10 +317,13 @@ Recommendation: **1 + 3**.
 ## Consequence for existing numbers
 
 Any MI355X figure in `AI/flydsl_rmsnorm_notes.md` whose picked working set is
-<= 256 MiB is measured partly against MALL and is optimistic — 11 of 18 cells.
-The `M=32768` row (100%/88%) is **mostly but not entirely** clean: its backward
-half and N>=2048 forward cells clear the MALL, but `32768x1024` forward sits at
-exactly 256.0 MiB, on the inflated side of the boundary. Whether that shifts the
+`<= 256 MiB` *and* which does not trigger the evictor is measured partly against
+MALL and is optimistic — **37 of 90 cells** across the full matrix, or 8 of 18
+per 16-bit mode and 5 of 18 for fp32/same.
+The `M=32768` row (100%/88%) is clean except for one undetermined cell:
+`32768x1024` forward sits at 256.004 MiB, marginally *over* MALL capacity, and
+the probe has no sample between 256 and 384 MiB to place it. It should be
+measured rather than classified. Whether that shifts the
 published median depends on how many cells feed it, and should be recomputed
 rather than assumed. The `M=4096` row
 (71%/64%) and `M<=512` row (7%/5%) are affected, though at `M<=512` the cells

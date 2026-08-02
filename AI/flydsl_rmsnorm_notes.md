@@ -515,16 +515,19 @@ Large shapes are decided by HBM; mid shapes by the kernel; small batches are
 pure launch path, where the CuTe kernel is about 2.2x ahead (6.1 us against
 13.0 us at M=1, against a ~3.5 us Python/FFI floor).
 
-> **The MI355X column is known to be measured wrong in most cells.** On gfx950
+> **The MI355X column is known to be measured wrong in many cells.** On gfx950
 > a rotation working set of 256 MiB or less stays resident in the MALL, and the
-> evictor is sized from the 4 MiB per-XCD L2 that torch reports, so it is both
-> too small and gated off. Measured inflation is 1.32x at the boundary,
-> reproduced independently at two buffer sizes.
-> Simulating the harness's actual buffer selection, **11 of 18 cells** land at
-> or under 256 MiB. The `M=4096` row (71% / 64%) is therefore optimistic;
-> `M<=512` is launch-bound so bandwidth is not the binding constraint there;
-> and `M=32768` is **mostly** clean but not entirely — `32768x1024` forward
-> sits at exactly 256.0 MiB, on the inflated side. Full analysis in
+> `use_evictor` gate compares against a 12 MiB target derived from the 4 MiB
+> per-XCD L2 that torch reports, so on these shapes no eviction runs at all.
+> Measured inflation is 1.32x at the boundary, reproduced independently at two
+> buffer sizes and by a second person with a different probe design.
+> Computing from the harness's real `logical_bytes` and actual buffer selection,
+> **37 of 90 cells** are both un-evicted and MALL-resident (8 of 18 per 16-bit
+> mode; 5 of 18 for fp32/same). The `M=4096` row (71% / 64%) is therefore
+> optimistic; `M<=512` is launch-bound so bandwidth is not the binding
+> constraint there; and `M=32768` is clean except for `32768x1024` forward,
+> which sits at 256.004 MiB and was measured directly at that exact working set
+> (6295–6325 GB/s, inflated side). Full analysis in
 > [`gfx950_mall_evictor_defect.md`](gfx950_mall_evictor_defect.md). All three
 > rows should be re-measured before being cited; do not assume the large-m
 > median is unaffected without recomputing it.
