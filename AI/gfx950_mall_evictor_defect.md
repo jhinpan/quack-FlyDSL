@@ -97,19 +97,37 @@ harness's real `logical_bytes` (`benchmark_rmsnorm_flydsl.py:116`) and also
 accounts for `use_evictor`, which the earlier version ignored entirely. Shown
 for **bf16/same**; the other 16-bit modes give the same verdicts.
 
+`contract-invalid` means the cold-measurement contract did not hold for that
+cell, so its number needs re-collection. It deliberately does **not** say
+"inflated": that word asserts a direction, and nothing here measured an RMSNorm
+cell. The column said `inflated` until @Reviewer pointed out that the tail of
+this file had been corrected to "invalid, needs re-collection" while the table
+still asserted a sign.
+
+Two distinct reasons land a cell in that set, and they must not be merged into
+one rule:
+
+* **ten cells** are strictly `ws <= 256 MiB` and un-evicted — the `ws < l2_target`
+  gate leaves eviction off and the set fits the MALL;
+* **`32768x1024` fwd** is `256.004 MiB` (16-bit weight) or `256.007812 MiB`
+  (fp32 weight) — *past* capacity, so the `<=` rule excludes it. It qualifies
+  only because the archived fine-boundary copy probe measured those exact
+  working sets on the MALL-warm side. "`<= 256 MiB` leaves exactly 11" is not a
+  valid derivation and is no longer used.
+
 | shape | op | B/call | picked | working set | vs MALL | regime |
 | --- | --- | --- | --- | --- | --- | --- |
 | `1x4096` | fwd | 0.023 MiB | 4 | 0.094 MiB | 0.00x | evicted |
 | `1x4096` | bwd | 0.039 MiB | 4 | 0.156 MiB | 0.00x | evicted |
-| `256x4096` | fwd | 4.008 MiB | 3 | 12.023 MiB | 0.05x | inflated |
-| `256x4096` | bwd | 6.017 MiB | 2 | 12.033 MiB | 0.05x | inflated |
-| `512x4096` | fwd | 8.008 MiB | 2 | 16.016 MiB | 0.06x | inflated |
-| `512x4096` | bwd | 12.018 MiB | 2 | 24.035 MiB | 0.09x | inflated |
-| `4096x3000` | fwd | 46.881 MiB | 2 | 93.761 MiB | 0.37x | inflated |
-| `4096x3000` | bwd | 70.340 MiB | 2 | 140.679 MiB | 0.55x | inflated |
-| `4096x4096` | fwd | 64.008 MiB | 2 | 128.016 MiB | 0.50x | inflated |
-| `4096x4096` | bwd | 96.031 MiB | 2 | 192.062 MiB | 0.75x | inflated |
-| `32768x1024` | fwd | 128.002 MiB | 2 | **256.004 MiB** | 1.00x | see below |
+| `256x4096` | fwd | 4.008 MiB | 3 | 12.023 MiB | 0.05x | contract-invalid |
+| `256x4096` | bwd | 6.017 MiB | 2 | 12.033 MiB | 0.05x | contract-invalid |
+| `512x4096` | fwd | 8.008 MiB | 2 | 16.016 MiB | 0.06x | contract-invalid |
+| `512x4096` | bwd | 12.018 MiB | 2 | 24.035 MiB | 0.09x | contract-invalid |
+| `4096x3000` | fwd | 46.881 MiB | 2 | 93.761 MiB | 0.37x | contract-invalid |
+| `4096x3000` | bwd | 70.340 MiB | 2 | 140.679 MiB | 0.55x | contract-invalid |
+| `4096x4096` | fwd | 64.008 MiB | 2 | 128.016 MiB | 0.50x | contract-invalid |
+| `4096x4096` | bwd | 96.031 MiB | 2 | 192.062 MiB | 0.75x | contract-invalid |
+| `32768x1024` | fwd | 128.002 MiB | 2 | **256.004 MiB** | 1.00x | contract-invalid (past MALL; see below) |
 | `32768x1024` | bwd | 192.129 MiB | 2 | 384.258 MiB | 1.50x | clean |
 | `32768x2048` | fwd | 256.004 MiB | 2 | 512.008 MiB | 2.00x | clean |
 | `32768x2048` | bwd | 384.133 MiB | 2 | 768.266 MiB | 3.00x | clean |

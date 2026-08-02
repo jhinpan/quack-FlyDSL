@@ -53,7 +53,16 @@ import sys
 
 import torch
 
+# Hardcoded, corroborated by rocminfo's "L3: 262144 KB" (recorded in the
+# sidecar), NOT discovered. The `working_set_vs_mall` ratios below are all
+# relative to THIS constant and mean "vs the gfx950 MALL" specifically -- not
+# "vs whatever the last-level cache is on the current device". On a part with no
+# MALL the two readings diverge, so the field would silently change meaning if
+# this were swapped for a generic LLC query. @Autotune flagged this: it is the
+# same failure as a docstring whose name describes one quantity while the code
+# computes another. `mall_bytes_source` in the sidecar records which it is.
 MALL_BYTES = 256 * 2**20
+MALL_BYTES_SOURCE = "hardcoded_gfx950_mall_corroborated_by_rocminfo_l3"
 # 9 is sampled so the 16 MiB sweep has a true adjacent pair across the MALL
 # boundary (8 -> 9); without it the nearest sampled step is 8 -> 12, which is
 # four rotations apart and cannot be quoted as an adjacent-rotation step.
@@ -375,6 +384,8 @@ def environment():
             str(MALL_BYTES // 1024) in ln for ln in l3
         )
         env["mall_bytes_is_hardcoded"] = True
+        env["mall_bytes"] = MALL_BYTES
+        env["mall_bytes_source"] = MALL_BYTES_SOURCE
     except Exception as exc:  # noqa: BLE001 - provenance only, never fatal
         env["rocminfo_l3_lines"] = f"unavailable: {exc}"
     # Map rocm-smi's GPU index to a BDF first. rocm-smi's ordering is NOT torch's
