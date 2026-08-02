@@ -1,0 +1,64 @@
+{
+  "what": "FlyDSL fwd accuracy with MAX_N lifted, vs the same kernel under the cap",
+  "device": "AMD Instinct MI355X",
+  "dtype": "bfloat16",
+  "shipped_max_n": 8192,
+  "rows": [
+    {
+      "N": 4096,
+      "m": 4096,
+      "over_cap": false,
+      "status": "ok",
+      "mean_rel_err": 1.873171839861243e-08,
+      "max_abs_err": 0.015625
+    },
+    {
+      "N": 8192,
+      "m": 2048,
+      "over_cap": false,
+      "status": "ok",
+      "mean_rel_err": 2.249270458776209e-08,
+      "max_abs_err": 0.015625
+    },
+    {
+      "N": 16384,
+      "m": 1024,
+      "over_cap": true,
+      "status": "ok",
+      "mean_rel_err": 2.4696493738929348e-08,
+      "max_abs_err": 0.015625
+    },
+    {
+      "N": 32768,
+      "m": 512,
+      "over_cap": true,
+      "status": "ok",
+      "mean_rel_err": 2.703855983554604e-08,
+      "max_abs_err": 0.015625
+    },
+    {
+      "N": 65536,
+      "m": 256,
+      "over_cap": true,
+      "status": "ok",
+      "mean_rel_err": 1.0174142417440635e-08,
+      "max_abs_err": 0.015625
+    },
+    {
+      "N": 131072,
+      "m": 128,
+      "over_cap": true,
+      "status": "ok",
+      "mean_rel_err": 2.8228626547388558e-08,
+      "max_abs_err": 0.03125
+    },
+    {
+      "N": 262144,
+      "m": 64,
+      "over_cap": true,
+      "status": "ok",
+      "mean_rel_err": 7.495637532883848e-08,
+      "max_abs_err": 0.03125
+    }
+  ]
+}

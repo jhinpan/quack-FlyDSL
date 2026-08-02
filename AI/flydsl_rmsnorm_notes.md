@@ -2453,22 +2453,40 @@ I first wrote that the gap is 32x and that clusters conceal it. A second
 reader agreed the row is wrong but said the ceiling *is* the cluster gap. I
 checked that and retracted it: cutedsl sets `cluster_n = 1` on SM8x
 (`quack/rmsnorm.py:97-101`, "SM8x (Ampere/Ada) lacks cluster support") and
-still serves N=262144, so wide rows do not require clusters on any hardware. I
-sent that retraction to two threads and named LDS staging as the real
-mechanism.
+-- I claimed -- still serves N=262144, so wide rows do not require clusters on
+any hardware. I sent that retraction to two threads and named LDS staging as
+the real mechanism.
 
-A third reader then found `_bump_cluster_n_for_smem`
-(`quack/rmsnorm_config.py:344-371`), which raises `cluster_n` precisely to fit
-the smem budget -- "Override if this cluster_n would overflow the device's
-smem budget" -- and concluded cluster is causally part of the ceiling after
-all. That is also wrong, but only just: the call site is line 211, and line
-211 is inside `_for_blackwell_bwd` (`:168-262`). It is a Blackwell *backward*
-heuristic. It cannot be why SM8x, which has no clusters at all, serves
-N=262144. The forward's wide-N escape is `reload_from="smem"/"gmem"`
-(`quack/rmsnorm.py:283-289,338-339`) -- re-read the row instead of holding it
--- with no cluster involved.
+**That claim was false, and @CrossVendor caught it before spending GPU time
+on it.** My only evidence that SM8x serves N=262144 was that 262144 appears in
+`tests/test_rmsnorm.py:38`, a parameter list. A parameter list is not
+execution evidence, and this one is not even gated by arch. His counter-
+argument is arithmetic on the code: the forward allocates `sX` over the full
+per-CTA tile unconditionally (`quack/rmsnorm.py:171-174`, before and
+independent of any `reload_from` branch), so at `cluster_n = 1` the smem
+footprint is `tiler_mn[0] * tiler_mn[1] * 2` bytes. Enumerating every legal
+`(threads_per_row, num_threads)` at N=262144 bf16, `vecsize = gcd(N, 8) = 8`,
+the *minimum* over all of them is **512 KiB** -- at `tiler_mn = (1, 262144)`.
+H100's per-CTA opt-in maximum is 227 KiB. Nothing at cluster_n=1 can launch
+that row.
 
-**And the 32x figure, mine, was the worst of the four claims, because this
+So the honest reading inverts: cluster is not decoration for wide N on
+NVIDIA, it is what divides `tiler_mn[1]` until `sX` fits, exactly as
+`_bump_cluster_n_for_smem` does explicitly for the Blackwell backward. The
+third reader was closer to right than I was. What remains true from my
+correction is only the narrow part -- that the Blackwell-bwd bump is not the
+general mechanism -- and that was never the interesting claim.
+
+For the record on the reader whose finding started that correction: what he
+found, `_bump_cluster_n_for_smem` (`quack/rmsnorm_config.py:344-371`), raises
+`cluster_n` precisely to fit the smem budget -- "Override if this cluster_n
+would overflow the device's smem budget." Its only call site is line 211,
+inside `_for_blackwell_bwd` (`:168-262`), so as *the* general mechanism it is
+too narrow. But his conclusion, that cluster is causally part of the N
+ceiling, is the one that survives: it is explicit for the Blackwell backward
+and implicit everywhere else via the `sX` arithmetic above.
+
+**Separately, the 32x figure -- mine -- was wrong for its own reason: this
 file had already measured the answer and I did not look.** At `:2124` above:
 monkeypatching `MAX_N` to `1 << 20` runs the FlyDSL forward correctly to
 **N = 262144** and the backward to 65536, at bf16 accuracy indistinguishable
@@ -2477,15 +2495,43 @@ from shapes under the cap. `MAX_N = 8192` is therefore not a wall of any kind
 section locates the real width cliff between **49152 and 57344**
 (`AI/data/rmsnorm_fwd_width_cliff.json`), where throughput halves.
 
-So the honest statement of row 10, after four wrong ones:
+@CrossVendor also flagged that the `:2124` accuracy figures had no committed
+sidecar, which is fair: the cap-lift probe exists
+(`AI/probe_rmsnorm_width_cliff.py:379`) but `AI/data/rmsnorm_fwd_width_cliff.json`
+tops out at 98304 and carries no 131072 or 262144 row. Re-run on MI355X,
+bf16, `m*N` held at 2^24, against an fp32 reference, with `MAX_N` patched to
+`1 << 20` in both bindings and restored in a `finally`. Generator
+`AI/probe_flydsl_cap_lift_accuracy.py`, artifact
+`AI/data/flydsl_cap_lift_accuracy.json`:
 
-- gfx950 has no DSMEM. True, and irrelevant to the ceiling.
+| N | over cap | status | mean rel err |
+| --- | --- | --- | --- |
+| 4096 | no | ok | 1.9e-8 |
+| 8192 | no | ok | 2.2e-8 |
+| 16384 | yes | ok | 2.5e-8 |
+| 32768 | yes | ok | 2.7e-8 |
+| 65536 | yes | ok | 1.0e-8 |
+| 131072 | yes | ok | 2.8e-8 |
+| 262144 | yes | ok | 7.5e-8 |
+
+Flat across a 64x range with no discontinuity at the cap. So the FlyDSL half
+of the policy-cap claim is now measured rather than asserted.
+
+So the honest statement of row 10, after five wrong ones:
+
+- gfx950 has no DSMEM. True, and irrelevant to FlyDSL's own ceiling.
 - FlyDSL refuses N > 8192 by policy. Its forward is *measured* correct to
-  262144, the same N cutedsl is tested at.
-- The distance to a measured degradation is **~6x** (8192 to ~49152), not
-  32x, and what sits at the far end is a throughput cliff, not a failure.
-- Whether to raise the cap is a policy question with data already in hand,
-  not a capability question.
+  262144 (table above), with the real throughput cliff at 49152-57344, so the
+  distance to a measured degradation is **~6x**, not 32x, and what sits at
+  the far end is a cliff rather than a failure. Raising the cap is a policy
+  question with data in hand.
+- **Whether cutedsl serves 262144 at `cluster_n = 1` is still unverified, and
+  the arithmetic says it does not.** I asserted it from a parameter list. Do
+  not repeat that claim without an H100 run; @CrossVendor is doing one.
+- Which means the two backends' ceilings are *not* the clean 8192-vs-262144
+  contrast the row implied in either direction. FlyDSL's is a policy cap over
+  a working kernel. Cutedsl's is a real smem constraint that clusters relieve
+  -- on hardware that has them.
 
 Four readers, four causes -- registers, clusters, LDS staging, Blackwell smem
 -- for a limit that is a constant in a config file with a probe already
