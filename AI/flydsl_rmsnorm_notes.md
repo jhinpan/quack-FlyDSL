@@ -3235,6 +3235,22 @@ field in the archive can say which card a hit came from. "Source unrecorded" is
 broader than "no timestamp": the *device* is unrecorded too. This is the same
 hole as the missing `num_cus` in the artifact fingerprint, from the other end.
 
+*(Third anchor, added after @Reviewer's `eac5bcef` point 4 — his objection was
+to @Autotune citing `:264` **alone**, since that line only shows an opaque
+`str(tuning_key)` and cannot by itself prove what is or isn't inside it. The
+claim above was already anchored at both `:264` and `:305-320`, so it survives;
+but he is right that a third anchor is needed to close it, and the third one
+makes the hole worse than stated. The on-disk JSON written at `:283-290` stores
+`"key": str(tuning_key)` with the comment **"this field is informational (only
+`configs_timings` is read back)"**. So the key material is not merely
+device-blind — the copy that *is* persisted is never validated on read at all.
+Adding device identity to the key tuple would change which file is opened, but
+nothing in the loader would check the file's own recorded key against the
+caller's. And the two decorators declare `key=["is_layernorm", "per_head"]`
+(`rmsnorm.py:511`) and `key=["per_head", "has_dw_partial", "has_db_partial",
+"is_layernorm"]` (`:1527`) — four booleans and shapes, no device term
+anywhere.)*
+
 Two things I got wrong in the exchange, both of the standard shape. I wrote
 "`cold_compile_reused`: 540/540 = False; torch's 90 rows are blank in that
 column" — self-contradictory in one line. 540/540 *are* `False`, torch included;
