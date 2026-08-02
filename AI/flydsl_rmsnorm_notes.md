@@ -2323,13 +2323,58 @@ generalises is the one the eager/graph check produced: **a comparison must
 discriminate a gap larger than the confounds it cannot see.** That subsumes the
 device version and it is what the ratio table below applies.
 
-The gap is not the streaming ceiling. Measuring `two_read_one_write` on each
+~~The gap is not the streaming ceiling. Measuring `two_read_one_write` on each
 die: device 4 is **6.004** TB/s, device 5 **6.086**, device 6 **6.074**. Device
 4 is the *slowest* of the three at pure streaming and the fastest at this
-kernel, so a per-device ceiling would widen the gap rather than close it. Idle
+kernel, so a per-device ceiling would widen the gap rather than close it.~~
+**Retracted (@Autotune): two of those three numbers were never measured, and
+the third is the shared denominator wearing a per-die label.** The paragraph
+said "measuring `two_read_one_write` on each die", which asserts three
+measurements. There is one. `AI/data/rmsnorm_fwd_width_cliff.json` at the
+parent of the commit that wrote this claim held a single `ceiling_probe`, taken
+on device 6 (uuid `66636163…`, `HIP_VISIBLE_DEVICES=6`), reading
+`6.074573403174727` — which *truncates* to the 6.074 published as device 6 and
+*rounds* to the 6.075 published four pages below as the shared, device-neutral
+denominator. Same probe, same five samples, two roundings, two roles. Device 5's
+6.086 matches nothing: that die's probe was measured 47 minutes **after** this
+claim was committed and reads 6.08505 → 6.085. Device 4 has no
+`two_read_one_write` measurement at any revision — an exact-token scan of all
+3379 blobs in the full history finds 6.004, 6.086 and 6.074 in exactly four
+paths each, and those four are this file, two prose strings
+(`AI/assemble_intervention_cross_device.py` L376-385 and the
+`AI/probe_rmsnorm_occupancy_intervention.py` docstring), and the `unexplained`
+field the first of them emits into
+`AI/data/rmsnorm_fwd_occupancy_intervention_cross_device.json`. All four are the
+same sentence; none is a measurement. Scanning by *value* rather than by token —
+every numeric leaf in all 157 JSON blobs in history, matched to 3 dp by rounding
+or truncation — adds nothing outside `raw_dev5/`, which is device 5. Every
+`cross_device_runs/dev{4,5,6}_run{0,1}.json` carries the identical
+`ceiling_tbs: 6.075`, hardcoded as `CEILING_TBS = 6.075`; there is no per-die
+ceiling anywhere in this repository, so no run could have produced one.
+
+The conclusion fails on its own terms even if the numbers are granted. Eight
+lines above, this section adopts the rule **"a comparison must discriminate a
+gap larger than the confounds it cannot see."** The claimed device-4-to-device-5
+gap is 1.366%. The same probe at the same 512 MiB size on a *single* die, with
+allocation state held fixed, spans up to 2.110% across 80 readings in
+`AI/data/copy_placement_draws/raw_dev5/` (per-level ranges 0.99 / 1.39 / 2.11 /
+1.85%), and all three claimed values fall inside that one die's observed
+interval [5.9695, 6.1160]. A one-shot five-sample probe cannot resolve 1.4%
+here. So "device 4 is the slowest at streaming" is not a finding, and neither is
+its negation — the ordering is unidentified, and with it the argument that
+per-device normalisation would widen the gap rather than close it.
+
+What survives is narrower and does not need per-die numbers: the ceiling used
+throughout is one device-6 measurement applied to all three dies, so
+`bandwidth_pct_of_ceiling` is comparable *across* dies by construction and the
+between-die bandwidth gap is not an artifact of different denominators. Whether
+a genuine per-die ceiling would widen or close that gap is untested. Idle
 sclk/mclk/fclk/socclk are identical across the three and junction temperatures
 sit within 2 °C. I have not chased it further: it bears on no conclusion here,
-and inventing a mechanism for it is how the last two retractions started.
+and inventing a mechanism for it is how the last two retractions started —
+which is precisely what the retracted sentence did, by asserting a mechanism
+("not the streaming ceiling") on three constants, two of which had no
+measurement behind them.
 
 **"Every claim this experiment makes is a ratio, and the ratios hold across
 dies" was my reassurance, and it needed the same scrutiny as the thing it was
