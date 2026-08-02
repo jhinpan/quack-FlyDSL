@@ -4176,3 +4176,10 @@ asserts. With both inner repairs applied it goes `XPASS(strict)`.
 
 Gate with the env var set: `4 passed, 2 xfailed`; without it,
 `4 passed, 1 skipped, 1 xfailed`.
+
+Whole-suite gate moves with it: **`737 passed, 3 skipped, 1 xfailed`**. The
+new skip is this test's own env gate, so the `737 passed, 2 skipped, 1 xfailed`
+recorded three times above is correct for the commits that state it and stale
+from this commit onward. Worth saying because a gate figure carried forward
+without re-measuring is the same defect this whole file is about: a number
+that is right about a set other than the one it now labels.
