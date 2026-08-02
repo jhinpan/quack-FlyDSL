@@ -2,7 +2,7 @@
   "what": "host-side cost of five nested configurations of the real quack.rmsnorm_flydsl forward path at 256x4096 bf16, each rung adding exactly one stage, validated bit-identical to the public API before timing",
   "why": "the stage split (11.3/16.3/19.4/26.1 us) and the FlyDSL dispatch floor (6.38 us) were the last two figures in the notes marked unbacked. probe_rmsnorm_call_decomposition.py's not_covered field says they need in-situ stubbing in a separate probe. This is it.",
   "generator": "AI/probe_rmsnorm_stage_stubs.py",
-  "source_sha256_16": "a3b0fcc7389cacc2",
+  "source_sha256_16": "828d7d45eb883984",
   "shape": [
     256,
     4096
@@ -15,7 +15,7 @@
   "exclusivity_check": {
     "checked": true,
     "HIP_VISIBLE_DEVICES": "5",
-    "rocm_smi_showuse": "============================ ROCm System Management Interface ============================\n=================================== % time GPU is busy ===================================\nGPU[0]\t\t: GPU use (%): 0\nGPU[0]\t\t: GFX Activity: 836380110\nGPU[1]\t\t: GPU use (%): 0\nGPU[1]\t\t: GFX Activity: 910633270\nGPU[2]\t\t: GPU use (%): 0\nGPU[2]\t\t: GFX Activity: 832405236\nGPU[3]\t\t: GPU use (%): 0\nGPU[3]\t\t: GFX Activity: 2230754190\nGPU[4]\t\t: GPU use (%): 48\nGPU[4]\t\t: GFX Activity: 1030608617\nGPU[5]\t\t: GPU use (%): 0\nGPU[5]\t\t: GFX Activity: 874638169\nGPU[6]\t\t: GPU use (%): 0\nGPU[6]\t\t: GFX Activity: 854997106\nGPU[7]\t\t: GPU use (%): 0\nGPU[7]\t\t: GFX Activity: 867822394\n==========================================================================================\n================================== End of ROCm SMI Log ==================================="
+    "rocm_smi_showuse": "============================ ROCm System Management Interface ============================\n=================================== % time GPU is busy ===================================\nGPU[0]\t\t: GPU use (%): 0\nGPU[0]\t\t: GFX Activity: 836396339\nGPU[1]\t\t: GPU use (%): 0\nGPU[1]\t\t: GFX Activity: 910649316\nGPU[2]\t\t: GPU use (%): 0\nGPU[2]\t\t: GFX Activity: 832421275\nGPU[3]\t\t: GPU use (%): 0\nGPU[3]\t\t: GFX Activity: 2230774044\nGPU[4]\t\t: GPU use (%): 48\nGPU[4]\t\t: GFX Activity: 1030900814\nGPU[5]\t\t: GPU use (%): 0\nGPU[5]\t\t: GFX Activity: 874653481\nGPU[6]\t\t: GPU use (%): 0\nGPU[6]\t\t: GFX Activity: 855012728\nGPU[7]\t\t: GPU use (%): 0\nGPU[7]\t\t: GFX Activity: 867838009\n==========================================================================================\n================================== End of ROCm SMI Log ==================================="
   },
   "correctness_gate": {
     "L0_flydsl_dispatch_floor": {
@@ -45,115 +45,117 @@
   },
   "levels": {
     "L0_flydsl_dispatch_floor": {
-      "min_us": 5.830589798279107,
-      "median_us": 6.0046600992791355,
-      "max_us": 6.484474870376289,
-      "stdev_us": 0.13766152772499385,
+      "min_us": 5.814539908897132,
+      "median_us": 5.99623512243852,
+      "max_us": 6.379080004990101,
+      "stdev_us": 0.12113213903076024,
       "rounds": 30,
       "reps_per_round": 200
     },
     "L1_cached_launcher": {
-      "min_us": 10.598550143186003,
-      "median_us": 10.787040228024125,
-      "max_us": 11.068289750255644,
-      "stdev_us": 0.11074411602381777,
+      "min_us": 10.619190288707614,
+      "median_us": 10.799664887599647,
+      "max_us": 11.020239908248186,
+      "stdev_us": 0.09331097997599587,
       "rounds": 30,
       "reps_per_round": 200
     },
     "L2_plus_allocations": {
-      "min_us": 14.43312008632347,
-      "median_us": 14.587144978577271,
-      "max_us": 14.694265264552087,
-      "stdev_us": 0.07430100796794499,
+      "min_us": 14.153174997773021,
+      "median_us": 14.29909752914682,
+      "max_us": 14.511225163005292,
+      "stdev_us": 0.08706976905414189,
       "rounds": 30,
       "reps_per_round": 200
     },
     "L3_plus_autograd": {
-      "min_us": 18.617589958012104,
-      "median_us": 18.66696504293941,
-      "max_us": 19.407130021136254,
-      "stdev_us": 0.14033798357692212,
+      "min_us": 18.387445015832782,
+      "median_us": 18.450769857736304,
+      "max_us": 19.451224943622947,
+      "stdev_us": 0.20900627529070495,
       "rounds": 30,
       "reps_per_round": 200
     },
     "L3b_plus_wrapper_minus_validation": {
-      "min_us": 24.29223502986133,
-      "median_us": 24.383355194004253,
-      "max_us": 24.485780159011483,
-      "stdev_us": 0.04708478112656174,
+      "min_us": 24.16933508357033,
+      "median_us": 24.23055499093607,
+      "max_us": 24.319379881490022,
+      "stdev_us": 0.039127278407975925,
       "rounds": 30,
       "reps_per_round": 200
     },
     "L4_public_api": {
-      "min_us": 27.80106500722468,
-      "median_us": 27.91058737784624,
-      "max_us": 28.201859968248755,
-      "stdev_us": 0.09980903259941312,
+      "min_us": 27.467320032883435,
+      "median_us": 27.554142579901963,
+      "max_us": 27.802815020550042,
+      "stdev_us": 0.06476678899089337,
       "rounds": 30,
       "reps_per_round": 200
     }
   },
   "stage_costs_as_differences": {
     "L1_cached_launcher_minus_L0_flydsl_dispatch_floor": {
-      "delta_median_us": 4.78238012874499,
-      "delta_min_us": 4.767960344906896
+      "delta_median_us": 4.803429765161127,
+      "delta_min_us": 4.804650379810482
     },
     "L2_plus_allocations_minus_L1_cached_launcher": {
-      "delta_median_us": 3.800104750553146,
-      "delta_min_us": 3.834569943137467
+      "delta_median_us": 3.4994326415471733,
+      "delta_min_us": 3.5339847090654075
     },
     "L3_plus_autograd_minus_L2_plus_allocations": {
-      "delta_median_us": 4.0798200643621385,
-      "delta_min_us": 4.184469871688634
+      "delta_median_us": 4.151672328589484,
+      "delta_min_us": 4.23427001805976
     },
     "L3b_plus_wrapper_minus_validation_minus_L3_plus_autograd": {
-      "delta_median_us": 5.716390151064843,
-      "delta_min_us": 5.674645071849227
+      "delta_median_us": 5.779785133199766,
+      "delta_min_us": 5.7818900677375495
     },
     "L4_public_api_minus_L3b_plus_wrapper_minus_validation": {
-      "delta_median_us": 3.5272321838419884,
-      "delta_min_us": 3.508829977363348
+      "delta_median_us": 3.323587588965893,
+      "delta_min_us": 3.297984949313104
     }
   },
   "additivity_check": {
-    "L4_minus_L0_median_us": 21.905927278567106,
-    "sum_of_pairwise_deltas_us": 21.905927278567106,
+    "L4_minus_L0_median_us": 21.557907457463443,
+    "sum_of_pairwise_deltas_us": 21.557907457463443,
     "agree_to_1e-9": true,
     "note": "differences of medians are additive here only because every delta is taken between adjacent rungs of one chain; this is an arithmetic identity, not evidence the stages are independent. A stage's median is not the latency it adds to a caller: these are host microseconds with the GPU deliberately not awaited."
   },
   "comparison_to_published_unbacked": {
     "L1_cached_launcher": {
       "published_unbacked_us": 11.3,
-      "measured_median_us": 10.787040228024125,
-      "delta_us": -0.5129597719758756,
-      "ratio": 0.9546053299136393
+      "measured_median_us": 10.799664887599647,
+      "delta_us": -0.5003351124003537,
+      "ratio": 0.9557225564247475
     },
     "L2_plus_allocations": {
       "published_unbacked_us": 16.3,
-      "measured_median_us": 14.587144978577271,
-      "delta_us": -1.7128550214227296,
-      "ratio": 0.8949168698513663
+      "measured_median_us": 14.29909752914682,
+      "delta_us": -2.0009024708531804,
+      "ratio": 0.8772452471869214
     },
     "L3_plus_autograd": {
       "published_unbacked_us": 19.4,
-      "measured_median_us": 18.66696504293941,
-      "delta_us": -0.733034957060589,
-      "ratio": 0.9622146929350212
+      "measured_median_us": 18.450769857736304,
+      "delta_us": -0.9492301422636942,
+      "ratio": 0.9510706112235209
     },
     "L4_public_api": {
       "published_unbacked_us": 26.1,
-      "measured_median_us": 27.91058737784624,
-      "delta_us": 1.8105873778462396,
-      "ratio": 1.0693711639021548
+      "measured_median_us": 27.554142579901963,
+      "delta_us": 1.454142579901962,
+      "ratio": 1.0557142750920292
     },
     "L0_flydsl_dispatch_floor": {
       "published_unbacked_us": 6.38,
-      "measured_median_us": 6.0046600992791355,
-      "delta_us": -0.37533990072086443,
-      "ratio": 0.9411692945578582
+      "measured_median_us": 5.99623512243852,
+      "delta_us": -0.3837648775614797,
+      "ratio": 0.9398487652724954
     }
   },
-  "the_error_bar_that_matters_is_between_runs": "the per-rung stdev above is WITHIN one process: 30 rounds of 200 reps, and it is small (0.07-0.16 us). It is not the uncertainty on these figures. Re-running this probe in a fresh process moved every rung by -0.24 to -0.56 us, all in the same direction, which is 3.1 to 6.8 times the within-run stdev of the rung it moved. Something that differs between processes -- allocator state, page placement, clocks -- dominates, exactly as the allocation-factorial work found for copy rates on this box. Quoting a within-run stdev as the error bar understates the real spread by roughly 4x, and I did that twice before measuring it. Treat any single-run figure here as +-0.5 us, and do not adjudicate a 0.2 us difference with it: the verdict on whether the measured _validate_inputs cost agrees with the old 3.3 flips between runs (3.55 = +7.5%, then 3.33 = +1.0%).",
+  "the_error_bar_that_matters_is_between_runs": "the per-rung stdev above is WITHIN one process: 30 rounds of 200 reps, and it is small (0.07-0.16 us). It is not the uncertainty on these figures. Re-running this probe in a fresh process moves every rung together by 0.24-1.29 us, all in the same direction, which is 3.1 to 6.8 times the within-run stdev of the rung it moved. Something that differs between processes -- allocator state, page placement, clocks -- dominates, exactly as the allocation-factorial work found for copy rates on this box. Quoting a within-run stdev as the error bar understates the real spread by roughly 4x, and I did that twice before measuring it. Seven runs during development read L0 = 6.60 / 6.55 / 6.09 / 6.00 / 7.29 / 6.71 / 6.74 -- a 1.29 us range. That list is a fixed record of those seven and is not updated by later runs; whatever this artifact's own L0 is, it is in `levels` above. So the bar on any single LEVEL is about +-1 us, not the +-0.5 us first written here, which was itself understated by a run that had not happened yet; do not adjudicate a sub-us difference between levels from different runs. The verdict on whether the measured _validate_inputs cost agrees with the old 3.3 flips between runs (3.55 = +7.5%, then 3.33 = +1.0%). The deltas are a different matter -- see the next field, which is what this probe actually claims.",
+  "but_the_DELTAS_are_stable_and_that_is_what_this_probe_claims": "the per-process drift is a near-uniform OFFSET across the whole ladder: between runs the six levels move together by 0.83-1.29 us, while the five adjacent-rung differences move by only 0.09-0.22 us. Subtracting neighbouring rungs cancels whatever the process-scoped term is. So the levels are worth about one significant decimal and the decomposition -- the thing this probe exists to measure -- is good to about 0.2 us. Quote the deltas; treat any single level as an absolute number with a 1 us bar. This also explains why @CrossVendor's interleaved within-process design (73303906) is the right shape for a merge verdict: a shared offset cancels in a relative comparison and does not cancel in an absolute one.",
+  "this_does_NOT_generalize_to_device_side_timing": "the drift above is HOST dispatch measured with the GPU deliberately not awaited, and it is 1.8% (L4) to 8.3% (L0) of the figure it moves. Device-side timing on this same box is far steadier: the anchored allocation factorial ran FOUR INDEPENDENT PROCESSES per cell and the process-to-process relative sd of the copy rate is 0.085%-0.211%, i.e. 40-100x tighter. So 'run it twice, the between-process bar is +-0.5 us' is advice about Python dispatch cost, NOT about CUDA-event kernel timing, and it should not be carried across to a kernel-time comparison. @CrossVendor (73303906) declined to apply it to Experiment No.001 for exactly this reason and was right to: his merge verdict is an interleaved old/new relative comparison inside one process, where a shared process offset cancels rather than accumulates, and his validity gate is the old==new null plus bandwidth canaries. Generalising a host-side variance finding to a device-side protocol would have been a category error.",
   "the_published_ladder_did_not_sum": {
     "what_the_notes_say": "'the cached launcher is 11.3 us, the four torch.empty* allocations bring it to 16.3, the autograd.Function.apply to 19.4, and _validate_inputs adds 2.9 for 26.1 total'",
     "the_arithmetic": "19.4 + 2.9 = 22.3, not 26.1",
