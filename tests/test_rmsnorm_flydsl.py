@@ -1945,6 +1945,58 @@ def test_the_singleton_layout_compiles_with_fullgraph(dynamic):
         _assert_close(got, _reference(tensor, weight, 1e-6))
 
 
+def test_the_autotuned_path_does_not_share_a_launcher_across_row_counts():
+    """The forced-tuner singleton path, listed as missing coverage.
+
+    Written as a structural assertion on purpose. The obvious value test --
+    run a singleton through ``rmsnorm_autotuned``, then an ordinary tensor,
+    compare against a reference -- **cannot fail**, and I checked that before
+    writing this rather than after. With ``_unambiguous_layout`` neutralised,
+    eager and ``fullgraph=True`` compiled both return exact answers across
+    m = 1, 2, 3, 4, 8, 37, 128, a repeat singleton, and an offset singleton:
+    worst error 0.0 in every cell. A value test here would join the five
+    can't-fail checks this suite has already had to remove.
+
+    The reason it cannot fail is worth pinning down, because it is a property
+    of the tuner and could change. ``_launch_rmsnorm_fwd_autotuned`` does not
+    consult ``_FWD_CACHE`` at all -- measured, 0 entries after both calls --
+    so the shared-key defect that poisons the non-tuned forward has no path
+    here. The tuner keeps its own cache, and ``m`` is the first term of
+    ``_RMSNORM_AUTOTUNE_KEY``, so the two row counts cannot collide the way
+    the FWD entries do.
+
+    So this test asserts the two structural facts the immunity rests on. If a
+    later change routes the tuner through ``_FWD_CACHE``, or drops ``m`` from
+    the tuner key, this fails immediately -- whereas the value test would keep
+    passing right up until it silently did not.
+    """
+    from quack.flydsl.rmsnorm_autotune import _RMSNORM_AUTOTUNE_KEY
+
+    assert _RMSNORM_AUTOTUNE_KEY[0] == "m", (
+        "the tuner key no longer leads with the row count; the singleton and an "
+        "ordinary tensor can now land on one tuner entry, so the autotuned path "
+        "needs the same canonicalisation guard as the non-tuned one"
+    )
+
+    torch.manual_seed(0)
+    n = 64
+    weight = torch.randn(n, device="cuda", dtype=torch.bfloat16)
+    singleton = torch.randn((n, 1), device="cuda", dtype=torch.bfloat16).t()
+    ordinary = torch.randn((8, n), device="cuda", dtype=torch.bfloat16)
+
+    rmsnorm_flydsl_impl._FWD_CACHE.clear()
+    rmsnorm_autotuned(singleton, weight)
+    rmsnorm_autotuned(ordinary, weight)
+
+    assert len(rmsnorm_flydsl_impl._FWD_CACHE) == 0, (
+        "the autotuned path now populates _FWD_CACHE, which has no row-count or "
+        "layout term; it has inherited the singleton reuse defect"
+    )
+
+    # Values too, but only as a non-discriminating control -- see the docstring.
+    _assert_close(rmsnorm_autotuned(ordinary, weight), _reference(ordinary, weight, 1e-6))
+
+
 def test_a_compiled_singleton_backward_does_not_poison_later_gradients():
     """The backward path, which the forward tests do not reach.
 
