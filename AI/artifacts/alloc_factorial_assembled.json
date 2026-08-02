@@ -241,8 +241,46 @@
       },
       "verdict": "NOT ROBUST. Residual Spearman ranges +0.0853 to +0.4971 across four aggregations of the same 16 processes, with permutation p from 0.0520 to 0.7491. No basis reaches p<.05. Nothing here licenses 'there is drift' or 'there is no drift'. The pre-registered mean is the basis that looks MOST like a finding, which is why all four are published rather than the one."
     },
-    "residual_drift_verdict": "NOT ROBUST TO AGGREGATION, and therefore NOT A CLAIM in either direction. On the pre-registered per-process mean the residual drift is Spearman +0.4971 (p=0.052), which reads as a near-significant finding. On the median of the same five slot rates it is +0.0853 (p=0.749). Same 16 processes, same residualization, and the pre-registered basis is the one that looks most like a result. See `aggregation_sweep` for all four. What survives is only this: the shuffle left total prior bytes essentially uncorrelated with position (Spearman -0.1917) IN THIS REALIZED DRAW, so no aggregation's drift can manufacture the bytes effect, and the 94.53% stands on all four.",
-    "and_that_last_clause_is_about_one_draw": "randomization makes drift independent of treatment in the ASSIGNMENT DISTRIBUTION; it does not prevent a realized shuffle from aligning with drift. -0.1917 is a diagnostic on the draw that happened, not the distributional property, and it should not be read as the latter.",
+    "residual_drift_verdict": "NOT ROBUST TO AGGREGATION, and therefore NOT A CLAIM in either direction. On the pre-registered per-process mean the residual drift is Spearman +0.4971 (p=0.052), which reads as a near-significant finding. On the median of the same five slot rates it is +0.0853 (p=0.749). Same 16 processes, same residualization, and the pre-registered basis is the one that looks most like a result. See `aggregation_sweep` for all four. The bytes effect is unaffected by the drift, and that is now TESTED rather than asserted -- see `time_trend_adjustment`.",
+    "time_trend_adjustment": {
+      "mean_PREREGISTERED_PRIMARY": {
+        "bytes_eta_squared_pct_unadjusted": 94.53,
+        "bytes_eta_squared_pct_adjusted_for_trend": 95.11,
+        "bytes_F": 119.83,
+        "bytes_p": 0.0,
+        "trend_given_bytes_eta_squared_pct": 0.71,
+        "trend_F": 1.78,
+        "trend_p": 0.2064
+      },
+      "median": {
+        "bytes_eta_squared_pct_unadjusted": 86.09,
+        "bytes_eta_squared_pct_adjusted_for_trend": 85.33,
+        "bytes_F": 36.81,
+        "bytes_p": 0.0,
+        "trend_given_bytes_eta_squared_pct": 0.0,
+        "trend_F": 0.0,
+        "trend_p": 0.9588
+      },
+      "max_coordinate": {
+        "bytes_eta_squared_pct_unadjusted": 34.31,
+        "bytes_eta_squared_pct_adjusted_for_trend": 31.64,
+        "bytes_F": 2.97,
+        "bytes_p": 0.0894,
+        "trend_given_bytes_eta_squared_pct": 1.84,
+        "trend_F": 0.35,
+        "trend_p": 0.5676
+      },
+      "min_coordinate": {
+        "bytes_eta_squared_pct_unadjusted": 91.41,
+        "bytes_eta_squared_pct_adjusted_for_trend": 90.87,
+        "bytes_F": 65.81,
+        "bytes_p": 0.0,
+        "trend_given_bytes_eta_squared_pct": 0.3,
+        "trend_F": 0.43,
+        "trend_p": 0.5221
+      },
+      "verdict": "The bytes effect survives explicit adjustment for a linear time trend on ALL FOUR aggregations, and the trend adjusted for bytes is never distinguishable from zero (p from 0.2064 to 0.9588). On the pre-registered mean the bytes effect is marginally LARGER adjusted than unadjusted (94.53% -> 95.11%) with the trend at F(1,12)=1.78. This replaces the earlier assertion that 'drift cannot manufacture a bytes effect', which was a statement about the assignment distribution resting on one realized draw's diagnostic. NOTE the model fits drift as LINEAR in position; non-monotone or periodic time structure passes it untouched, just as it passes Spearman."
+    },
     "corr_RAW_rate_vs_position_pearson_DO_NOT_QUOTE_AS_THE_CONTROL": -0.0362,
     "why_that_field_is_named_that": "the raw-rate correlation is -0.0362 and reads as a clean null. It is the wrong quantity: cell means differ by up to 0.064 TB/s, so the raw series is dominated by which cell each process drew and a residual drift hides underneath it. Twelve times the magnitude, opposite sign. It is kept because it is what the first draft of this function published, and a reader comparing artifacts should be able to see the corrected pair side by side.",
     "corr_total_prior_bytes_vs_position_spearman": -0.1917,
@@ -335,17 +373,16 @@
       },
       {
         "path": "AI/assemble_alloc_factorial.py",
-        "sha256": "c09edf49d484246e67de64ee7a44c68bb07dff7eb47479c833fe9ee502ab35f5",
-        "bytes": 44158
+        "sha256": "ac119bb3165ba0125ac8e8271ac61a7e1bbc1cdc7afb2af495a71b140e199940",
+        "bytes": 47996
       }
     ],
     "what_this_proves": "the assembler read exactly these bytes. It does not prove they came from a GPU, and a manifest cannot."
   },
   "git": {
-    "commit": "3a201ca",
+    "commit": "9223935",
     "worktree_dirty": true,
     "worktree_dirty_paths": [
-      "AI/artifacts/alloc_factorial_assembled.json",
       "AI/assemble_alloc_factorial.py"
     ],
     "worktree_dirty_note": "cannot read clean in the commit that contains this artifact: writing the file dirties the tree the flag describes. The path list is what makes the flag checkable."
