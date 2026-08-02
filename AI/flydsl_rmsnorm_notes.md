@@ -903,3 +903,51 @@ file: a figure quoted in a review or a message needs the raw samples committed
 next to it, or it cannot survive the question "where did that come from". Two
 of these three were fine as measurements and indefensible as citations, and the
 third was neither.
+
+## Feature parity with the cutedsl backend, and where a grep lies about it
+
+The mapping task asks how the FlyDSL backend lines up with `quack/rmsnorm.py`
+on features, not just speed. A token-count diff of the two modules is the
+obvious first cut and it is wrong in four of fourteen rows, all in the same
+direction -- reporting a gap where there is only a different spelling. Recorded
+because the naive table is the one that would have been sent.
+
+| feature | cutedsl | FlyDSL | |
+| --- | --- | --- | --- |
+| bias, residual (fused add), prenorm | yes | yes | parity |
+| weight_offset (`w+1` fusion) | yes | yes | parity |
+| per-head affine | yes | yes | parity |
+| store_rstd | yes | yes | parity |
+| autotune | yes | yes | `quack/flydsl/rmsnorm_autotune.py` |
+| persistent backward | yes | yes | different knob name |
+| split parameter reduce | `dw_partial` | yes | two-stage, no atomic variant |
+| dual dx dtype | yes | partial | narrower |
+| **layernorm / mean** | **yes** | **no** | **real gap** |
+| cluster / multicast | yes | n/a | SM90+ DSMEM, no gfx950 analogue |
+
+The four rows a grep gets wrong: `autotune` and `persistent` live in
+`quack/flydsl/`, not in `rmsnorm_flydsl.py`, so a module-scoped grep reads 0 on
+both; `dw_partial` is spelled `partial`/`dweight_total` in
+`rmsnorm_bwd_kernel.py` and the mechanism -- per-block partials, second kernel
+reduces -- is the same; and `sm_count` is cutedsl's persistent-launch knob under
+a different name. Each of those looked like a missing feature and none is.
+
+`cluster` is a real difference but not a deficit: it is Hopper-and-later
+distributed shared memory, which gfx950 does not have. Counting it as a gap
+would make the backend permanently non-compliant with a hardware feature the
+hardware lacks.
+
+**The one genuine feature gap is layernorm.** `quack/rmsnorm.py` carries
+`is_layernorm` through the whole stack, forward and backward, with `mean`
+alongside `rstd` and a `layernorm_fwd` / `layernorm_bwd` / `layernorm_ref`
+surface. FlyDSL has none of it. It is not exported from `quack/__init__.py`, so
+nothing in-tree consumes it today, but it is the item to name when asked what
+the backend does not yet do.
+
+Second, smaller: cutedsl exposes `rmsnorm_fwd` and `rmsnorm_bwd` as public
+entry points and FlyDSL exposes only `rmsnorm`. The top-level `rmsnorm()`
+signatures are argument-for-argument identical, so callers of the public API
+are unaffected; only the archived probes under `AI/archive/` reach for the
+lower-level pair. Worth noting because the benchmark harness times quack at
+`rmsnorm_fwd` and FlyDSL at `_launch_rmsnorm_fwd` -- different levels, which
+this file already flags as a measurement hazard elsewhere.
