@@ -889,12 +889,22 @@ Holding `m` fixed at 4096 (16 blocks/CU throughout) isolates width, against the
 | 98304 | 384 | 40.1% |
 
 Flat to 49152, then halves between 49152 and 57344 -- the step is abrupt, not a
-slope, and it reproduces to a tenth of a point over three processes. That is a real width limit and it does look like
+slope, and it reproduces to a tenth of a point over three processes.
+(**Unarchived**: this table has no committed sidecar and no generator, so it is
+in the same category as the figures the "a cited number needs a sidecar"
+section above condemns. It is also the bandwidth half of the mechanism argument
+made further down, which makes it the load-bearing unbacked table in this file
+and the next one to regenerate.) That is a real width limit and it does look like
 occupancy collapse from per-thread live state -- so the comment's *mechanism* is
 probably right while its *value* is off by 8x. What is not yet done is
 confirming the mechanism directly: no register count, occupancy figure or spill
 report has been read out of the compiled kernel, and until one is, "register
-budget" remains the plausible story rather than the measured one. **The cap is
+budget" remains the plausible story rather than the measured one.
+(Partly overtaken: the register counts and spill reports *have* since been read
+out -- see the register-budget section at the end of this file -- and they put
+the capacity step on this same boundary. The occupancy figure has still not
+been measured, so the mechanism is still not confirmed; only its register half
+is.) **The cap is
 not raised on the strength of this.** A constant that is conservative by 6x
 costs reachable shapes; a constant moved on an unconfirmed mechanism costs
 correctness somewhere unmeasured. The finding is that 8192 is not where the
@@ -1100,28 +1110,43 @@ from it.
 What is measurable here, bf16 forward, min-of-7-rounds-of-50, all rounds
 retained in the JSON:
 
+The `difference` column is the gap between the two round *intervals*, not
+between their minima, and it is blank where the intervals overlap. A
+point estimate computed across an overlap is not a measurement of anything.
+
 | shape | `_launch` (what the harness times) | FlyDSL `rmsnorm()` | difference |
 | --- | --- | --- | --- |
-| 32768x4096 | 89.63 us | 89.93 us | +0.30 us (+0.3%) |
-| 8192x4096 | 20.50 us | 29.41 us | +8.91 us (+43.4%) |
-| 1024x1024 | 12.21 us | 29.37 us | +17.16 us (+140.5%) |
-| 256x512 | 11.78 us | 29.27 us | +17.49 us (+148.5%) |
-| 64x256 | 11.44 us | 29.06 us | +17.62 us (+154.0%) |
+| 32768x4096 | 89.63 us [89.63, 91.48] | 89.93 us [89.93, 90.33] | **unresolved** (intervals overlap) |
+| 8192x4096 | 20.50 us [20.50, 21.12] | 29.41 us [29.41, 30.63] | +8.91 us (+43.4%) |
+| 1024x1024 | 12.21 us [12.21, 14.90] | 29.37 us [29.37, 30.42] | +17.16 us (+140.5%) |
+| 256x512 | 11.78 us [11.78, 12.80] | 29.27 us [29.27, 30.21] | +17.49 us (+148.5%) |
+| 64x256 | 11.44 us [11.44, 12.87] | 29.06 us [29.06, 30.30] | +17.62 us (+154.0%) |
 
 **The cost is not a constant, and the earlier "~16.5 us" was fitted to the
-three rows where it happened to hold.** The five differences are 0.30, 8.91,
+three rows where it happened to hold.** The four resolved differences are 8.91,
 17.16, 17.49 and 17.62 us. They saturate near 17.6 us at small shapes and fall
 away as the kernel grows, which is the shape of a fixed host cost being
 progressively hidden behind device work, not of a constant addend. Round-to-
-round spread across the ten series is 0.40-2.69 us -- an earlier version of this
-line said "0.40-1.25", which is the spread of six of the ten and omits the two
-widest (`_launch` at 1024x1024, 2.69 us, and at 32768x4096, 1.85 us), i.e. it
-quoted a range computed over a subset that excluded exactly the series the next
-sentence rests on. The 8.91 us row still stands clear of it: those two series
-are [20.50, 21.12] and [29.41, 30.63], which do not overlap, so it is a real
-intermediate and not noise. Quoting a single number across the range asserted an
-overlap model I had not tested; the honest summary is "up to ~17.6 us, and
-unresolved at 32768x4096".
+round spread across the ten series is 0.40-2.68 us -- an earlier version of this
+line said "0.40-1.25", which covers seven of the ten and omits the three widest
+(`_launch` at 1024x1024, 2.68 us, at 32768x4096, 1.85 us, and at 64x256, 1.42
+us), i.e. it quoted a range computed over a subset that excluded exactly the
+series the next sentence rests on. The 8.91 us row still stands clear of it:
+those two series are [20.50, 21.12] and [29.41, 30.63], which do not overlap, so
+it is a real intermediate and not noise. Quoting a single number across the
+range asserted an overlap model I had not tested; the honest summary is "up to
+~17.6 us, and unresolved at 32768x4096".
+
+Three corrections inside that sentence, all @Reviewer's and all mine to have
+caught. The widest spread is 2.684821 us, which rounds to **2.68**, not the 2.69
+I published -- I rounded up from a truncated read of my own output. The old
+"0.40-1.25" range covers **seven** of the ten, not six; there are three series
+above it, not two. And the row it describes stayed in the table above while
+three paragraphs below it explained why the number was withdrawn: I wrote the
+retraction and left the artifact standing, which is the same defect as the
+inverted cache table earlier in this file -- the prose was right and the thing a
+reader actually copies out was wrong. The table now carries intervals and the
+word `unresolved` in place of the number.
 
 **The 32768x4096 row does not support a number at all, and I stated one.**
 "+0.30 us (+0.3%)" is a difference of two minima, and at that shape the two
@@ -1144,8 +1169,13 @@ The consequence for the published tables is therefore unchanged in direction and
 unproven in size at every shape. At 32768x4096 the level choice is unresolved
 rather than small, so the large-shape results are **not** shown to stand by this
 probe -- they are merely not shown to move by it, which is a weaker claim and
-the one I should have made. Separating them needs more rounds or a paired
-per-round design, not a re-reading of these seven. At small shapes the harness compares
+the one I should have made. Separating them needs a **paired, interleaved
+delta** protocol: measure the two levels alternately within a round and take
+the per-round difference, so the shared drift cancels. "More rounds" -- which
+this paragraph used to offer as the alternative -- would not work, and
+@Reviewer was right to strike it: appending rounds to a min/max range can only
+ever widen it. The statistic has to change, not the sample count. At small
+shapes the harness compares
 a preallocated FlyDSL launcher against an allocating quack wrapper, and **how
 much that is worth on the quack side has not been measured** -- it needs a CUDA
 box, and until then no small-shape speedup from this harness should be quoted
@@ -1212,13 +1242,13 @@ The conclusion below survives, because the cliff is at 49152 -> 57344 where the
 cap does not bind: 2 -> 1 either way. Capping only changes rows at and below
 N=8192, which are not where the argument is made.
 
-What does not survive is the shape of the curve as I drew it. Occupancy is now
-**flat at 8 from N=1024 through N=8192**, not falling 21 -> 12 -> 8. So there is
-no occupancy gradient at all across the small and mid range, and any reading of
-those rows as "occupancy is already declining by 4096" was an artifact of the
+What does not survive is the shape of the curve as I drew it. The **bound** is
+now flat at 8 from N=1024 through N=8192, not falling 21 -> 12 -> 8. So there is
+no gradient in the bound at all across the small and mid range, and any reading
+of those rows as "occupancy is already declining by 4096" was an artifact of the
 missing cap. It also means the register file is not the binding constraint until
-N=16384; below that something else sets occupancy, and this table does not say
-what.
+N=16384; below that the bound is set by the hardware maximum, and what the
+kernel actually achieves there is not in this table.
 
 And the deeper problem is that **none of this column is measured.** It is
 arithmetic on a register count -- an upper bound that ignores workgroup slots,
@@ -1229,24 +1259,42 @@ half of the mechanism claim is therefore still owed a rocprofv3 measurement, and
 until it exists the paragraph below is a register-count argument wearing an
 occupancy label.
 
-**The occupancy step falls exactly on the measured cliff.** Bandwidth halves
-between 49152 and 57344; VGPR allocation crosses 256 of the 512 per-SIMD budget
-between those same two points, taking waves/SIMD from 2 to 1. A halving of
-occupancy against a halving of achieved bandwidth, at the same boundary, in a
-kernel that is latency-hiding-bound -- that is the mechanism, and it is no
-longer a story.
+**The register-capacity step coincides with the bandwidth cliff.** VGPR
+allocation crosses 256 of the 512 per-SIMD budget between 49152 and 57344,
+halving the computed capacity from 2 waves/SIMD to 1, and the bandwidth drop
+sits at the same boundary.
 
-Two things it also settles. **Nothing spills, anywhere** -- not at 65536, not
-at 8192. So "register budget" was the right family and "spill cliff" would have
-been the wrong name for it; the cost is lost latency hiding, not scratch
+That is a coincidence of boundaries between one computed quantity and one
+measured one. It is **not** established that occupancy actually halves there,
+nor that the capacity change causes the bandwidth change. This paragraph
+previously said "a halving of occupancy against a halving of achieved
+bandwidth ... that is the mechanism, and it is no longer a story", which
+asserts residency and causality from a register count and a coincident edge.
+@Reviewer struck it and he is right: I hedged this correctly one paragraph
+above and then wrote the unhedged version immediately below, which makes the
+hedge decorative. Two further gaps in the same sentence: "latency-hiding-bound"
+is an assumption about the kernel, not a finding; and the bandwidth cliff it
+refers to is itself unarchived -- there is no committed sidecar behind it.
+
+What would settle it: measured occupancy per N from rocprofv3, and an
+intervention showing the direction (force the allocation across the boundary at
+fixed N and watch the bandwidth follow). Both are bounded work. Until then this
+is a correlation of two edges, and the mechanism remains the leading
+explanation rather than a result.
+
+Two things the table does settle. **Nothing spills, anywhere** -- not at 65536,
+not at 8192. So "register budget" was the right family and "spill cliff" would
+have been the wrong name for it; whatever the cost is, it is not scratch
 traffic. And the growth is smooth and roughly linear in N, about 4.6 VGPRs per
 1024 columns, with no discontinuity at 8192 -- which is the second, independent
 confirmation that **`MAX_N = 8192` is not where the hardware objects**. At 8192
-the kernel is at 60 VGPRs, which is the last row still able to fill all 8 wave
-slots -- the register file allows exactly 8 there, so it is at full occupancy
-rather than "nowhere near any limit", which is what this line said while the
-cap was missing. The point stands either way: at 8192 nothing has degraded yet,
-and it is the *first* N below which the register file has slack it cannot use.
+the kernel is at 60 VGPRs, which is the last row whose register allocation
+still *permits* all 8 wave slots -- whether it fills them is not measured here.
+This line previously said "nowhere near any limit" (written while the cap was
+missing) and then, briefly, "at full occupancy", which swapped one unmeasured
+claim for another. The point stands either way: at 8192 the register file has
+not yet started restricting anything, and it is the *first* N below which it
+has slack it cannot use.
 
 The comment on `MAX_N` claims the constant *is* "the register budget expressed
 as a row length." It is now fair to say that is wrong twice over: the register
@@ -1259,5 +1307,7 @@ per-head and bias variants add more, and the cap is shared by all of them. The
 right change is a per-variant cap derived from the measured VGPR curve, and the
 measurement to justify it is the same probe run across the backward and the
 operand combinations -- which is a bounded piece of work, not a guess. What
-this commit buys is that the mechanism is confirmed and the method for setting
-the constant honestly is in hand.
+this commit buys is the register curve itself, measured and reproducible, and
+the method for setting the constant honestly. It does **not** buy a confirmed
+mechanism: as above, the capacity step and the bandwidth cliff share a
+boundary, and neither residency nor causality has been measured.
