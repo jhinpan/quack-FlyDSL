@@ -3326,3 +3326,148 @@ Neither is fixed here. `quack/autotuner.py` is inside the region @Reviewer is
 holding pending the `dbab028` verdict, and a correctness change to cache-update
 semantics is exactly the kind of thing that should not land while a freeze is
 open. Recorded so the fix is a decision rather than a rediscovery.
+
+*(Update, `2af35006`: @Reviewer's `312c61b`/`dbab028` exact review returned
+**request changes**, and with it the blanket hold ended — a fix to
+`quack/autotuner.py` now needs its own exact commit/handoff rather than waiting
+on the freeze. He independently listed both defects above as standalone
+pre-existing bugs. The hold sentence above is left as written because the
+paragraph it belongs to was true when committed; this note is the correction.
+Same for `1ef57ab`'s commit message, which says "still under @Reviewer's
+dbab028 hold" — he lifted it at 19:09:37 and I committed at 19:15:54, so that
+line was already stale in the commit and cannot be amended. The substance is
+unaffected: that commit touches no production file.)*
+
+###### Does rmsnorm need `restore_value`? No — and asking cost nothing
+
+@Autotune's five-step plan had "harden the cache key **and add
+`restore_value`** before adding configs" as step 2. He then found the thing
+that makes step 2 self-defeating: setting `restore_value` installs
+`pre_hook`/`post_hook` (`autotuner.py:136`/`:145`), and **both** sites that
+choose a benchmark path gate on `has_hooks` —
+
+| site | gate |
+| --- | --- |
+| `_bench` `:199-204` | `use_l2_cold = (self._do_bench is None and ... and not has_hooks)` |
+| `__call__` `:363` | `if self._do_bench is None and not has_hooks:` |
+
+The second is the load-bearing one: it skips `_clone_l2_rotate_inputs`
+entirely, so `_l2_cold_arg_sets` is never even built. The comment at `:225-228`
+says why — "the clone/restore inside hooks doesn't work under CUDA graph
+capture" (the quoted sentence begins on `:227` and ends on `:228`) — so the
+exclusion is deliberate, not an oversight. Net effect:
+turning on `restore_value` silently moves autotune scoring off the L2-cold
+CUDA-graph path and onto `partial(triton.testing.do_bench, warmup=5, rep=25)`,
+while the harness keeps reporting the L2-cold regime. Selection and reporting
+would disagree by construction.
+
+Both of us then went at the prior question — does rmsnorm need it at all — from
+different directions, and landed in the same place. His route (`5c4a9111`) is
+the stronger one and it is pure reading:
+
+- Every name in `mutates_args` is a caller-allocated **output** buffer. The
+  schemas are hand-written with `(aN!)` alias annotations because they mutate
+  optional tensors, which makes this a `torch.library` contract rather than a
+  comment: fwd `:367` mutates `out`/`rstd`/`mean`/`residual_out`, bwd `:1210`
+  mutates `dx`/`dw_partial`/`db_partial`/`dresidual`. The real inputs — `x`,
+  `weight`, `dout`, `rstd`, `residual`, `dresidual_out` — carry **no** `(a!)`.
+- The accumulator objection answers itself. If `dw_partial`/`db_partial` were
+  accumulated rather than overwritten, the tool for it would be
+  `reset_to_zero`, not `restore_value` — and **every** allocation site is
+  `torch.empty`, never `torch.zeros` (`:1396`, `:1400`, `:1444`, `:1488`,
+  `:1818`, `:1819`). So if the semantics were accumulate, *the existing
+  non-autotune production path would already be wrong*, reading uninitialised
+  memory on every call. It is overwrite. (This argument is his and it is
+  better than mine, which was the kernel-level one: `copy(tXrdW, tXgdW)` at
+  `:1175`/`:1200` is rmem→gmem, and the cross-row reduction at `:1155-1174`
+  goes through smem without ever re-reading global.)
+- `reset_to_zero` **does not exist in quack at all** — `grep -c` on
+  `quack/autotuner.py` is 0 and no file under `quack/ tests/ benchmarks/`
+  mentions it; it lives upstream at
+  `/root/wt-device-key/python/flydsl/autotune.py:667`. Second collision of the
+  same kind he flagged for `restore_value` in `20a41d64`. Verified both.
+- The one place that *looks* like an input being written is `rmsnorm.py:505`,
+  `residual_out = x` (guarded by `if residual_out is None:` on `:504`). It is
+  not a write target: the `_rmsnorm_fwd(...)` call spans `:500-502` and has
+  already returned, so the assignment is post-call, assembling the return
+  tuple. It is also in the
+  non-tuned `rmsnorm_fwd` wrapper, which `rmsnorm_fwd_tuned` does not call.
+  Worth naming precisely because it is the only thing in the file that would
+  make someone think the conclusion is wrong.
+- `restore_value` has **zero callers tree-wide**, inherited whole in `b69bb67`.
+
+My addition is the hardware half, in `AI/probe_restore_value_needed.py` /
+`AI/data/restore_value_needed.json`: eight replays on the same buffers,
+bit-identical every time. That alone would prove nothing — a pure-overwrite
+kernel is idempotent trivially, so "stable" could be vacuous. The probe
+therefore carries a **falsifier**: a second cell that feeds the output back in
+as the residual input, creating genuine read-and-write dataflow. That cell
+*does* drift. The check can fail, so its passing means something.
+
+One scope limit, stated in the artifact as `verdict.cutedsl_status` rather than
+buried: the two decorators `restore_value` would attach to live in
+`quack/rmsnorm.py`, which imports `cuda.bindings.driver` at module scope
+(`:7`) and **cannot be imported on MI355X**. The kernel I actually replayed is
+the FlyDSL one, whose custom ops declare the same pure-output structure
+(`rmsnorm_flydsl.py:400`, `:619`). So the cutedsl half rests on source
+argument, not on this box's hardware — which is exactly the half @Autotune's
+`mutates_args` reading covers. Closing it empirically wants an H100/H200 run of
+the same probe against `quack.rmsnorm._rmsnorm_fwd`.
+
+Conclusion, agreed both ways: **step 2 should be deleted, not rewritten.**
+`restore_value` buys rmsnorm zero correctness and costs the measurement regime.
+His option 2 — making restore and the graph path coexist — is a real design
+problem but has no customer: `_clone_l2_rotate_inputs` already clones args *and*
+kwargs per rotation buffer, which solves what restore solves in a way CUDA graph
+capture accepts. Hardening the cache key stays, and is the more urgent half.
+
+###### What that probe got wrong first, and what the 2×2 actually shows
+
+I tried to price the regime switch as one number and got a result pointing the
+wrong way: `do_bench` on a single buffer is **slower** than the rotating graph
+(0.1110 vs 0.0906 ms at 32768×4096; 0.0165 vs 0.0125 at 8192×2048). If that
+were an L2 measurement, L2-hot being slower would be nonsense. It isn't one —
+the two paths differ in **launch mechanism** as well as cache state, so the
+comparison was confounded from the start. Splitting it (32768×4096, ms, medians
+of 5 from `AI/data/restore_value_needed.json`):
+
+| | graph | `do_bench` |
+| --- | --- | --- |
+| rotate (4 sets) | **0.0906** | 0.1127 |
+| single | 0.0908 | 0.1110 |
+
+- **Mechanism** = 1.244× here, 1.629× at 8192×2048. `do_bench` pays an event
+  pair and a fresh output allocation per launch; the graph replays 200 recorded
+  calls with no Python in the window. This term is essentially the whole
+  end-to-end gap (1.225× and 1.320×).
+- **L2, within one mechanism** = 1.00× (1.003× and 0.990×).
+
+(Cells move in the third decimal between runs — 0.0904/0.0907/0.1112 in the run
+before the one that produced the committed artifact. Message `f75cd8b8` quotes
+that earlier run; the table here is the artifact's. The effect ratios are
+unchanged to three figures, which is the point of quoting ratios.)
+
+And the 1.00× has a concrete cause worth recording on its own: **MI355X reports
+`L2_cache_size` = 4 MiB**, while one 32768×4096 bf16 tensor is 256 MiB and one
+8192×2048 is 32 MiB — 64× and 8× the cache before any rotation. The
+single-buffer cell was **never L2-hot**; the working set blows the cache on the
+first pass, and rotating four clones cannot make an already-cold read colder.
+So for these two shapes on this device the rotation machinery buys nothing
+while paying 4× the memory. That is a device-and-shape statement, not a verdict
+on the design — on a card or shape where the tensor fits, the same code
+separates.
+
+One contamination of my own, flagged rather than quietly dropped: the
+`do_bench` rotate cell rotates via a Python closure doing a modulo and an index
+**inside the timed region**, so its 0.985×/0.810× is that overhead plus
+allocator behaviour, not a cache effect. Only the within-graph ratio is
+like-for-like,
+because there the rotation is baked into the recorded graph on both sides.
+
+None of these numbers bear on `bench_utils.py:98` ("the L2-hot number favours
+wider layouts / deeper smem stages that don't actually win once data has to
+come from HBM"). That is a claim about **which config wins** — relative ranking
+across layouts — not about the magnitude of any single config. Confirming or
+refuting it requires scoring the whole config set under both regimes, which is
+a different experiment. Quoting these ratios at it would be the same
+label-vs-set error this file keeps cataloguing.
