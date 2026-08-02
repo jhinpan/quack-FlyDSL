@@ -3856,3 +3856,67 @@ across layouts — not about the magnitude of any single config. Confirming or
 refuting it requires scoring the whole config set under both regimes, which is
 a different experiment. Quoting these ratios at it would be the same
 label-vs-set error this file keeps cataloguing.
+
+## I proposed a guard against the defect, and shipped the defect in the guard
+
+@Autotune corrected a prescription of mine and was right to. I had written
+that per-test `AssertionError` subclasses were **necessary** to keep a shared
+helper's bug from being absorbed as a converted test's expected outcome. His
+S1–S4 show one shared `ExpectedDefect` gives identical results, and his S5
+shows per-test subclasses do not close the door either: point the helper at
+whichever class the test names and the absorption comes right back
+(`4 failed, 6 passed, 2 xfailed`, both converted tests swallowing). Counting
+subclasses was never the answer.
+
+His replacement is an AST meta-test stating the invariant directly — raisers
+of the marker class must be a subset of the tests marked with it — and he is
+right that *saying* the invariant beats implying it through a naming
+convention. I measured what the check actually covers. Helper mutated to
+`len(paths) != 99` so the helper itself is broken, on his frozen `730b7775`:
+
+| | AST guard | runtime |
+|---|---|---|
+| clean | `stray=[]` | `11 passed, 1 xfailed` |
+| S5 `raise ExpectedDefect(...)` | `stray=['_sole_artifact']` ✓ | `4 failed, 6 passed, 2 xfailed` |
+| E1 `_E = ExpectedDefect; raise _E(...)` | `stray=[]` | `4 failed, 7 passed, 1 xfailed` |
+| E2 helper moved to a sibling module | `stray=[]` | `4 failed, 7 passed, 1 xfailed` |
+| E3 `getattr(mod, "ExpectedDefect")` | `stray=['_sole_artifact']` | `4 failed, 7 passed, 1 xfailed` |
+
+E1 adds one line. E2 changes nothing about the helper at all — it is what a
+shared helper looks like after one ordinary refactor, not an adversarial
+construction. Both read `stray=[]`, "clean", while that surviving `1 xfailed`
+*is* the absorption. E3 goes red by coincidence: `"ExpectedDefect"` happens to
+appear as a string literal inside the `getattr`, so `ast.dump` collides with
+it. The check also fires on innocent code — `raise ValueError("not an
+ExpectedDefect at all")` and a local named `ExpectedDefectSeen` both land in
+`stray`. Substring matching is wrong in both directions.
+
+Which is this file's recurring defect one more time: **a check correct about
+one set (raises whose source text spells the class name) wearing a label that
+names another (raises of that class).** The invariant is right; the
+enforcement point is source text, and source text is not where raising
+happens.
+
+Moving the check to runtime fixes it. In `pytest_runtest_makereport`, when the
+`xfail(raises=E)` marker matches, walk to the innermost traceback frame and
+ask whether that code object was compiled inside the test. Alias, `getattr`
+and cross-module all fail that question identically, because it asks who
+raised rather than how the source spelled it. All three evasions go red, clean
+stays green.
+
+**And the first version of my fix had the same defect it was written to
+catch.** I compared `co_name != item.function.__name__`, so a test that
+defines a closure and raises from inside it was reported as absorption — but a
+closure written inside the test *is* the test's own code. "Innermost frame is
+the test function" is a set; "the raise came from the test's own body" is the
+set I meant. Recursing `co_consts` covers closures, comprehensions and
+generator expressions, and the three false-positive probes go `3 xfailed`.
+Fourth time this session I have produced this defect class while in the middle
+of writing about it, which is the argument for the runtime check being
+mechanical rather than a rule anyone has to remember.
+
+Guard checked in at `AI/proposed_xfail_absorption_guard.py`, unwired (it does
+nothing where it sits), no dependencies;
+whether it lands in `tests/conftest.py` is @Autotune's call, since it is his
+file. Reported as `695fb4f0`. All runs in a throwaway clone of `730b7775`,
+since deleted.
