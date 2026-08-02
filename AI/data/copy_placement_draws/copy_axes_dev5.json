@@ -230,18 +230,18 @@
       },
       {
         "path": "AI/probe_copy_size_draws.py",
-        "sha256": "bbfd2e798ac5d8084bccc9850fd0d8d2651082c82a6d7c5ea28f040871eee078",
-        "bytes": 17746
+        "sha256": "50ef692794122ae4dddcf934ca043d48f6d0d269fb3fa6da1458a415f01a9bc2",
+        "bytes": 17962
       },
       {
         "path": "AI/assemble_copy_axes.py",
-        "sha256": "032e028bba4f47027fc9cc3c8f23b7c182c4020b86d418b19eaf6f2ea96dac53",
-        "bytes": 50815
+        "sha256": "e0c8873228496a2f296607ad1c3bca06f388c4a0e93b0796d098f501cea1a6e2",
+        "bytes": 54606
       }
     ],
     "what_this_proves": "the assembler read exactly these bytes. It does not prove they came from a GPU, and a manifest cannot: it is a binding between artifact and raw runs, not an attestation."
   },
-  "commit": "62fcef5",
+  "commit": "4840b9b",
   "worktree_dirty": true,
   "historical_table": {
     "source": "AI/flydsl_rmsnorm_notes.md:869",
@@ -893,12 +893,21 @@
         "why_not_load_bearing": "treats five fixed ordinals under four selected prefixes as iid uniform draws over the span, and divides relative widths taken about different denominators. @Reviewer, 5c2e0083. The conclusion below does not use it."
       },
       "band_width_vs_single_draw_noise": {
-        "median_round_spread_pct": 0.612,
+        "estimator": "min of seven timing rounds, as published",
+        "n_cells_with_repeats": 20,
+        "replicates_per_cell": [
+          4
+        ],
+        "median_rsd_pct": 0.098,
+        "max_rsd_pct": 1.703,
+        "two_sd_pct": 0.197,
         "band_width_pct": 0.2047,
-        "ratio_noise_to_band": 3.0,
-        "band_resolvable_by_one_draw": false
+        "ratio_two_sd_to_band": 1.0,
+        "band_resolvable_by_one_draw": true,
+        "what_is_held_fixed": "allocation prefix and allocation ordinal, hence relative placement; the process, its address-space layout and the clock state are not"
       },
-      "conclusion": "the 20 slot means span 18.20% and the band is 0.2047% wide. Their spacing is clustered rather than even: 8 of 19 adjacent gaps are narrower than the band and the largest is 20.0x it. Zero draws in band is therefore not evidence against the historical value -- with means bunched this way, a narrow window can sit in a sparse stretch and be missed by every draw. No probability is claimed for that; an earlier version asserted one from a uniform model that this same spacing refutes. The defensible statement is symmetric: at this size and sample size the data neither authenticate nor exclude a value in the band. A second limit, visible only once the timing rounds were retained: a single draw's own round-to-round spread has median 0.612%, which is 3.0x the band width. Even with slot, process and program all held fixed, one measurement cannot resolve an interval this narrow. The placement argument was never the binding constraint."
+      "why_the_round_range_is_not_this": "the seven-round range (median 0.612% at this size) describes the sample the estimator minimises over, not the estimator. It is reported in `within_draw_instrument_floor` and is NOT used for the resolvability flag above.",
+      "conclusion": "the 20 slot means span 18.20% and the band is 0.2047% wide. Their spacing is clustered rather than even: 8 of 19 adjacent gaps are narrower than the band and the largest is 20.0x it. Zero draws in band is therefore not evidence against the historical value -- with means bunched this way, a narrow window can sit in a sparse stretch and be missed by every draw. No probability is claimed for that; an earlier version asserted one from a uniform model that this same spacing refutes. The defensible statement is symmetric: at this size and sample size the data neither authenticate nor exclude a value in the band. On whether one draw could resolve the band at all: repeating the published min-of-seven estimator at a fixed (prefix, ordinal) cell across 4 processes gives a median RSD of 0.098%, so 2sd is 0.197% against a 0.2047% band -- a ratio of 1.0. The estimator IS repeatable to about the band width at this size, so resolution is not the obstacle here; the clustered spacing above is. An earlier version claimed the opposite from the seven-round range, which is a property of the sample the min is taken over, not of the min."
     },
     "2048MiB": {
       "n_slot_means": 20,
@@ -938,12 +947,21 @@
         "why_not_load_bearing": "treats five fixed ordinals under four selected prefixes as iid uniform draws over the span, and divides relative widths taken about different denominators. @Reviewer, 5c2e0083. The conclusion below does not use it."
       },
       "band_width_vs_single_draw_noise": {
-        "median_round_spread_pct": 1.029,
+        "estimator": "min of seven timing rounds, as published",
+        "n_cells_with_repeats": 20,
+        "replicates_per_cell": [
+          4
+        ],
+        "median_rsd_pct": 0.23,
+        "max_rsd_pct": 0.406,
+        "two_sd_pct": 0.459,
         "band_width_pct": 0.2047,
-        "ratio_noise_to_band": 5.0,
-        "band_resolvable_by_one_draw": false
+        "ratio_two_sd_to_band": 2.2,
+        "band_resolvable_by_one_draw": false,
+        "what_is_held_fixed": "allocation prefix and allocation ordinal, hence relative placement; the process, its address-space layout and the clock state are not"
       },
-      "conclusion": "the 20 slot means span 11.34% and the band is 0.2047% wide. Their spacing is clustered rather than even: 7 of 19 adjacent gaps are narrower than the band and the largest is 10.3x it. Zero draws in band is therefore not evidence against the historical value -- with means bunched this way, a narrow window can sit in a sparse stretch and be missed by every draw. No probability is claimed for that; an earlier version asserted one from a uniform model that this same spacing refutes. The defensible statement is symmetric: at this size and sample size the data neither authenticate nor exclude a value in the band. A second limit, visible only once the timing rounds were retained: a single draw's own round-to-round spread has median 1.029%, which is 5.0x the band width. Even with slot, process and program all held fixed, one measurement cannot resolve an interval this narrow. The placement argument was never the binding constraint."
+      "why_the_round_range_is_not_this": "the seven-round range (median 1.029% at this size) describes the sample the estimator minimises over, not the estimator. It is reported in `within_draw_instrument_floor` and is NOT used for the resolvability flag above.",
+      "conclusion": "the 20 slot means span 11.34% and the band is 0.2047% wide. Their spacing is clustered rather than even: 7 of 19 adjacent gaps are narrower than the band and the largest is 10.3x it. Zero draws in band is therefore not evidence against the historical value -- with means bunched this way, a narrow window can sit in a sparse stretch and be missed by every draw. No probability is claimed for that; an earlier version asserted one from a uniform model that this same spacing refutes. The defensible statement is symmetric: at this size and sample size the data neither authenticate nor exclude a value in the band. On whether one draw could resolve the band at all: repeating the published min-of-seven estimator at a fixed (prefix, ordinal) cell across 4 processes gives a median RSD of 0.23%, so 2sd is 0.459% against a 0.2047% band -- a ratio of 2.2. The estimator does not repeat to the band width, so at this size resolution is a second and independent obstacle. An earlier version reached the same verdict from the seven-round range, which is not estimator uncertainty -- right answer, wrong quantity, and it did not hold at the other size."
     }
   },
   "peak_staircase": {
@@ -1259,13 +1277,13 @@
     "corrects": "denominator_stability_across_processes in the roofline sidecar, which reports copy at 13.35% with n_processes: 3. That is not a process axis: the three runs straddled edits to _copy_variability that changed the allocator's peak. Same program, six processes: 0.63%."
   },
   "prose_guard": {
-    "accept_set_size": 1791,
+    "accept_set_size": 1812,
     "grid": "2-dp values in [0, 20]",
     "grid_size": 2001,
-    "accepted_without_being_meant": 192,
-    "false_negative_rate_pct": 9.595,
+    "accepted_without_being_meant": 195,
+    "false_negative_rate_pct": 9.745,
     "ceiling_pct": 12.0,
-    "headroom_pct": 2.405,
+    "headroom_pct": 2.255,
     "note": "a tripwire, not a proof. This rate rises as the artifact grows -- more measured values cover more of the grid by accident -- so it is computed at write time rather than quoted from a docstring, and the assembler now refuses to write once it passes the ceiling. Every increase so far came from an improvement to the artifact, which is why silent decay was the likely outcome without a hard stop.",
     "measured_on": "the payload as checked, before this field was added"
   }

@@ -814,27 +814,50 @@ The verdict survives at the size that matters; what changes is the number and
 its scope. The earlier text's **19.06%** was the 512 MiB figure quoted against a
 2 GiB cell.
 
-#### The instrument cannot resolve the band even with placement held fixed
+#### Whether the instrument can resolve the band, measured with the right quantity
 
-This is the stronger version of the argument, and it only became visible after
-@Reviewer's `23a6f662`: *"'Full precision' still means one derived rate per
-buffer; all seven timing rounds for each identical buffer are discarded."* Every
-draw above is `bytes / min(seven rounds)`; the other six were computed and
-thrown away. Retaining them (`rounds_us_per_identical_buffer`) gives the
-instrument's own floor for the first time.
+This became visible after @Reviewer's `23a6f662`: *"'Full precision' still means
+one derived rate per buffer; all seven timing rounds for each identical buffer
+are discarded."* Every draw above is `bytes / min(seven rounds)`; the other six
+were computed and thrown away. Retaining them
+(`rounds_us_per_identical_buffer`) gives the instrument's own floor for the
+first time.
 
-**A single draw's round-to-round spread has median 1.029% at 2 GiB — 5.0× the
-band width.** With slot, process, program and buffer all held fixed, timing the
-same copy seven times in a row already scatters further than the interval the
-band question is asking about. So the placement term was never the binding
-constraint on reconstructing `4.89`: even a perfectly placement-controlled
-measurement could not land a value in a 0.205%-wide window with confidence.
+I then used the wrong number from it. I wrote that a single draw's
+round-to-round spread — median 1.029% at 2 GiB, 5.0× the band width — showed the
+instrument could not resolve the band. **The published figure is the *minimum*
+of those seven rounds, and a min is much more repeatable than the range of the
+sample it comes from.** @Reviewer, `5c2e0083`. The range describes the sample the
+estimator minimises over; it is not the estimator's uncertainty, and using it
+inflates the apparent noise by whatever the tail of the round distribution
+happens to do.
 
-Two things follow. The pooled-range argument is unaffected — 11.93% against a
-0.205% band still holds, and the floor is well below the pooled range, which is
-what makes the slot decomposition readable as placement rather than noise. But
-the *symmetric* conclusion below gets a second, independent reason, and the
-weaker of the two reasons is the one I had published.
+The right calibration was already in the tree, unused: each (prefix, ordinal)
+cell was collected in **four separate processes**, so the whole seven-round
+estimator ran four times at the same relative placement. Repeat it and watch the
+min move:
+
+| size | median RSD of the min | 2sd | vs 0.2047% band | resolvable by one draw? |
+| --- | --- | --- | --- | --- |
+| 512 MiB | 0.098% | 0.197% | 1.0× | **yes** |
+| 2 GiB | 0.230% | 0.459% | 2.2× | no |
+
+**At 512 MiB the verdict reverses.** The estimator does repeat to about the band
+width, so resolution is not an obstacle there at all — the clustered slot
+spacing is the only reason zero-in-band is uninformative. At 2 GiB the original
+verdict survives, but at 2.2× rather than 5.0×, and it survives for a reason I
+had not measured. Right answer at one size, wrong answer at the other, from a
+quantity that was never the one in question.
+
+The pooled-range argument is unaffected — 11.93% against a 0.205% band still
+holds, and the floor is well below the pooled range, which is what makes the
+slot decomposition readable as placement rather than noise.
+
+The general shape, again: I reached for the noise measure that was newly
+available rather than the one the claim needed. Retaining the rounds was the fix
+for a real defect, and the first thing I did with the new data was use it for a
+question it does not answer. **A measurement that arrives as the answer to one
+objection is not thereby the answer to the next one.**
 
 Worth noting what hid it. The previous fix here stored the rates **unrounded**,
 which was correct and necessary — the band question needed those digits. It also

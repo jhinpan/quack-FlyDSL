@@ -398,6 +398,52 @@ def _band(draws):
     }
 
 
+def _estimator_repeatability(runs, size, band_w):
+    """How far does the PUBLISHED estimator move when you repeat it?
+
+    The published figure per draw is min-of-seven-rounds. Its uncertainty is not
+    the range of those seven rounds -- that is the spread of the sample a min is
+    taken over, and it is systematically wider than the min's own repeatability.
+    Using it was @Reviewer's objection in 5c2e0083 and he is right.
+
+    The measurable substitute is already here: each (prefix, ordinal) cell was
+    collected in four separate processes, so the same estimator ran four times at
+    the same relative placement. The RSD of those four minima is estimator
+    uncertainty in the sense the band test needs. Reported as 2*sd against the
+    band width, since a band is an interval and one sd is a half-width.
+    """
+    cells = defaultdict(list)
+    for prefix, rs in runs.items():
+        for r in rs:
+            for ordinal, v in enumerate(
+                r["identical_buffers_by_size"][size]["TBps_per_identical_buffer"]
+            ):
+                cells[(prefix, ordinal)].append(v)
+    rsds = [statistics.stdev(v) / statistics.mean(v) * 100.0 for v in cells.values() if len(v) > 1]
+    if not rsds:
+        return {
+            "n_cells_with_repeats": 0,
+            "note": "no cell has repeated batches; estimator uncertainty is not measurable here",
+        }
+    med = statistics.median(rsds)
+    two_sd = 2 * med
+    return {
+        "estimator": "min of seven timing rounds, as published",
+        "n_cells_with_repeats": len(rsds),
+        "replicates_per_cell": sorted({len(v) for v in cells.values() if len(v) > 1}),
+        "median_rsd_pct": round(med, 3),
+        "max_rsd_pct": round(max(rsds), 3),
+        "two_sd_pct": round(two_sd, 3),
+        "band_width_pct": round(band_w, 4),
+        "ratio_two_sd_to_band": round(two_sd / band_w, 1),
+        "band_resolvable_by_one_draw": bool(two_sd < band_w),
+        "what_is_held_fixed": (
+            "allocation prefix and allocation ordinal, hence relative placement; the "
+            "process, its address-space layout and the clock state are not"
+        ),
+    }
+
+
 def _band_reachability(runs, size):
     """Could this protocol have produced an in-band value at all? Power, not outcome.
 
@@ -434,6 +480,7 @@ def _band_reachability(runs, size):
     floor = axis["within_draw_instrument_floor"]
     fl = floor.get("round_spread_pct_median")
     gaps = sorted((means[i + 1] / means[i] - 1) * 100.0 for i in range(len(means) - 1))
+    rep = _estimator_repeatability(runs, size, band_w)
     return {
         "n_slot_means": len(means),
         "slot_mean_span_pct": round(span, 2),
@@ -463,18 +510,25 @@ def _band_reachability(runs, size):
         },
         # The second reason this protocol has no power, and the stronger one. The
         # argument above is about placement scattering draws past a narrow window.
-        # This is about a single draw not being repeatable to the window's width in
-        # the first place: with slot, process and program all held fixed, the seven
-        # timing rounds behind one draw already spread further than the band.
-        "band_width_vs_single_draw_noise": (
-            None
-            if fl is None
-            else {
-                "median_round_spread_pct": fl,
-                "band_width_pct": round(band_w, 4),
-                "ratio_noise_to_band": round(fl / band_w, 1),
-                "band_resolvable_by_one_draw": bool(fl < band_w),
-            }
+        # This is about whether a single draw is repeatable to the window's width
+        # in the first place.
+        #
+        # An earlier version answered that with the range of the seven timing
+        # rounds behind one draw, and that is the wrong quantity: the published
+        # figure is the MIN of those seven, and a min is far more repeatable than
+        # the range of the sample it is drawn from. @Reviewer, 5c2e0083. The
+        # correct calibration is batch-to-batch: repeat the whole seven-round
+        # estimator at a fixed (prefix, ordinal) cell and look at how the MIN
+        # moves. This tree already has those repeats -- four per cell -- and they
+        # were sitting unused while a substitute stood in for them.
+        "band_width_vs_single_draw_noise": rep,
+        "why_the_round_range_is_not_this": (
+            "the seven-round range (median "
+            f"{fl}% at this size) describes the sample the estimator minimises over, "
+            "not the estimator. It is reported in `within_draw_instrument_floor` and "
+            "is NOT used for the resolvability flag above."
+            if fl is not None
+            else "these runs predate retained rounds."
         ),
         "conclusion": (
             f"the {len(means)} slot means span {span:.2f}% and the band is {band_w:.4f}% wide. "
@@ -489,13 +543,26 @@ def _band_reachability(runs, size):
             "the band."
             + (
                 ""
-                if fl is None
+                if not rep.get("n_cells_with_repeats")
                 else (
-                    f" A second limit, visible only once the timing rounds were retained: "
-                    f"a single draw's own round-to-round spread has median {fl}%, which is "
-                    f"{round(fl / band_w, 1)}x the band width. Even with slot, process and "
-                    "program all held fixed, one measurement cannot resolve an interval "
-                    "this narrow. The placement argument was never the binding constraint."
+                    " On whether one draw could resolve the band at all: repeating the "
+                    "published min-of-seven estimator at a fixed (prefix, ordinal) cell "
+                    f"across {rep['replicates_per_cell'][0]} processes gives a median RSD "
+                    f"of {rep['median_rsd_pct']}%, so 2sd is {rep['two_sd_pct']}% against a "
+                    f"{round(band_w, 4)}% band -- a ratio of {rep['ratio_two_sd_to_band']}. "
+                    + (
+                        "The estimator IS repeatable to about the band width at this size, "
+                        "so resolution is not the obstacle here; the clustered spacing "
+                        "above is. An earlier version claimed the opposite from the "
+                        "seven-round range, which is a property of the sample the min is "
+                        "taken over, not of the min."
+                        if rep["band_resolvable_by_one_draw"]
+                        else "The estimator does not repeat to the band width, so at this "
+                        "size resolution is a second and independent obstacle. An earlier "
+                        "version reached the same verdict from the seven-round range, "
+                        "which is not estimator uncertainty -- right answer, wrong "
+                        "quantity, and it did not hold at the other size."
+                    )
                 )
             )
         ),
