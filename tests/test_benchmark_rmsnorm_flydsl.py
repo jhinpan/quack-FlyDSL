@@ -228,6 +228,76 @@ def test_a_corrupt_mall_entry_beside_a_good_l2_entry_is_not_reported_as_success(
         )
 
 
+@pytest.mark.parametrize(
+    "entry,tag",
+    [
+        # @Reviewer's escapes against a7eec93. Each one parsed or defaulted
+        # successfully and then vanished, so `best` stayed at the L2 value with
+        # nothing recorded -- byte-identical to a healthy L2-only part.
+        ("size 262144\n", "missing_level"),
+        ("level 3\n", "missing_size_level3"),
+        ("level 3\nsize 0\n", "nonpositive_size_level3"),
+        ("level 3\nsize -1\n", "nonpositive_size_level3"),
+        ("", "missing_level"),
+        ("level 3\nsize not-a-number\n", "bad_size_level3"),
+    ],
+)
+def test_every_way_an_entry_can_go_missing_is_recorded(tmp_path, entry, tag):
+    # `.get("level", 0)` treated a missing level as L0 and dropped the entry as
+    # uninteresting; a missing level is unknown, not small. Nonpositive sizes
+    # parsed fine and disappeared into `max`. Validating the fields catches the
+    # class; catching whatever int() raises only catches the instances.
+    root = _gfx950_node(tmp_path, ["level 2\nsize 4096\n", entry])
+    value, provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), root)
+    assert value == 4 * 1024**2
+    assert provenance["degraded"] == ["unparseable_cache_entries"]
+    assert provenance["skipped_cache_entries"] == [f"1:{tag}"]
+
+    with pytest.raises(RuntimeError, match="unparseable"):
+        benchmark._resolve_llc(
+            _gfx950_torch(), _properties(), argparse.Namespace(llc_bytes=None), root
+        )
+
+
+def test_a_valid_mall_beside_a_malformed_entry_is_still_refused(tmp_path):
+    # The value guard cannot carry this one: `best` reaches the correct
+    # 268435456 from the good entry, so a rule that only checks magnitude sees
+    # a perfect read. What is missing is evidence -- the skipped entry could
+    # have been larger -- and the refusal has to come from `degraded` alone.
+    root = _gfx950_node(
+        tmp_path,
+        ["level 2\nsize 4096\n", "level 3\nsize 262144\n", "level 3\nsize 0\n"],
+    )
+    value, provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), root)
+    assert value == 256 * 1024**2
+    assert provenance["degraded"] == ["unparseable_cache_entries"]
+
+    # And the message must not call 268435456 "below the known 268435456".
+    # That sentence sends the reader after a magnitude defect that is not there.
+    with pytest.raises(RuntimeError, match="is the expected size, but evidence was missing"):
+        benchmark._resolve_llc(
+            _gfx950_torch(), _properties(), argparse.Namespace(llc_bytes=None), root
+        )
+
+
+def test_level_one_entries_are_dropped_without_being_called_degraded(tmp_path):
+    # Over-refusal negative for the validation above. The real node has 546
+    # entries, 544 of them L1 at 32 KB. Recording those as "skipped" would mark
+    # every healthy read degraded and fail closed on the actual hardware.
+    root = _gfx950_node(
+        tmp_path,
+        [
+            "level 1\nsize 32\n",
+            "level 1\nsize 32\n",
+            "level 2\nsize 4096\n",
+            "level 3\nsize 262144\n",
+        ],
+    )
+    value, provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), root)
+    assert value == 256 * 1024**2
+    assert "degraded" not in provenance
+
+
 def test_gfx950_refuses_a_clean_read_that_reports_no_mall(tmp_path):
     # Distinct from the case above: nothing failed to parse, KFD simply reports
     # only a 4 MiB L2. Enumerating failure reasons would let this through,

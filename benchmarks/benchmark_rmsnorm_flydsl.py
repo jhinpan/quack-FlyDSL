@@ -363,17 +363,34 @@ def _last_level_cache_bytes(
             except OSError:
                 skipped.append(f"{cache}:unreadable")
                 continue
+            # Validate the fields, do not just catch what int() happens to
+            # raise on. `.get("level", 0)` silently turns a *missing* level into
+            # L0 and drops the entry as uninteresting -- but a missing level is
+            # unknown, not small, and the MALL is exactly the entry we cannot
+            # afford to drop. @Reviewer found this against a7eec93, along with
+            # nonpositive sizes, which parse fine and then vanish into `max`.
+            if "level" not in cprops:
+                skipped.append(f"{cache}:missing_level")
+                continue
             try:
-                level = int(cprops.get("level", 0))
+                level = int(cprops["level"])
             except ValueError:
                 skipped.append(f"{cache}:bad_level")
                 continue
             if level < 2:
+                continue  # genuinely known to be below the last level
+            if "size" not in cprops:
+                skipped.append(f"{cache}:missing_size_level{level}")
                 continue
             try:
-                best = max(best, int(cprops["size"]) * 1024)  # KFD reports KB
-            except (KeyError, ValueError):
+                size_kb = int(cprops["size"])  # KFD reports KB
+            except ValueError:
                 skipped.append(f"{cache}:bad_size_level{level}")
+                continue
+            if size_kb <= 0:
+                skipped.append(f"{cache}:nonpositive_size_level{level}")
+                continue
+            best = max(best, size_kb * 1024)
     except OSError:
         return fallback, {"source": "torch_l2_fallback", "reason": "no_caches_directory"}
     if best <= 0:
@@ -472,20 +489,30 @@ def _resolve_llc(
             f"the KFD topology was read cleanly from {provenance.get('matched_node')} "
             "but reports no cache at or above the MALL size"
         )
-    # Do not claim the value is too small when it is not: under (4) it is the
-    # right size and the wrong card's. Saying "below the known MALL" about
-    # 268435456 would send whoever reads this looking for the wrong defect.
-    consequence = (
-        f"The value {llc_bytes} B was obtained from a node this run cannot prove is "
-        "the device it benchmarked; sizing the rotation from another device's "
-        "topology is not detectable in the results."
-        if "unidentified_nodes" in degraded
-        else (
+    # Do not claim the value is too small when it is not. Two of these paths
+    # reach a value that is the right size and still untrustworthy -- a
+    # wrong-card read, or a degraded read that happened to find the MALL anyway.
+    # "268435456 B, below the known 268435456 B MALL" is what the first version
+    # of this message printed, and a reader chasing that sentence would look for
+    # a magnitude defect that is not there.
+    if "unidentified_nodes" in degraded:
+        consequence = (
+            f"The value {llc_bytes} B was obtained from a node this run cannot prove "
+            "is the device it benchmarked; sizing the rotation from another device's "
+            "topology is not detectable in the results."
+        )
+    elif llc_bytes >= GFX950_MALL_BYTES:
+        consequence = (
+            f"The value {llc_bytes} B is the expected size, but evidence was missing "
+            "from the read that produced it, so it cannot be distinguished from a "
+            "coincidence -- a larger cache may be the entry that was skipped."
+        )
+    else:
+        consequence = (
             f"The best value available is {llc_bytes} B, below the known "
             f"{GFX950_MALL_BYTES} B MALL, so using it would size the rotation against "
             "a cache that is not the last level and silently measure cache-warm."
         )
-    )
     raise RuntimeError(
         f"cannot determine the last-level cache on gfx950: {detail}. {consequence} "
         "Pass --llc-bytes to override explicitly."
