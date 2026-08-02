@@ -1,6 +1,6 @@
 {
   "probe": "probe_restore_value_needed.py",
-  "source_sha256_16": "55d66066d90dca32",
+  "source_sha256_16": "5462da5ae9d970be",
   "device": "AMD Instinct MI355X",
   "hip_visible_devices": "5",
   "question": "Does rmsnorm need autotuner.restore_value? If not, the L2-cold -> L2-hot regime switch it forces (via has_hooks at autotuner.py:199 and :363) is a cost paid for nothing.",
@@ -80,62 +80,64 @@
       "mall_bytes_assumed": 268435456,
       "mall_bytes_is_hardcoded": true,
       "one_x_tensor_bytes": 268435456,
+      "distinct_output_buffers_measured": 1,
+      "output_buffers_rotate_with_inputs": false,
       "cloned_input_bytes": 1073741824,
-      "rotation_working_set_bytes_incl_outputs": 2147483648,
-      "single_set_fits_mall_inputs_only": true,
-      "single_set_fits_mall_incl_output": false,
-      "rotation_set_fits_mall_inputs_only": false,
-      "rotation_set_fits_mall_incl_outputs": false,
+      "rotation_working_set_bytes_measured": 1342177280,
+      "single_working_set_bytes_measured": 536870912,
+      "single_set_fits_mall": false,
+      "rotation_set_fits_mall": false,
+      "rotation_can_matter_here": false,
       "cells_ms": {
         "graph_rotate__what_autotune_uses_today": {
-          "median": 0.09054344177246093,
+          "median": 0.09100167274475097,
           "runs": [
-            0.09054344177246093,
-            0.09121423721313476,
-            0.09040304183959962,
-            0.09125984191894532,
-            0.09023143768310547
+            0.09113086700439453,
+            0.09024426460266113,
+            0.09100167274475097,
+            0.09020265579223632,
+            0.09113926887512207
           ]
         },
         "graph_single__same_mechanism_no_rotation": {
-          "median": 0.0907508373260498,
+          "median": 0.08963126182556153,
           "runs": [
-            0.09107303619384766,
-            0.08940881729125977,
-            0.0907508373260498,
-            0.08961821556091308,
-            0.09093943595886231
+            0.08959345817565918,
+            0.09086206436157226,
+            0.08953906059265136,
+            0.09101771354675293,
+            0.08963126182556153
           ]
         },
         "do_bench_rotate__other_mechanism_rotated": {
-          "median": 0.11280100047588348,
+          "median": 0.11282049864530563,
           "runs": [
-            0.11256100237369537,
-            0.11280050128698349,
-            0.11280100047588348,
-            0.11306099966168404,
-            0.11302099749445915
+            0.11364100128412247,
+            0.11282049864530563,
+            0.11260099709033966,
+            0.11286100000143051,
+            0.11256100237369537
           ]
         },
         "do_bench_single__what_restore_value_switches_to": {
-          "median": 0.11128100007772446,
+          "median": 0.1151610016822815,
           "runs": [
-            0.11156100034713745,
-            0.11084099858999252,
-            0.11132100224494934,
-            0.1111610010266304,
-            0.11128100007772446
+            0.11496099829673767,
+            0.11536099761724472,
+            0.11528100073337555,
+            0.1151610016822815,
+            0.11490100249648094
           ]
         }
       },
       "effects": {
-        "rotation_effect_within_graph__single_over_rotate": 1.0022905640599578,
-        "rotation_effect_within_do_bench__single_over_rotate": 0.9865249386818692,
-        "mechanism_effect_at_rotate__do_bench_over_graph": 1.245821875861055,
-        "end_to_end_switch__do_single_over_graph_rotate": 1.2290343496923586
+        "rotation_effect_within_graph__single_over_rotate": 0.9849408161646293,
+        "rotation_effect_within_do_bench__single_over_rotate": 1.0207453704342695,
+        "mechanism_effect_at_rotate__do_bench_over_graph": 1.2397629103121424,
+        "end_to_end_switch__do_single_over_graph_rotate": 1.2654822511372357
       },
       "note": "The end-to-end ratio is NOT a cache measurement and must not be quoted as one. do_bench_single is SLOWER than graph_rotate here, which looks backwards for a 'warm is faster' story -- because the mechanism term dominates: do_bench pays one event pair and one fresh output allocation per launch, while the graph replays 200 recorded calls with no Python in the window. Also: bench_utils.py:98 is a claim about which CONFIG wins (relative ranking across layouts), not about the magnitude of any single config, so none of these ratios confirm or refute it -- that needs the whole config set scored under both regimes.",
-      "the_rotation_term_is_~1.00_and_this_probe_does_not_explain_it": "CORRECTION of an earlier version of this field, which argued the null result from torch's L2_cache_size = 4 MiB and concluded 'the working set blows the cache, rotation cannot make an already-cold read colder.' That reasoning is wrong. On gfx950 the last-level cache is the 256 MiB MALL, not the 4 MiB per-XCD L2 (hierarchy: per-CU L1D -> 4 MiB L2 x8 XCDs -> 256 MiB MALL -> HBM, ROCm Kernel Wiki hw-chiplet-xcd). Reading L2_cache_size and sizing a cache argument on it is defect 1 of AI/gfx950_mall_evictor_defect.md, fixed harness-side in 31c1fd4. Against the right cache the claim inverts for the small shape: 8192x2048 rotated is 128 MiB of cloned inputs (256 MiB counting the per-call outputs), which fits or exactly meets the MALL -- close to the 128 MiB example that document uses -- so rotation there produces no clearly cold read. 32768x4096 is the opposite: single is 256 MiB of input (512 MiB with output) and rotated is 1024 MiB (2048 MiB), which crosses either way, and that is where a contrast should have shown. It did not. Note the input-only figures understate the set by 2x: rmsnorm allocates an output per call, so a rotation slot is x AND out. Both are reported above. This probe therefore records a ~1.00x within-graph ratio WITHOUT a surviving explanation. Candidates to separate: rmsnorm at these sizes is HBM-bound enough that MALL residency moves little; the evictor gap (defect 1) means neither cell is genuinely warm; or graph_single is not single-buffer in the way assumed. That is Experiment No.002 territory, which gfx950_mall_evictor_defect.md blocks pending re-collection. The MALL size above is hardcoded, not measured -- same caveat that document flags about its own 256 MiB.",
+      "why_the_rotation_term_is_~1.00_here": "Third version of this field. v1 argued the null result from torch's L2_cache_size = 4 MiB -- wrong cache, and precisely defect 1 of AI/gfx950_mall_evictor_defect.md (gfx950 is per-CU L1D -> 4 MiB per-XCD L2 x8 -> 256 MiB MALL -> HBM, ROCm Kernel Wiki hw-chiplet-xcd). v2 retracted that and reported NO surviving explanation. The explanation now on record is measured, not argued, and it is simpler than any of v2's three candidates: BOTH shapes this probe benchmarks sit on the same side of the MALL boundary in the rotated and single cells alike, so neither is a contrast. With inputs rotating over n=4 buffers and the output over exactly 1 (measured above, not inferred), the sets are (n+1)*t rotated vs 2*t single, and rotation can only change cache state when 2*t <= 256 MiB < (n+1)*t -- i.e. t in (51.2, 128] MiB. 8192x2048 has t=32 MiB (both sets fit); 32768x4096 has t=256 MiB (neither fits). Both predict ~1.00x, and both measure it. A scan over t = 32/48/56/64/96/128/160/192 MiB at N=1024 agrees on all eight points: 0.992, 1.010 outside the low edge; 0.932, 0.862, 0.864, 0.862 inside; 0.992, 1.003 outside the high edge. So rotation IS doing what it was built to do -- this probe just picked two shapes where it cannot show. Caveats that keep this short of settled: the MALL size is hardcoded here, not measured (the same caveat that document flags about its own 256 MiB); and a tight scan across the edges (t = 50/51/52/53 and 127/129/132/136 MiB) shows the transition is SOFT, ~0.95x and ~0.89x just outside where the model says 1.00x, so the capacity rule predicts the band but not a step at its edges. Sharpening that is Experiment No.002 territory, which gfx950_mall_evictor_defect.md blocks pending re-collection.",
       "rotation_within_do_bench_is_confounded": "The do_bench rotate cell is NOT a clean contrast: rotation there is a Python closure doing a modulo and an index per call, inside the timed region, whereas do_bench_single calls straight through. Its ratio is that overhead plus allocator behaviour, not a cache effect. Only the within-graph ratio is like-for-like, because there the rotation is baked into the recorded graph either way."
     },
     {
@@ -149,62 +151,64 @@
       "mall_bytes_assumed": 268435456,
       "mall_bytes_is_hardcoded": true,
       "one_x_tensor_bytes": 33554432,
+      "distinct_output_buffers_measured": 1,
+      "output_buffers_rotate_with_inputs": false,
       "cloned_input_bytes": 134217728,
-      "rotation_working_set_bytes_incl_outputs": 268435456,
-      "single_set_fits_mall_inputs_only": true,
-      "single_set_fits_mall_incl_output": true,
-      "rotation_set_fits_mall_inputs_only": true,
-      "rotation_set_fits_mall_incl_outputs": true,
+      "rotation_working_set_bytes_measured": 167772160,
+      "single_working_set_bytes_measured": 67108864,
+      "single_set_fits_mall": true,
+      "rotation_set_fits_mall": true,
+      "rotation_can_matter_here": false,
       "cells_ms": {
         "graph_rotate__what_autotune_uses_today": {
-          "median": 0.012444490194320678,
+          "median": 0.012422095537185669,
           "runs": [
-            0.012448290586471558,
-            0.012519090175628663,
-            0.012438085079193115,
-            0.012444490194320678,
-            0.012425090074539185
+            0.012411090135574341,
+            0.01241349458694458,
+            0.012422095537185669,
+            0.01248108983039856,
+            0.01244109034538269
           ]
         },
         "graph_single__same_mechanism_no_rotation": {
-          "median": 0.012377885580062866,
+          "median": 0.012377489805221558,
           "runs": [
-            0.012473690509796142,
-            0.012391690015792847,
-            0.012377885580062866,
-            0.012373085021972657,
-            0.012375489473342896
+            0.012421890497207641,
+            0.012440090179443359,
+            0.012352689504623413,
+            0.012360689640045166,
+            0.012377489805221558
           ]
         },
         "do_bench_rotate__other_mechanism_rotated": {
-          "median": 0.020479999482631683,
+          "median": 0.020679999142885208,
           "runs": [
-            0.01988000050187111,
-            0.020479999482631683,
             0.020160000771284103,
-            0.020560000091791153,
-            0.020521000027656555
+            0.02072099968791008,
+            0.020640000700950623,
+            0.020700499415397644,
+            0.020679999142885208
           ]
         },
         "do_bench_single__what_restore_value_switches_to": {
-          "median": 0.01696000061929226,
+          "median": 0.016440000385046005,
           "runs": [
-            0.017400000244379044,
-            0.01678049936890602,
-            0.01696000061929226,
-            0.017079999670386314,
-            0.016359999775886536
+            0.017480000853538513,
+            0.016720000654459,
+            0.016440000385046005,
+            0.01640000008046627,
+            0.01640000008046627
           ]
         }
       },
       "effects": {
-        "rotation_effect_within_graph__single_over_rotate": 0.9946478631733577,
-        "rotation_effect_within_do_bench__single_over_rotate": 0.8281250511590783,
-        "mechanism_effect_at_rotate__do_bench_over_graph": 1.6457081939747271,
-        "end_to_end_switch__do_single_over_graph_rotate": 1.3628521823282351
+        "rotation_effect_within_graph__single_over_rotate": 0.9964091620588021,
+        "rotation_effect_within_do_bench__single_over_rotate": 0.7949710380284062,
+        "mechanism_effect_at_rotate__do_bench_over_graph": 1.6647754061284927,
+        "end_to_end_switch__do_single_over_graph_rotate": 1.3234482326941295
       },
       "note": "The end-to-end ratio is NOT a cache measurement and must not be quoted as one. do_bench_single is SLOWER than graph_rotate here, which looks backwards for a 'warm is faster' story -- because the mechanism term dominates: do_bench pays one event pair and one fresh output allocation per launch, while the graph replays 200 recorded calls with no Python in the window. Also: bench_utils.py:98 is a claim about which CONFIG wins (relative ranking across layouts), not about the magnitude of any single config, so none of these ratios confirm or refute it -- that needs the whole config set scored under both regimes.",
-      "the_rotation_term_is_~1.00_and_this_probe_does_not_explain_it": "CORRECTION of an earlier version of this field, which argued the null result from torch's L2_cache_size = 4 MiB and concluded 'the working set blows the cache, rotation cannot make an already-cold read colder.' That reasoning is wrong. On gfx950 the last-level cache is the 256 MiB MALL, not the 4 MiB per-XCD L2 (hierarchy: per-CU L1D -> 4 MiB L2 x8 XCDs -> 256 MiB MALL -> HBM, ROCm Kernel Wiki hw-chiplet-xcd). Reading L2_cache_size and sizing a cache argument on it is defect 1 of AI/gfx950_mall_evictor_defect.md, fixed harness-side in 31c1fd4. Against the right cache the claim inverts for the small shape: 8192x2048 rotated is 128 MiB of cloned inputs (256 MiB counting the per-call outputs), which fits or exactly meets the MALL -- close to the 128 MiB example that document uses -- so rotation there produces no clearly cold read. 32768x4096 is the opposite: single is 256 MiB of input (512 MiB with output) and rotated is 1024 MiB (2048 MiB), which crosses either way, and that is where a contrast should have shown. It did not. Note the input-only figures understate the set by 2x: rmsnorm allocates an output per call, so a rotation slot is x AND out. Both are reported above. This probe therefore records a ~1.00x within-graph ratio WITHOUT a surviving explanation. Candidates to separate: rmsnorm at these sizes is HBM-bound enough that MALL residency moves little; the evictor gap (defect 1) means neither cell is genuinely warm; or graph_single is not single-buffer in the way assumed. That is Experiment No.002 territory, which gfx950_mall_evictor_defect.md blocks pending re-collection. The MALL size above is hardcoded, not measured -- same caveat that document flags about its own 256 MiB.",
+      "why_the_rotation_term_is_~1.00_here": "Third version of this field. v1 argued the null result from torch's L2_cache_size = 4 MiB -- wrong cache, and precisely defect 1 of AI/gfx950_mall_evictor_defect.md (gfx950 is per-CU L1D -> 4 MiB per-XCD L2 x8 -> 256 MiB MALL -> HBM, ROCm Kernel Wiki hw-chiplet-xcd). v2 retracted that and reported NO surviving explanation. The explanation now on record is measured, not argued, and it is simpler than any of v2's three candidates: BOTH shapes this probe benchmarks sit on the same side of the MALL boundary in the rotated and single cells alike, so neither is a contrast. With inputs rotating over n=4 buffers and the output over exactly 1 (measured above, not inferred), the sets are (n+1)*t rotated vs 2*t single, and rotation can only change cache state when 2*t <= 256 MiB < (n+1)*t -- i.e. t in (51.2, 128] MiB. 8192x2048 has t=32 MiB (both sets fit); 32768x4096 has t=256 MiB (neither fits). Both predict ~1.00x, and both measure it. A scan over t = 32/48/56/64/96/128/160/192 MiB at N=1024 agrees on all eight points: 0.992, 1.010 outside the low edge; 0.932, 0.862, 0.864, 0.862 inside; 0.992, 1.003 outside the high edge. So rotation IS doing what it was built to do -- this probe just picked two shapes where it cannot show. Caveats that keep this short of settled: the MALL size is hardcoded here, not measured (the same caveat that document flags about its own 256 MiB); and a tight scan across the edges (t = 50/51/52/53 and 127/129/132/136 MiB) shows the transition is SOFT, ~0.95x and ~0.89x just outside where the model says 1.00x, so the capacity rule predicts the band but not a step at its edges. Sharpening that is Experiment No.002 territory, which gfx950_mall_evictor_defect.md blocks pending re-collection.",
       "rotation_within_do_bench_is_confounded": "The do_bench rotate cell is NOT a clean contrast: rotation there is a Python closure doing a modulo and an index per call, inside the timed region, whereas do_bench_single calls straight through. Its ratio is that overhead plus allocator behaviour, not a cache effect. Only the within-graph ratio is like-for-like, because there the rotation is baked into the recorded graph either way."
     }
   ],

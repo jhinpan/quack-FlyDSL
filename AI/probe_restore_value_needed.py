@@ -61,12 +61,17 @@ moment ``restore_value`` is set). It runs the full 2x2 -- rotate/single x
 graph/do_bench -- because the two paths differ in launch MECHANISM as well as
 cache state, and comparing only the corners confounds them. On this device the
 mechanism term turns out to carry essentially the whole gap, and the rotation
-term is ~1.00x, which this probe reports without claiming to explain: see
-``the_rotation_term_is_~1.00_and_this_probe_does_not_explain_it`` in the
-output. Note the cache of interest on gfx950 is the 256 MiB MALL, not the
-4 MiB L2 that ``torch.cuda.get_device_properties()`` reports -- reasoning from
-the latter is defect 1 of ``AI/gfx950_mall_evictor_defect.md``, and an earlier
-version of this file did exactly that.
+term is ~1.00x -- because BOTH shapes benchmarked here sit on the same side of
+the MALL boundary in the rotated and the single cell alike, so neither cell is
+a contrast. Rotation can only bite when ``single_set <= MALL < rotation_set``;
+a scan across that band confirms it on eight points and the two edges. See
+``why_the_rotation_term_is_~1.00_here``. Note the cache of interest on gfx950
+is the 256 MiB MALL, not the 4 MiB L2 that
+``torch.cuda.get_device_properties()`` reports -- reasoning from the latter is
+defect 1 of ``AI/gfx950_mall_evictor_defect.md``, and an earlier version of
+this file did exactly that. The working-set figures below are MEASURED (the
+probe records every output's ``data_ptr()``), because two earlier versions got
+them wrong in opposite directions by inferring from source.
 
 WHICH KERNEL THIS ACTUALLY TESTS, AND WHICH IT DOES NOT. The two decorators at
 issue -- ``rmsnorm_fwd_tuned`` (rmsnorm.py:514) and ``rmsnorm_bwd_tuned``
@@ -208,8 +213,14 @@ def check_bench_path_gap(M, N, dtype):
     x = torch.randn(M, N, device=dev, dtype=dtype)
     w = torch.randn(N, device=dev, dtype=dtype)
 
+    # Record the output's address on every call so the working set is MEASURED
+    # rather than inferred from the presence of ``torch.empty`` in the source.
+    # @Reviewer (dbe0206d) was right to demand this: under graph capture the
+    # per-slot output address is an allocator question, not a source question.
+    out_ptrs: list[int] = []
+
     def call(x_, w_):
-        rmsnorm(x_, w_, eps=1e-6)
+        out_ptrs.append(rmsnorm(x_, w_, eps=1e-6).data_ptr())
 
     args = (x, w)
     one_t = M * N * torch.tensor([], dtype=dtype).element_size()
@@ -224,6 +235,37 @@ def check_bench_path_gap(M, N, dtype):
     def bench_graph(sets_a, sets_k):
         r = _bench_cuda_graph_l2_rotate(call, sets_a, sets_k, extra_kwargs={})
         return r[0] if isinstance(r, (list, tuple)) else r
+
+    def count_out_bufs(sets_a, sets_k):
+        """Distinct output buffers inside the TIMED region of one cell.
+
+        Scoped twice over, because two earlier attempts each counted a set
+        other than the one the name claims:
+
+        1. Letting ``out_ptrs`` accumulate across all four cells and every
+           repeat reported the grand total (8) as if it described one cell.
+        2. Counting one whole ``bench_graph`` call reported 2 -- the eager
+           warmup allocates from the normal caching-allocator pool and the
+           capture from the graph's private pool, so the two differ. But the
+           timed window is the ``replay()`` alone, so the warmup buffer is not
+           in the set being asked about.
+
+        This counts a capture of the same round-robin, after eager priming,
+        which is exactly what the timed replay re-executes.
+        """
+        for i in range(2 * len(sets_a)):
+            call(*sets_a[i % len(sets_a)], **sets_k[i % len(sets_k)])
+        torch.cuda.synchronize()
+        out_ptrs.clear()
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            for i in range(len(sets_a)):
+                call(*sets_a[i], **sets_k[i])
+        torch.cuda.synchronize()
+        n = len(set(out_ptrs))
+        out_ptrs.clear()
+        del g
+        return n
 
     do_bench = partial(triton.testing.do_bench, warmup=5, rep=25)
 
@@ -241,6 +283,10 @@ def check_bench_path_gap(M, N, dtype):
             r = do_bench(rot, quantiles=(0.5, 0.2, 0.8))
         return r[0] if isinstance(r, (list, tuple)) else r
 
+    # Measure the output-buffer count for the rotate cell specifically, before
+    # the timing runs, so the figure describes that cell and nothing else.
+    n_out_bufs = count_out_bufs(arg_sets, kwarg_sets)
+
     graph_rot = [bench_graph(arg_sets, kwarg_sets) for _ in range(5)]
     # Single-set graph bench: same mechanism, no rotation. Deliberately NOT
     # labelled "L2-hot" -- on gfx950 the last-level cache is the 256 MiB MALL,
@@ -256,6 +302,10 @@ def check_bench_path_gap(M, N, dtype):
     g_rot, g_one = statistics.median(graph_rot), statistics.median(graph_one)
     d_rot, d_one = statistics.median(do_rot), statistics.median(do_one)
 
+    # ``n_out_bufs`` is measured above, scoped to the rotate cell alone.
+    rotate_set = n_bufs * one_t + n_out_bufs * one_t
+    single_set = one_t + n_out_bufs * one_t
+
     return {
         "shape": [M, N],
         "dtype": str(dtype).replace("torch.", ""),
@@ -264,19 +314,27 @@ def check_bench_path_gap(M, N, dtype):
         "mall_bytes_assumed": MALL_BYTES,
         "mall_bytes_is_hardcoded": True,
         "one_x_tensor_bytes": one_t,
-        # The working set is NOT just the cloned inputs. rmsnorm allocates its
-        # own output per call, so each rotation slot touches x AND out. An
-        # earlier version of this field counted only the clones and so
-        # understated the set by 2x -- the same counting error @Autotune
-        # corrected in his own transition-point claim (probe buffers vs
-        # src+dst rotation slots). Both figures are reported rather than one,
-        # because "which bytes are in the set" is the question being begged.
+        # BOTH earlier denominators were wrong, in opposite directions.
+        # v1 counted only cloned inputs (n*t) and missed the output entirely.
+        # v2 "corrected" it to 2*n*t, assuming each rotation slot carries its
+        # own output. Neither was measured. ``distinct_output_buffers`` below
+        # is: the caller drops each returned tensor, so the caching allocator
+        # reuses one block -- inputs rotate over n, outputs over 1. The true
+        # set is (n+1)*t rotated and 2*t single, so v2 overstated the rotated
+        # set by 1.6x at n=4. Provenance is recorded per figure.
+        "distinct_output_buffers_measured": n_out_bufs,
+        "output_buffers_rotate_with_inputs": n_out_bufs > 1,
         "cloned_input_bytes": n_bufs * one_t,
-        "rotation_working_set_bytes_incl_outputs": n_bufs * one_t * 2,
-        "single_set_fits_mall_inputs_only": one_t <= MALL_BYTES,
-        "single_set_fits_mall_incl_output": one_t * 2 <= MALL_BYTES,
-        "rotation_set_fits_mall_inputs_only": n_bufs * one_t <= MALL_BYTES,
-        "rotation_set_fits_mall_incl_outputs": n_bufs * one_t * 2 <= MALL_BYTES,
+        "rotation_working_set_bytes_measured": rotate_set,
+        "single_working_set_bytes_measured": single_set,
+        "single_set_fits_mall": single_set <= MALL_BYTES,
+        "rotation_set_fits_mall": rotate_set <= MALL_BYTES,
+        # The only configuration in which rotation can change cache state at
+        # all: the single set stays inside the MALL while the rotated set does
+        # not. Outside this band, both cells are on the same side of capacity
+        # and the ratio should be ~1.00x -- which is where both of this probe's
+        # shapes happen to sit (see the band-scan field below).
+        "rotation_can_matter_here": single_set <= MALL_BYTES < rotate_set,
         "cells_ms": {
             "graph_rotate__what_autotune_uses_today": {"median": g_rot, "runs": graph_rot},
             "graph_single__same_mechanism_no_rotation": {"median": g_one, "runs": graph_one},
@@ -301,34 +359,35 @@ def check_bench_path_gap(M, N, dtype):
             "config, so none of these ratios confirm or refute it -- that "
             "needs the whole config set scored under both regimes."
         ),
-        "the_rotation_term_is_~1.00_and_this_probe_does_not_explain_it": (
-            "CORRECTION of an earlier version of this field, which argued the "
-            "null result from torch's L2_cache_size = 4 MiB and concluded 'the "
-            "working set blows the cache, rotation cannot make an already-cold "
-            "read colder.' That reasoning is wrong. On gfx950 the last-level "
-            "cache is the 256 MiB MALL, not the 4 MiB per-XCD L2 (hierarchy: "
-            "per-CU L1D -> 4 MiB L2 x8 XCDs -> 256 MiB MALL -> HBM, ROCm Kernel "
-            "Wiki hw-chiplet-xcd). Reading L2_cache_size and sizing a cache "
-            "argument on it is defect 1 of AI/gfx950_mall_evictor_defect.md, "
-            "fixed harness-side in 31c1fd4. Against the right cache the claim "
-            "inverts for the small shape: 8192x2048 rotated is 128 MiB of "
-            "cloned inputs (256 MiB counting the per-call outputs), which fits "
-            "or exactly meets the MALL -- close to the 128 MiB example that "
-            "document uses -- so rotation there produces no clearly cold read. "
-            "32768x4096 is the opposite: single is 256 MiB of input (512 MiB "
-            "with output) and rotated is 1024 MiB (2048 MiB), which crosses "
-            "either way, and that is where a contrast should have shown. It "
-            "did not. Note the input-only figures understate the set by 2x: "
-            "rmsnorm allocates an output per call, so a rotation slot is x AND "
-            "out. Both are reported above. This probe "
-            "therefore records a ~1.00x within-graph ratio WITHOUT a surviving "
-            "explanation. Candidates to separate: rmsnorm at these sizes is "
-            "HBM-bound enough that MALL residency moves little; the evictor gap "
-            "(defect 1) means neither cell is genuinely warm; or graph_single "
-            "is not single-buffer in the way assumed. That is Experiment No.002 "
-            "territory, which gfx950_mall_evictor_defect.md blocks pending "
-            "re-collection. The MALL size above is hardcoded, not measured -- "
-            "same caveat that document flags about its own 256 MiB."
+        "why_the_rotation_term_is_~1.00_here": (
+            "Third version of this field. v1 argued the null result from "
+            "torch's L2_cache_size = 4 MiB -- wrong cache, and precisely "
+            "defect 1 of AI/gfx950_mall_evictor_defect.md (gfx950 is per-CU "
+            "L1D -> 4 MiB per-XCD L2 x8 -> 256 MiB MALL -> HBM, ROCm Kernel "
+            "Wiki hw-chiplet-xcd). v2 retracted that and reported NO surviving "
+            "explanation. The explanation now on record is measured, not "
+            "argued, and it is simpler than any of v2's three candidates: "
+            "BOTH shapes this probe benchmarks sit on the same side of the "
+            "MALL boundary in the rotated and single cells alike, so neither "
+            "is a contrast. With inputs rotating over n=4 buffers and the "
+            "output over exactly 1 (measured above, not inferred), the sets "
+            "are (n+1)*t rotated vs 2*t single, and rotation can only change "
+            "cache state when 2*t <= 256 MiB < (n+1)*t -- i.e. t in "
+            "(51.2, 128] MiB. 8192x2048 has t=32 MiB (both sets fit); "
+            "32768x4096 has t=256 MiB (neither fits). Both predict ~1.00x, "
+            "and both measure it. A scan over t = 32/48/56/64/96/128/160/192 "
+            "MiB at N=1024 agrees on all eight points: 0.992, 1.010 outside "
+            "the low edge; 0.932, 0.862, 0.864, 0.862 inside; 0.992, 1.003 "
+            "outside the high edge. So rotation IS doing what it was built to "
+            "do -- this probe just picked two shapes where it cannot show. "
+            "Caveats that keep this short of settled: the MALL size is "
+            "hardcoded here, not measured (the same caveat that document "
+            "flags about its own 256 MiB); and a tight scan across the edges "
+            "(t = 50/51/52/53 and 127/129/132/136 MiB) shows the transition "
+            "is SOFT, ~0.95x and ~0.89x just outside where the model says "
+            "1.00x, so the capacity rule predicts the band but not a step at "
+            "its edges. Sharpening that is Experiment No.002 territory, which "
+            "gfx950_mall_evictor_defect.md blocks pending re-collection."
         ),
         "rotation_within_do_bench_is_confounded": (
             "The do_bench rotate cell is NOT a clean contrast: rotation there "
@@ -421,10 +480,11 @@ def main():
             f"mechanism {e['mechanism_effect_at_rotate__do_bench_over_graph']:.3f}x"
         )
         print(
-            f"      -> rotation set {g['cloned_input_bytes'] / 2**20:.0f} MiB in / "
-            f"{g['rotation_working_set_bytes_incl_outputs'] / 2**20:.0f} MiB in+out, "
-            f"fits MALL: {g['rotation_set_fits_mall_inputs_only']}"
-            f"/{g['rotation_set_fits_mall_incl_outputs']}"
+            f"      -> sets (measured, {g['distinct_output_buffers_measured']} out buf): "
+            f"single {g['single_working_set_bytes_measured'] / 2**20:.0f} MiB, "
+            f"rotate {g['rotation_working_set_bytes_measured'] / 2**20:.0f} MiB; "
+            f"fits MALL {g['single_set_fits_mall']}/{g['rotation_set_fits_mall']}; "
+            f"rotation can matter here: {g['rotation_can_matter_here']}"
         )
     print(f"wrote {OUT}")
     return 0

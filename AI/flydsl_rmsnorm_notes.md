@@ -3449,20 +3449,24 @@ of 5 from `AI/data/restore_value_needed.json`):
 
 | | graph | `do_bench` |
 | --- | --- | --- |
-| rotate (4 sets) | **0.0905** | 0.1128 |
-| single | 0.0908 | 0.1113 |
+| rotate (4 sets) | **0.0910** | 0.1128 |
+| single | 0.0896 | 0.1152 |
 
-- **Mechanism** = 1.246× here, 1.646× at 8192×2048. `do_bench` pays an event
+- **Mechanism** = 1.240× here, 1.665× at 8192×2048. `do_bench` pays an event
   pair and a fresh output allocation per launch; the graph replays 200 recorded
   calls with no Python in the window. This term is essentially the whole
-  end-to-end gap (1.229× and 1.363×).
-- **Rotation, within one mechanism** = 1.00× (1.002× and 0.995×).
+  end-to-end gap (1.265× and 1.323×).
+- **Rotation, within one mechanism** = 1.00× (0.985× and 0.996×).
 
-(Cells move in the third decimal between runs — 0.0904/0.0907/0.1112 three runs
-earlier. Message `f75cd8b8` quotes that earlier run; the table here is the
-current artifact's. The mechanism term at 8192×2048 is the least stable figure
-in the set, 1.629–1.646× across runs; the rotation term is 0.99–1.00×
-throughout. Ratios are what this section argues from, for that reason.)
+(Cells move in the third decimal between runs — 0.0904/0.0907/0.1112 several
+runs earlier. Message `f75cd8b8` quotes that earlier run; the table here is the
+current artifact's, regenerated after the output-buffer fix below. The
+mechanism term at 8192×2048 is the least stable figure in the set, 1.629–1.665×
+across runs; the rotation term is 0.98–1.01× throughout. Ratios are what this
+section argues from, for that reason. The rotation term here is ~1.00× for a
+reason established two subsections down — **both of these shapes lie outside
+the band where rotation can change cache state at all**, so this 2×2 is not
+evidence about rotation in general.)
 
 ###### …and the explanation I first gave for the 1.00× was the very defect this repo already documents
 
@@ -3487,43 +3491,78 @@ the same conclusion the old harness drew, and did it in a tree that contains a
 written record of why that is a mistake. Working the numbers against the right
 cache:
 
-| shape | one tensor | rotated inputs (4) | rotated in+out | fits 256 MiB MALL? |
+| shape | one tensor `t` | single set `2t` | rotated set `(n+1)t` | fits 256 MiB MALL? |
 | --- | --- | --- | --- | --- |
-| 32768×4096 bf16 | 256.0 MiB | 1024.0 MiB | 2048.0 MiB | rotated **no** either way |
-| 8192×2048 bf16 | 32.0 MiB | 128.0 MiB | 256.0 MiB | **yes** (in+out sits exactly *at* capacity) |
+| 32768×4096 bf16 | 256.0 MiB | 512.0 MiB | 1280.0 MiB | **neither** |
+| 8192×2048 bf16 | 32.0 MiB | 64.0 MiB | 160.0 MiB | **both** |
 
-Two columns because the first one I published was wrong by 2×: I counted only
-the cloned inputs, but rmsnorm allocates an output per call, so a rotation slot
-holds `x` **and** `out`. That is the same counting error @Autotune corrected in
-his own transition-point claim an hour later (`b01d0609`) — he had compared
-probe buffers against sweeps whose rotation slot is a src+dst pair, which put
-his direction *and* magnitude the wrong way round. Same trap, adjacent numbers,
-found independently.
+(These are the *measured* sets — see the next subsection. I published two wrong
+denominators before arriving at them. The first counted only cloned inputs and
+missed the output. The second "fixed" it to `2n·t`, assuming each rotation slot
+carries its own output; that was the same counting error @Autotune corrected in
+his own transition-point claim an hour later (`b01d0609`), where he compared
+probe buffers against sweeps whose rotation slot is a src+dst pair and got his
+direction *and* magnitude the wrong way round. Same trap, adjacent numbers,
+found independently — but in my case the fix overshot, because I inferred the
+rotation from source instead of measuring it. It is `(n+1)t`, not `2n·t`.)
 
-It does not flip either verdict here, but it changes what the small shape is:
-at 8192×2048 the rotated set counting outputs is **exactly 256.0 MiB — right on
-the MALL boundary**, not comfortably inside it. That is the regime
-`gfx950_mall_evictor_defect.md` explicitly refuses to classify: its four
-`32768x1024` fwd cells sit at 256.004 MiB, "a few KiB *past* capacity", and
-were measured **MALL-warm anyway**. So a `ws <= MALL` rule cannot decide this
-cell either. What remains true is that rotation there does **not** clearly
-produce a cold read, so "the working set blows the cache" was false. For
-32768×4096 rotation crosses the MALL on either count while the single cell is
-at-or-over capacity, and that is the pair where a hot/cold contrast should have
-appeared.
-
-Which leaves the honest statement of the observation much narrower than what I
+Which left the honest statement of the observation much narrower than what I
 published: **the within-graph single-vs-rotate ratio came out ~1.00× on both
-shapes, and I do not have an explanation for it that survives contact with this
-document.** The reason I offered explains a null result on the small shape by
-appeal to a cache that is not the relevant one, and predicts a *non*-null on
-the large shape, which is not what the probe measured. Candidates worth
-separating before anyone leans on it: rmsnorm at these sizes is
-HBM-bandwidth-bound enough that MALL residency moves little; or the evictor gap
-means neither cell is genuinely warm; or the `graph_single` cell is not
-single-buffer in the way I assumed. That is Experiment No.002 territory
-(`gfx950_mall_evictor_defect.md` blocks it pending re-collection), not
-something to settle in a footnote.
+shapes, and I did not have an explanation for it that survives contact with
+this document.** The reason I offered explains a null result on the small shape
+by appeal to a cache that is not the relevant one, and predicts a *non*-null on
+the large shape, which is not what the probe measured.
+
+###### The explanation that did survive — found because a reviewer refused the fix I was proud of
+
+@Reviewer's `dbe0206d` declined to accept the `in+out` column I had just added
+as a correction, on the grounds that it *infers* per-slot outputs from
+`torch.empty` in the source, when under graph capture the output's address is
+an allocator question, not a source question. He was right — my correction was
+itself wrong — and testing it settled the ~1.00× as well.
+
+`AI/probe_rotation_band.py` records `data_ptr()` on every returned tensor
+inside the captured region. **The output does not rotate: `n=4` input buffers,
+`1` output buffer.** The caller discards each returned tensor, so the caching
+allocator hands the same block back every call. So both published denominators
+were wrong, in opposite directions — `n*t` missed the output; `2*n*t`
+overstated the rotated set by 1.6×. The measured sets are `(n+1)*t` rotated and
+`2*t` single. (Getting this scoped right took three tries in the probe itself:
+accumulating pointers across all four cells reported 8; counting one whole
+`bench_graph` call reported 2, because eager warmup allocates from the normal
+pool and capture from the graph's private pool, and the timed window is the
+replay alone. Only the third names the set it claims to.)
+
+That makes the null result predictable rather than mysterious. Rotation can
+only change cache state where the single set is MALL-resident and the rotated
+set is not — `2t <= 256 MiB < (n+1)t`, i.e. `t` in (51.2, 128] MiB. **Both
+shapes I benchmarked sit outside it**: 8192×2048 has `t`=32 MiB (64 vs 160 MiB,
+both fit); 32768×4096 has `t`=256 MiB (512 vs 1280 MiB, neither fits). Neither
+cell was ever a contrast. A scan at N=1024 agrees on all eight coarse points:
+
+| `t` | 32 | 48 | **56** | **64** | **96** | **128** | 160 | 192 MiB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| single/rotate | 0.990 | 1.005 | **0.920** | **0.876** | **0.870** | **0.863** | 0.986 | 1.006 |
+
+Bold = inside the predicted band. 8/8, and the null holds on *both* sides,
+which is what distinguishes the model from "bigger is slower".
+
+So the corrected reading is the opposite of the one I nearly published:
+**rotation does exactly what it was built to do — I picked two shapes where it
+cannot show.** "Rotation buys nothing on this card" would have been a
+device-wide claim resting on two badly chosen points.
+
+Two things keep this short of settled. The MALL size is hardcoded, the same
+caveat that document flags about its own 256 MiB. And a tight scan across the
+edges shows the transition is **soft, not a step** — at `t`=51 MiB the ratio is
+already 0.943 where the model says 1.00, and at 129/132 MiB it is 0.881/0.946
+rather than snapping back. The capacity rule predicts *where* the band is, not
+a threshold at its edges; that is consistent with partial residency in a
+set-associative cache, and sharpening it is Experiment No.002 territory
+(`gfx950_mall_evictor_defect.md` blocks it pending re-collection). The earlier
+candidate list — HBM-bound, evictor gap, `graph_single` not single-buffer — is
+withdrawn: the third is now measured false (it *is* single-buffer), and the
+first two are not needed to explain a result the capacity model predicts.
 
 What survives unchanged is the part the section is actually for: the
 **mechanism** term (1.244×/1.629×) accounts for essentially the whole
