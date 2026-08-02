@@ -495,36 +495,38 @@ weight) and 256.007812 MiB (fp32 weight) — a few KiB *past* MALL capacity, so
 the `ws <= MALL` test excludes them, yet they are still measured inflated. The
 fine-boundary block measures those exact working sets:
 
-    268435456   256.000000 MiB   6440 GB/s
-    268437504   256.001953 MiB   6349
-    268439552   256.003906 MiB   6068   <- 32768x1024 fwd, 16-bit weight
-    268443648   256.007812 MiB   6398   <- 32768x1024 fwd, fp32 weight
-    301989888   288.000000 MiB   5006
+    268435456   256.000000 MiB   6391 GB/s
+    268437504   256.001953 MiB   6237
+    268439552   256.003906 MiB   6129   <- 32768x1024 fwd, 16-bit weight
+    268443648   256.007812 MiB   6157   <- 32768x1024 fwd, fp32 weight
+    268500992   256.062500 MiB   5723
+    301989888   288.000000 MiB   4880
 
-Against a ~4935 GB/s HBM reference both variants are firmly on the inflated
-side (6068 and 6398 GB/s, i.e. 1.23x and 1.30x).
+Against this run's 4961 GB/s HBM reference both variants sit on the inflated
+side (6129 and 6157 GB/s, i.e. 1.24x and 1.24x).
 
 The ordering among the four points from 256.000 to 256.008 MiB is **not
-established either way by this run**, and an earlier version of this paragraph
-got the statistics wrong in the course of saying so. It claimed the
-interquartile ranges "overlap almost completely" and then quoted 6019–6191
-against 6254–6453 — intervals that are *disjoint*, as @Reviewer pointed out.
-Recomputed from all 75 raw rounds:
+established**, and two successive attempts to say so were themselves wrong.
+The first claimed the interquartile ranges "overlap almost completely" while
+quoting 6019–6191 against 6254–6453 — intervals that are *disjoint*, as
+@Reviewer caught. Per-run IQRs, recomputed from all 75 raw rounds:
 
-| WS | median | IQR (p25–p75) | full range |
-| --- | --- | --- | --- |
-| 256.000000 MiB | 6446.6 | 6421.7–6465.2 | 6029.5–6496.5 |
-| 256.001953 MiB | 6331.1 | 6266.0–6391.4 | 5573.9–6496.4 |
-| 256.003906 MiB | 6078.7 | 6018.8–6190.9 | 5825.4–6373.2 |
-| 256.007812 MiB | 6379.4 | 6254.4–6453.0 | 5583.2–6502.8 |
+| WS | run `1b53896` median / IQR | run `742196f` median / IQR |
+| --- | --- | --- |
+| 256.000000 MiB | 6446.6 / 6421.7–6465.2 | 6391.3 / 6379.0–6409.5 |
+| 256.001953 MiB | 6331.1 / 6266.0–6391.4 | 6236.9 / 6179.4–6354.9 |
+| 256.003906 MiB | 6078.7 / 6018.8–6190.9 | 6128.8 / 6045.9–6173.9 |
+| 256.007812 MiB | 6379.4 / 6254.4–6453.0 | 6156.8 / 6089.9–6214.0 |
 
-The IQRs of the last two do not overlap; the *full* ranges do, which is a much
-weaker statement and not the one I made. So the honest position is: the
-fp32-weight point reading above the 16-bit point despite a larger working set is
-**unexplained**, not demonstrated noise. Separating the two would need
-interleaved repeats rather than back-to-back blocks, which this run did not do.
-The only claim these four points support is that all of them sit on the inflated
-side of the reference. The decay from 256 to 288 MiB is gradual, not a cliff, which is why a
+Within either single run the last two IQRs are disjoint, so neither run can call
+the difference noise on its own. **Across** runs the gap reverses in size
+(+300 GB/s then +28 GB/s) and the 256.003906 point moves by more than its own
+IQR width, which is what actually shows the ordering is not a stable property —
+run-to-run variation exceeds within-run spread. That is a claim about
+reproducibility, not a statistical test, and it is the strongest one available
+here: back-to-back blocks cannot separate a working-set effect from drift.
+Interleaved repeats would be needed. The only claim these four points support is
+that all of them sit on the inflated side of the reference. The decay from 256 to 288 MiB is gradual, not a cliff, which is why a
 threshold test misclassifies cells sitting a few KiB either side of it — and
 why these were measured rather than classified. Whether this shifts the
 published median depends on how many cells feed it, and should be recomputed
