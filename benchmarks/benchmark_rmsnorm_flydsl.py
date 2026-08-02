@@ -264,7 +264,14 @@ def _last_level_cache_bytes(
     if not getattr(torch.version, "hip", None):
         return fallback, {"source": "torch_l2_fallback", "reason": "not_a_hip_build"}
     want_uid = _torch_unique_id(properties)
-    domain = getattr(properties, "pci_domain_id", 0)
+    # Absent on torch's side is also not zero. `getattr(..., 0)` defaulted a
+    # missing pci_domain_id to 0 and then *compared* it against a node
+    # asserting domain 0, so an unverifiable field read as a verified match.
+    # Same defect as the KFD-side ones, on the other operand of the comparison.
+    # Latent on this host (torch 2.9.1+rocm7.2 supplies it and every node is
+    # domain 0), which is exactly why it needed looking for rather than
+    # waiting for.
+    domain = getattr(properties, "pci_domain_id", None)
     bus = getattr(properties, "pci_bus_id", None)
     device = getattr(properties, "pci_device_id", None)
     by_uid: list[str] = []
@@ -323,7 +330,7 @@ def _last_level_cache_bytes(
                 unparsed_nodes.append(f"{node}:unparseable_properties")
                 continue
 
-            if bus is not None and device is not None:
+            if domain is not None and bus is not None and device is not None:
                 location = _field(props, "location_id")
                 node_domain = _field(props, "domain")
                 if location is None or node_domain is None:

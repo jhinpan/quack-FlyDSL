@@ -307,6 +307,36 @@ def test_a_node_with_no_uid_at_all_still_matches_by_pci(tmp_path):
     assert "degraded" not in provenance
 
 
+def test_an_absent_torch_pci_domain_is_not_treated_as_domain_zero(tmp_path):
+    # The same defect on the other operand of the comparison, found by auditing
+    # rather than by review. `getattr(properties, "pci_domain_id", 0)` supplied
+    # a 0 that torch never reported, and it was then compared against a node
+    # asserting domain 0 -- so an unverifiable field produced a verified match.
+    #
+    # Latent on this host: torch 2.9.1+rocm7.2 supplies pci_domain_id and every
+    # KFD node is domain 0, so it cannot fire here. It is fixed because the
+    # class is what is being fixed, not the reachable instances of it.
+    root = tmp_path / "nodes"
+    root.mkdir()
+    _node(
+        root, 5, "gfx_target_version 90500\ndomain 0\nlocation_id 29952\n", ((2, 4096), (3, 262144))
+    )
+
+    without_domain = types.SimpleNamespace(
+        L2_cache_size=4 * 1024**2, pci_bus_id=0x75, pci_device_id=0, uuid=None
+    )
+    value, provenance = benchmark._last_level_cache_bytes(_hip_torch(), without_domain, str(root))
+    assert value == 4 * 1024**2
+    assert provenance["reason"] == "no_matching_node"
+
+    # Over-refusal negative: a domain torch *did* report still matches.
+    value, provenance = benchmark._last_level_cache_bytes(
+        _hip_torch(), _properties(uuid_text=None), str(root)
+    )
+    assert value == 256 * 1024**2
+    assert provenance["matched_by"] == "pci_domain_bus_device"
+
+
 def test_gfx950_requires_a_trustworthy_source_not_merely_a_large_number(tmp_path):
     # The resolver accepted any value >= the MALL with nothing marked degraded,
     # checking the number before the provenance. On a host where torch reports
