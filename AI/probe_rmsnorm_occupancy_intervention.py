@@ -335,6 +335,46 @@ def _row(n, hint):
     }
 
 
+def _timing_regime():
+    """Establish eager-vs-graph from the source, not from agreeing numbers.
+
+    This probe times a plain Python loop over cuda events; there is no graph
+    capture anywhere in the file. That is exact and free. I originally argued
+    the same point empirically -- the unhinted rows landing on the cliff
+    sidecar's eager column to ~0.1-0.2% -- which was unsound reasoning that
+    happened to reach the right answer: the eager/graph separation being
+    discriminated is 0.93% at 57344 and 1.19% at 49152, while the cross-die
+    effect on those same rows is 2.3-3.3%. The confound is bigger than the
+    signal, and the cliff sidecar was taken on device 6 while the intervention
+    runs on 5. With the device-4 numbers the same comparison would land closer
+    to the GRAPH column at 49152 and 'establish' the opposite regime.
+
+    So the check is now structural and asserted, which cannot drift with the
+    die or the run.
+    """
+    src = Path(__file__).read_text()
+    # Assembled from fragments so the needles do not appear literally in this
+    # file: written out whole, the tuple below would match itself and the
+    # probe would abort on every run. A self-matching guard is not a guard.
+    markers = ("CUDA" + "Graph", "torch.cuda." + "graph", "make_" + "graphed_callables",
+               "graph_" + "pool_handle")
+    hits = sorted(m for m in markers if m in src)
+    if hits:
+        raise SystemExit(
+            f"graph-capture markers {hits} appear in this probe, but every published "
+            "comparison against the width-cliff sidecar assumes these rows are EAGER. "
+            "The numeric agreement cannot settle it -- the eager/graph gap at these "
+            "shapes is under 1.2% and the cross-die effect is 2.3-3.3%. Re-derive the "
+            "regime before publishing."
+        )
+    return {
+        "regime": "eager",
+        "established_by": "absence of graph-capture markers in this source file, asserted "
+        "at run time; not by numeric agreement with another sidecar",
+        "markers_checked": list(markers),
+    }
+
+
 def _sha(path):
     return hashlib.sha256((REPO / path).read_bytes()).hexdigest()[:16]
 
@@ -493,6 +533,7 @@ def main():
         ),
         "bytes_model": "2 * m * n * 2 (one read + one write, bf16); weight is negligible",
         "timing": f"cuda events, best of {REPEATS} x {INNER} inner calls after {WARMUP} warmup",
+        "timing_regime": _timing_regime(),
         "confound_note": (
             "occupancy and spill count both move with the hint, so the first step is a "
             "two-variable change. It is read in the direction where the two variables "

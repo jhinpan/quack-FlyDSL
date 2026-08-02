@@ -1613,20 +1613,37 @@ matches across dies to within 0.6% while bandwidth differs by up to 11%, with
 kernel, registers and spills all held exactly fixed. Occupancy does not
 determine bandwidth even across two copies of the same silicon.
 
-**The timing regimes line up, and that is checkable rather than asserted.**
-@Reviewer verified it on the device-6 run and it holds here: the intervention
-times with cuda events, best of 10 × 20 inner calls, which is the eager regime,
-and its unhinted rows land on the width-cliff sidecar's *eager* column to
-+0.09% at 57344 and −0.21% at 49152, across two commits, two probes and two
-devices. The cliff's graph column at the same shapes is 409.5 and 171.1 µs, so
-at 57344 the intervention is unambiguously reading eager (0.09% vs 0.84%); at
-49152 the two regimes are only 1.2% apart and the separation there is weaker
-evidence than the first. This matters twice over: the intervention's bandwidth
-percentages are directly comparable to the cliff's because they are the same
-measurement of the same thing, and the unhinted baseline is demonstrably not
-drifting. Worth noting the ceiling denominator is shared too — 6.075 TB/s from
-the cliff sidecar's `two_read_one_write` probe, not a copy kernel, which on this
-part reads MALL-inflated.
+**The timing regimes line up — and the argument I used to show it was worth
+less than the one-line source check that settles it.** The intervention times
+with cuda events over a plain Python loop; `grep -c CUDAGraph
+AI/probe_rmsnorm_occupancy_intervention.py` returns **0**. There is no capture
+in the file, so it is eager *by construction*, not by numeric coincidence. That
+is the whole proof, it is exact, and it was available without running anything.
+
+Instead I argued it empirically: the unhinted rows land on the cliff sidecar's
+eager column to +0.09% at 57344 and −0.21% at 49152, "across two commits, two
+probes and two devices." The device-4 result shows why that reasoning was
+unsound even though its conclusion is right. **The eager/graph separation the
+argument discriminates is 0.93% at 57344 and 1.19% at 49152. The cross-die
+effect on those same rows is 2.3–3.3%.** The discriminator is smaller than a
+confound the test cannot see — and it is not hypothetical: run the identical
+comparison with the device-4 numbers and at 49152 the intervention lands closer
+to the *graph* column (+2.10%) than to eager (+3.31%), which would "establish"
+the opposite regime with equal confidence. The cliff sidecar was measured on
+device 6, the intervention on device 5, so the two were never a
+same-die comparison in the first place.
+
+So: a check that passed for a reason other than the one it documents, again.
+It agreed because the regimes genuinely are the same, but it would have agreed,
+or disagreed, on a die swap alone. Keep the source fact; the numeric agreement
+is a weak corroboration whose resolution I have now measured and it does not
+support the weight I put on it.
+
+What survives independent of all this: the intervention's bandwidth percentages
+and the cliff's are the same measurement of the same thing, and the ceiling
+denominator is shared — 6.075 TB/s from the cliff sidecar's
+`two_read_one_write` probe, not a copy kernel, which on this part reads
+MALL-inflated. Both are structural, not numeric.
 
 **Two traps had to be cleared to get this number, and both are worth recording
 because either would have produced a confident wrong answer.**
