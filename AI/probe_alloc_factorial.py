@@ -51,7 +51,30 @@ one reintroduces exactly the confound the staircase work spent three iterations
 removing: level as a function of collection position. The seed is fixed and
 recorded so the order is a property of the artifact rather than of the run.
 
+The anchored run
+----------------
+`--anchored` adds the two cells the first run's artifact declared as its
+follow-up: count=0 and count=13, both at 512 MiB, all six cells in ONE shuffle
+(24 processes). count=0 supplies what the four-cell grid could not -- internal
+evidence that the prefix moves the rate AT ALL, without which a null across the
+grid is ambiguous between "neither factor matters" and "the curve is flat above
+21 and this probe never left the plateau". count=13 sits on the first staircase
+step, inside the 6.5-10.5 GiB region the four-cell grid started above.
+
+Both anchors deliberately break the four-cell grid's own precondition: at 0 and
+6.5 GiB they sit BELOW the measurement's 12.0 GiB live set, so their process
+high-water is pinned by the measurement rather than by the prefix. That is the
+staircase sweep's limitation, reintroduced knowingly, and it bounds what the
+anchors can say -- "does the prefix matter at all", not "here are two more
+points on the bytes curve".
+
+The six cells are re-collected rather than pooled with the existing sixteen
+rows. Those are a different session, and the entire reason this design shuffles
+is that collection position is a confound; rows from two sessions cannot be
+interleaved into one shuffle after the fact.
+
 Run:  HIP_VISIBLE_DEVICES=<idle> python AI/probe_alloc_factorial.py OUT.json
+      HIP_VISIBLE_DEVICES=<idle> python AI/probe_alloc_factorial.py OUT.json --anchored
 Assembled by AI/assemble_alloc_factorial.py.
 """
 
@@ -76,8 +99,35 @@ CELLS = (
     ("hi_lo", 48, 512),
     ("hi_hi", 48, 1024),
 )
+
+# The anchor cells declared in the first run's artifact, added under --anchored
+# rather than appended to CELLS. Two reasons for the flag rather than an edit.
+#
+# The four-cell run stays reproducible: `python AI/probe_alloc_factorial.py out`
+# still means in this revision exactly what it meant in the revision that
+# produced alloc_factorial.json. Editing CELLS in place would leave the
+# committed artifact describing a grid the file no longer defines, and the
+# artifact's own manifest hashes this source -- so the mismatch would surface as
+# a hash that no longer matches rather than as anything a reader could act on.
+#
+# And the two runs are NOT poolable. Different session, different process set,
+# and the whole reason the first grid shuffles is that collection position is a
+# confound; rows from two sessions cannot be interleaved after the fact. The
+# anchored run therefore re-collects all six cells in ONE shuffle rather than
+# reusing the existing sixteen rows, which costs 24 processes instead of 8 and
+# is the only version that supports a within-run comparison.
+ANCHOR_CELLS = (
+    ("zero", 0, 512),
+    ("step", 13, 512),
+)
 REPS = 4
 SHUFFLE_SEED = 20260803
+
+# A distinct seed for the anchored run. Reusing SHUFFLE_SEED would give the six
+# cells an order deterministically related to the four-cell order, which is not
+# wrong but makes "the two runs disagree" and "the two orders were correlated"
+# harder to separate than they need to be.
+ANCHOR_SHUFFLE_SEED = 20260805
 
 # The measurement's own live set, in GiB, from _identical_buffer_spread: six
 # 2 GiB buffers (one dst + five srcs) for the copy pattern. Recorded so the
@@ -133,9 +183,11 @@ def _worker(label, count, buffer_mib):
     print(json.dumps(r))
 
 
-def _sweep(out_path):
-    order = [(c, r) for c in CELLS for r in range(REPS)]
-    random.Random(SHUFFLE_SEED).shuffle(order)
+def _sweep(out_path, anchored=False):
+    cells = CELLS + ANCHOR_CELLS if anchored else CELLS
+    seed = ANCHOR_SHUFFLE_SEED if anchored else SHUFFLE_SEED
+    order = [(c, r) for c in cells for r in range(REPS)]
+    random.Random(seed).shuffle(order)
 
     rows = []
     for seq, ((label, count, buffer_mib), rep) in enumerate(order):
@@ -180,17 +232,49 @@ def _sweep(out_path):
         ),
         "device_name": torch.cuda.get_device_name(0),
         "hip_visible_devices": os.environ.get("HIP_VISIBLE_DEVICES"),
-        "cells": [{"cell": c, "count": n, "buffer_mib": b} for c, n, b in CELLS],
+        "cells": [{"cell": c, "count": n, "buffer_mib": b} for c, n, b in cells],
         "reps_per_cell": REPS,
         "one_process_per_row": True,
-        "shuffle_seed": SHUFFLE_SEED,
+        "shuffle_seed": seed,
         "why_shuffled": (
             "the (cell, repeat) order is one seeded shuffle, not blocked by cell or by "
             "repeat. Blocking either reintroduces level-as-a-function-of-collection-"
             "position, which is the confound the staircase work needed three iterations "
             "to remove."
         ),
+        "anchored": anchored,
+        "anchor_note": (
+            (
+                "six cells in ONE shuffle: the original four plus count=0 and count=13 "
+                "at 512 MiB, pre-registered in alloc_factorial_assembled.json's "
+                "anchor_limitation.declared_followup and in slot_structure's "
+                "declared_followup_for_the_anchor_run before these numbers existed. "
+                "count=0 supplies the missing internal evidence that the prefix moves the "
+                "rate at all; count=13 sits on the first staircase step, inside the "
+                "6.5-10.5 GiB region the four-cell grid started above. All six are "
+                "re-collected here rather than pooled with the earlier sixteen rows, "
+                "which are a different session and cannot be interleaved into one shuffle "
+                "after the fact."
+            )
+            if anchored
+            else "four-cell run; anchors not included"
+        ),
         "measurement_live_set_GiB": MEASUREMENT_LIVE_GIB,
+        "the_precondition_this_run_knowingly_breaks": (
+            (
+                "count=0 allocates nothing and count=13 reaches 6.5 GiB, so both sit "
+                "BELOW the 12.0 GiB live set the measurement itself allocates. The "
+                "four-cell grid's every_prefix_above_measurement_live_set precondition is "
+                "therefore false here BY DESIGN, not by oversight -- the anchors exist "
+                "precisely to sample below where the original grid could not. Their "
+                "process high-water is pinned by the measurement rather than by the "
+                "prefix, which is the same limitation the staircase sweep had and the "
+                "reason its bytes axis was renamed. Anchors are interpretable as 'does "
+                "the prefix matter at all', NOT as additional points on the bytes curve."
+            )
+            if anchored
+            else None
+        ),
         "rows": rows,
     }
     Path(out_path).write_text(json.dumps(payload, indent=2) + "\n")
@@ -203,12 +287,17 @@ def main():
     ap.add_argument("--cell", help=argparse.SUPPRESS)
     ap.add_argument("--count", type=int, help=argparse.SUPPRESS)
     ap.add_argument("--buffer-mib", type=int, help=argparse.SUPPRESS)
+    ap.add_argument(
+        "--anchored",
+        action="store_true",
+        help="add the pre-registered count=0 and count=13 anchor cells (24 processes)",
+    )
     args = ap.parse_args()
 
     if args.cell is not None:
         _worker(args.cell, args.count, args.buffer_mib)
         return
-    _sweep(args.out)
+    _sweep(args.out, anchored=args.anchored)
 
 
 if __name__ == "__main__":
