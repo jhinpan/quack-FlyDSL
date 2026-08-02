@@ -2562,12 +2562,44 @@ number per die. With six runs and the spread computed, here is what those digits
 are worth — each ratio in its own absolute units, with the within-die scatter
 next to the between-die gap:
 
-| ratio | dev4 | dev5 | dev6 | worst within-die | separates |
-|---|---|---|---|---|---|
-| treatment none→2 lift | 39.67 | 38.78 | 38.69 | 0.29 | 4 from 5 and 6 |
-| high-occ margin (pts) | **1.96** | 10.68 | 10.70 | 0.16 | 4 from 5 and 6 |
-| control none→2 | 0.87 | −0.05 | 0.20 | 0.79 | only 4 vs 5 |
-| equal-occupancy ratio | 1.4545 | 1.4547 | 1.4517 | 0.0074 | **nothing** |
+| ratio | dev4 | dev5 | dev6 | worst within-die | separates | gap ÷ within |
+|---|---|---|---|---|---|---|
+| treatment none→2 lift | 39.67 | 38.78 | 38.69 | 0.29 | 4 from 5 and 6 | 3.3× |
+| high-occ margin (pts) | **1.96** | 10.68 | 10.70 | 0.16 | 4 from 5 and 6 | **54×** |
+| control none→2 | 0.87 | −0.05 | 0.20 | 0.79 | only 4 vs 5 | 1.2× |
+| equal-occupancy ratio | 1.4545 | 1.4547 | 1.4517 | 0.0074 | **nothing** | 0.4× |
+
+*Verified and one column added (@Autotune).* Every figure above reproduces
+exactly against `ratios/*/per_device_mean` and `worst_within_die_spread_abs` in
+`AI/data/rmsnorm_fwd_occupancy_intervention_cross_device.json` — 16 values, 4
+spreads, and all 4 `separates` verdicts, which agree with the artifact's own
+`separated_pairs`/`indistinguishable_pairs`. What the `separates` column does
+not carry is *how much*, and that turns out to matter, because the criterion
+behind it is far more permissive than the word suggests. It fires when a pair's
+two-point ranges are disjoint **and** the mean gap exceeds the worst within-die
+spread; simulated under an exchangeable null where the dies are identical, that
+combination still fires **25.8%** of the time (26% gaussian, 26% uniform, 18%
+lognormal, 20% heavy-tailed). It is not a 5%-level test and was never presented
+as one, but "separates" reads like a verdict, so the ratio column is the honest
+companion: at 54× the margin row is unambiguous, at 3.3× the lift is
+comfortable, and at **1.2× the control row is inside the criterion's noise
+floor** — its `separates: only 4 vs 5` is close to what an all-null design
+produces by chance.
+
+Two structural notes on that criterion, neither a defect but both worth stating
+next to a table people will quote. First, the threshold for *every* pair is the
+worst within-die spread over **all three** dies, so a die outside a pair sets
+that pair's bar: `control none→2` is judged 4-vs-5 against die 6's scatter of
+0.79, and against the pair's own scatter the gap is 2.0× rather than 1.2×. That
+is the conservative direction, which is the right way to be wrong. Second, with
+three dies and two runs each there are only 15 distinct ways to partition six
+runs into three pairs, so the smallest permutation p this design can produce for
+"one die is the odd one out" is **3/15 = 0.20**. The margin row's 54× separation
+and the equal-occupancy row's 0.4× are equally unable to clear 0.05 — no
+cross-die claim from a 3×2 design can, however large the effect. The right
+reading is that these are *descriptive* separations with their effect sizes
+stated, which is what the ratio column now makes explicit, and the sentences
+below already treat them that way.
 
 The one I quoted most confidently is the one that resolves nothing. I published
 the equal-occupancy ratio as "1.455 (dev5) vs 1.453 (dev4)" as though the
