@@ -48,8 +48,12 @@ MALL_BYTES = 256 * 2**20
 # boundary (8 -> 9); without it the nearest sampled step is 8 -> 12, which is
 # four rotations apart and cannot be quoted as an adjacent-rotation step.
 ROTATIONS = [1, 2, 3, 4, 6, 8, 9, 12, 16, 24, 32]
-WARMUP = 5
-ITERS = 30
+# Rounds per repeat is a CONSTANT, not iters//n_buffers. Deriving it from the
+# buffer count gave 15 rounds at nb=2 but 3 at nb=8 and 1 at nb=32, so the two
+# sides of a boundary step were sampled unequally -- the high-count side, which
+# is exactly where the interesting rows are, got the least data.
+ROUNDS = 15
+WARMUP_ROUNDS = 3
 REPEATS = 5
 
 # Evictor sizes for the control block, in MiB. 0 = current harness behaviour on
@@ -78,7 +82,7 @@ def _median(xs):
     return s[n // 2] if n % 2 else 0.5 * (s[n // 2 - 1] + s[n // 2])
 
 
-def bench_rotation(elem_bytes, n_buffers, iters=ITERS, repeats=None,
+def bench_rotation(elem_bytes, n_buffers, rounds=None, repeats=None,
                    evictor_bytes=0):
     """Copy between rotating buffer pairs.
 
@@ -92,6 +96,7 @@ def bench_rotation(elem_bytes, n_buffers, iters=ITERS, repeats=None,
     which is the evictor's own cost, not a cache effect.
     """
     repeats = REPEATS if repeats is None else repeats
+    rounds = ROUNDS if rounds is None else rounds
     n = elem_bytes // 4
     srcs = [torch.empty(n, dtype=torch.float32, device="cuda").normal_()
             for _ in range(n_buffers)]
@@ -101,8 +106,9 @@ def bench_rotation(elem_bytes, n_buffers, iters=ITERS, repeats=None,
     torch.cuda.synchronize()
 
     # One "round" is one full rotation over all buffers, matching the harness.
-    rounds = max(1, iters // n_buffers)
-    for _ in range(max(1, WARMUP // n_buffers)):
+    # Held constant across buffer counts so both sides of a boundary step get
+    # the same number of samples.
+    for _ in range(WARMUP_ROUNDS):
         if evictor is not None:
             evictor()
         for i in range(n_buffers):
@@ -245,8 +251,8 @@ def environment():
         "python": sys.version.split()[0],
         "platform": platform.platform(),
         "hostname": platform.node(),
-        "warmup": WARMUP,
-        "iters_per_sample": ITERS,
+        "warmup_rounds": WARMUP_ROUNDS,
+        "rounds_per_repeat": ROUNDS,
         "repeats": REPEATS,
         "visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES")
         or os.environ.get("HIP_VISIBLE_DEVICES"),
