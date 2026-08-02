@@ -16,6 +16,7 @@ import math
 import os
 from pathlib import Path
 import platform
+import re
 import subprocess
 import sys
 import time
@@ -274,6 +275,95 @@ MAX_CACHE_LEVEL = 8
 MAX_CACHE_SIZE_KB = 16 * 1024 * 1024
 
 
+_KFD_LINE = re.compile(r"\A([a-z0-9_]+) (-?[0-9]+)\Z")
+
+
+def _read_kfd_properties(path: str) -> tuple[dict[str, str], set[str]]:
+    """Parse a KFD ``properties`` file strictly, returning (fields, malformed).
+
+    ``dict(line.split()[:2] for line in handle if len(line.split()) >= 2)``
+    was lenient in three ways that each turn a malformed file into a
+    confident-looking read:
+
+    - a **duplicate key silently last-wins**. Two ``size`` lines in one entry
+      returned the second, so a file asserting both 262144 and 1 read as a
+      clean 1 KB cache with nothing recorded.
+    - **trailing junk was discarded** by the ``[:2]`` slice, so
+      ``size 262144 extra`` was indistinguishable from ``size 262144``.
+    - the value was handed to ``int()``, whose accepted grammar is wider than
+      the driver's output: ``+262144``, ``262_144`` and ``" 262144 "`` all
+      parse. ``262_144`` is the sharp one -- a file the driver could not have
+      written produced a *correct-looking* number, which is the same
+      right-answer-wrong-provenance shape as the laundering fix.
+
+    Measured on the live topology before tightening, as with the widths:
+    39702 lines across all nodes and their 4370 cache entries. Every line that
+    is not exactly ``key<space>integer`` is a ``sibling_map`` CSV row (4370 of
+    them, a field nothing here reads), and there are **zero** duplicate keys in
+    any file. So the strict form reclassifies nothing that exists.
+
+    A malformed or contradicted line **withholds that one field** rather than
+    condemning the file, and the field's name is returned in the second element
+    so the caller can tell *withheld* from *never present*.
+
+    Both halves of that were learned by getting it wrong. The first version
+    returned an anomaly list and every caller refused the whole node on
+    ``anomalies[0]``, which quietly rebuilt the over-refusal 10d9480 had just
+    fixed: a UID-matched node with a lexically bad ``domain`` was thrown away
+    while the same node with an out-of-range ``domain -1`` was correctly kept,
+    and a duplicated ``max_waves_per_simd`` -- a field nothing here reads --
+    killed the node outright.
+
+    The second version dropped the malformed field and returned the dict alone.
+    That fixed the over-refusal and broke the opposite case: a node whose
+    ``unique_id`` is unreadable became byte-identical to a node that never
+    stated one, so instead of being recorded as unidentifiable it was quietly
+    passed over and the read fell through to a same-BDF neighbour -- the
+    wrong-device answer c597e11, then 337bdbd, then this. Which is this defect
+    class again, at the smallest scale yet: *a field that failed to parse must
+    not become indistinguishable from a field that was never there.* Absent and
+    malformed get the same **treatment** at the call site; they are not the
+    same **observation**, and the reader must not erase the difference before
+    the caller has had a chance to weigh it.
+    """
+    fields: dict[str, str] = {}
+    dropped: set[str] = set()
+    with open(path) as handle:
+        for line in handle:
+            text = line.rstrip("\n")
+            if not text:
+                continue
+            match = _KFD_LINE.match(text)
+            if match is None:
+                # sibling_map is a CSV row on every node and nothing here reads
+                # it, so this is the common case and not in itself a problem.
+                #
+                # The key is recovered with whitespace-agnostic splitting even
+                # though the match above deliberately is not: matching stays
+                # strict (a padded or tab-separated line is malformed and must
+                # not be accepted), while naming is best-effort, because this
+                # string only decides which tag a reader sees. Splitting on a
+                # literal space made `  size 262144  ` yield "" and `size\t...`
+                # yield the whole line, so both reported as missing_size -- the
+                # withheld-vs-absent conflation this function exists to prevent,
+                # reintroduced in the label instead of in the value. A
+                # whitespace-only line claims no field, so there is nothing to
+                # withhold.
+                parts = text.split(maxsplit=1)
+                if parts:
+                    dropped.add(parts[0])
+                continue
+            key, value = match.group(1), match.group(2)
+            if key in fields and fields[key] != value:
+                # Last-wins would pick one silently. Two different values for
+                # one key is a contradiction in the file, and the honest read
+                # of a contradiction is that the field is unavailable.
+                dropped.add(key)
+                continue
+            fields[key] = value
+    return {k: v for k, v in fields.items() if k not in dropped}, dropped
+
+
 def _bounded(props: dict[str, str], name: str, ceiling: int) -> int | None:
     """A present, parseable, non-negative value strictly below ``ceiling``.
 
@@ -388,8 +478,7 @@ def _last_level_cache_bytes(
         for node in sorted(os.listdir(node_root)):
             base = os.path.join(node_root, node)
             try:
-                with open(os.path.join(base, "properties")) as handle:
-                    props = dict(line.split()[:2] for line in handle if len(line.split()) >= 2)
+                props, malformed = _read_kfd_properties(os.path.join(base, "properties"))
             except OSError:
                 unparsed_nodes.append(f"{node}:unreadable")
                 continue
@@ -435,8 +524,19 @@ def _last_level_cache_bytes(
             # one path; this is a field being *irrelevant* on one path, which
             # is a different thing and has to be argued rather than assumed --
             # a test asserting the opposite is what made me look.
+            #
+            # `unique_id` is the one field where absent and malformed must not
+            # be conflated *before* this point, and the reader is what makes
+            # that possible. A node with no `unique_id` line states no identity
+            # and legitimately falls through to the PCI key. A node whose
+            # `unique_id` line is unreadable *did* state one -- we simply cannot
+            # tell whether it says this card -- so it can be neither confirmed
+            # nor excluded, and letting it fall through is how the read lands on
+            # a same-BDF neighbour. Hence `malformed`: without it a corrupted
+            # identity looks exactly like an unstated one.
+            stated_uid = "unique_id" in props or "unique_id" in malformed
             node_uid = _field(props, "unique_id", bits=64) if "unique_id" in props else None
-            if "unique_id" in props and node_uid is None:
+            if stated_uid and node_uid is None:
                 unparsed_nodes.append(f"{node}:unparseable_properties")
                 continue
             if want_uid is not None and node_uid is not None and node_uid != want_uid:
@@ -537,8 +637,9 @@ def _last_level_cache_bytes(
         cache_root = os.path.join(matched, "caches")
         for cache in sorted(os.listdir(cache_root)):
             try:
-                with open(os.path.join(cache_root, cache, "properties")) as handle:
-                    cprops = dict(line.split()[:2] for line in handle if len(line.split()) >= 2)
+                cprops, cmalformed = _read_kfd_properties(
+                    os.path.join(cache_root, cache, "properties")
+                )
             except OSError:
                 skipped.append(f"{cache}:unreadable")
                 continue
@@ -548,8 +649,15 @@ def _last_level_cache_bytes(
             # unknown, not small, and the MALL is exactly the entry we cannot
             # afford to drop. @Reviewer found this against a7eec93, along with
             # nonpositive sizes, which parse fine and then vanish into `max`.
+            # Absent and malformed take the same path -- both are missing
+            # evidence and both are recorded -- but they are tagged apart,
+            # because the tag is what a reader uses to decide where to look. A
+            # `caches/` entry with no `level` line is a driver that did not
+            # publish one; a `level` line that does not parse is a file to go
+            # read. Same treatment, different observation.
             if "level" not in cprops:
-                skipped.append(f"{cache}:missing_level")
+                tag = "bad_level" if "level" in cmalformed else "missing_level"
+                skipped.append(f"{cache}:{tag}")
                 continue
             # Bounded above as well as below, and bounded by what a cache
             # hierarchy can actually be rather than by the field's width. A
@@ -571,7 +679,8 @@ def _last_level_cache_bytes(
             if level < 2:
                 continue  # genuinely known to be below the last level
             if "size" not in cprops:
-                skipped.append(f"{cache}:missing_size_level{level}")
+                tag = "bad_size" if "size" in cmalformed else "missing_size"
+                skipped.append(f"{cache}:{tag}_level{level}")
                 continue
             # The upper bound matters more here than anywhere else in this
             # function, because this value is not just an identity check -- it
@@ -591,7 +700,20 @@ def _last_level_cache_bytes(
     except OSError:
         return fallback, {"source": "torch_l2_fallback", "reason": "no_caches_directory"}
     if best <= 0:
-        return fallback, {"source": "torch_l2_fallback", "reason": "no_level2_plus_cache"}
+        # Carry the skips out with the failure. Without this the caller is told
+        # "this node reports no cache above L2" -- a statement about the
+        # hardware -- when what happened may be "every entry that would have
+        # answered failed to parse", a statement about the read. The gfx950
+        # path fails closed either way, so this is not a soundness hole, but
+        # the two send a reader to entirely different places and only one of
+        # them is where the problem is. Enumeration completeness: an empty
+        # `caches/` and a `caches/` whose every entry was rejected produced
+        # byte-identical provenance before this.
+        miss = {"source": "torch_l2_fallback", "reason": "no_level2_plus_cache"}
+        if skipped:
+            miss["skipped_cache_entries"] = skipped
+            miss["reason"] = "no_usable_level2_plus_cache"
+        return fallback, miss
     provenance: dict[str, Any] = {
         "source": "kfd_topology",
         "matched_by": key,

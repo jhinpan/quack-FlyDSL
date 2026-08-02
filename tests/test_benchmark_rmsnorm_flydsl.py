@@ -649,6 +649,15 @@ def test_a_corrupt_node_does_not_hand_the_read_to_a_pci_neighbour(tmp_path):
     # matched_by=pci_domain_bus_device and no degradation marked -- a plausible
     # 256 MiB read off the wrong card, which no assertion on the value can
     # catch because every card on this host is the same part.
+    #
+    # This test later caught a regression in the strict KFD parser, which is
+    # worth recording because it is why the parser returns its withheld-field
+    # set rather than just omitting the field. Omitting made a node whose
+    # `unique_id` line is corrupt byte-identical to a node that never stated
+    # one -- and those two must diverge here: an unstated identity legitimately
+    # falls through to the PCI key, a corrupt one can be neither confirmed nor
+    # excluded as this card. I wrote a separate test for that before noticing
+    # this one already expresses it exactly, so the coverage stayed here.
     root = tmp_path / "nodes"
     root.mkdir()
     real = root / "2"
@@ -1187,3 +1196,114 @@ def test_a_malformed_domain_still_cannot_hand_the_read_to_a_pci_neighbour(tmp_pa
             argparse.Namespace(llc_bytes=None),
             str(root),
         )
+
+
+@pytest.mark.parametrize(
+    "body,tag",
+    [
+        # Every one of these produced a confident-looking read before the
+        # parser was made strict. `dict(line.split()[:2] ...)` was lenient in
+        # three ways at once and each way ends the same place: a number the
+        # driver never wrote, returned as a clean kfd_topology value that then
+        # sizes every rotation buffer the harness allocates.
+        #
+        # Duplicate key: last-wins picked the second silently, so a file
+        # asserting both 262144 and 1 read as a 1 KB last level.
+        ("level 3\nsize 262144\nsize 1\n", "bad_size_level3"),
+        # Trailing junk: the [:2] slice discarded it, making `size 262144 extra`
+        # indistinguishable from `size 262144`.
+        ("level 3\nsize 262144 extra\n", "bad_size_level3"),
+        # int()'s grammar is wider than the driver's output. The underscore
+        # form is the sharp one -- it yields a *correct-looking* 262144 from a
+        # file the driver could not have produced, which is the same
+        # right-answer-wrong-provenance shape as the laundering fix.
+        ("level 3\nsize 262_144\n", "bad_size_level3"),
+        ("level 3\nsize +262144\n", "bad_size_level3"),
+        ("level 3\n  size 262144  \n", "bad_size_level3"),
+        ("level 3\nsize\t262144\n", "bad_size_level3"),
+    ],
+)
+def test_a_value_the_driver_could_not_have_written_is_not_read_as_clean(tmp_path, body, tag):
+    root = _gfx950_node(tmp_path, [body])
+    value, provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), root)
+
+    # Not merely "does not return the bad number" -- it must also say so. All
+    # six of these previously returned a value with no degradation recorded.
+    assert value == 4 * 1024**2
+    assert provenance["source"] == "torch_l2_fallback"
+    assert provenance["skipped_cache_entries"] == [f"0:{tag}"]
+
+    with pytest.raises(RuntimeError, match="could not be read"):
+        benchmark._resolve_llc(
+            _gfx950_torch(), _properties(), argparse.Namespace(llc_bytes=None), root
+        )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # The strictness must not reclassify anything the driver actually
+        # writes. Measured on this host before tightening: 39702 lines across
+        # 10 nodes and 4370 cache entries, every non-conforming line a
+        # sibling_map CSV row, and zero duplicate keys anywhere. A trailing
+        # blank line and a repeated *identical* key are the shapes a reader
+        # could plausibly meet without the file being wrong.
+        "level 3\nsize 262144\nsibling_map 1,0,0,1\n",
+        "level 3\nsize 262144\n\n",
+        "level 3\nsize 262144\n   \n",
+        "level 3\nsize 262144\nsize 262144\n",
+    ],
+)
+def test_the_strict_parser_still_accepts_what_the_driver_writes(tmp_path, body):
+    value, provenance = benchmark._last_level_cache_bytes(
+        _hip_torch(), _properties(), _gfx950_node(tmp_path, [body])
+    )
+    assert value == 256 * 1024**2
+    assert provenance["source"] == "kfd_topology"
+    assert "degraded" not in provenance
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        # Over-refusal controls for the same reader. The first version of the
+        # strict parser returned an anomaly list and every caller refused the
+        # whole node on anomalies[0], which rebuilt the over-refusal 10d9480
+        # had just fixed -- a UID-matched node died over a field the match
+        # never rested on, and over fields this module does not even read.
+        "domain not-a-number\nlocation_id 29952\n",  # unread on the UID path
+        "domain 0\nlocation_id 29952\nmax_waves_per_simd 8\nmax_waves_per_simd 9\n",
+        "domain 0\nlocation_id 29952\nsibling_map 1,0,0,1\n",
+    ],
+)
+def test_a_uid_match_survives_a_malformed_line_it_did_not_need(tmp_path, extra):
+    root = tmp_path / "nodes"
+    root.mkdir()
+    _node(root, 2, f"gfx_target_version 90500\nunique_id {REAL_UID}\n" + extra, ((3, 262144),))
+
+    value, provenance = benchmark._last_level_cache_bytes(_hip_torch(), _properties(), str(root))
+    assert value == 256 * 1024**2
+    assert provenance["matched_by"] == "unique_id"
+    assert "degraded" not in provenance
+
+
+def test_an_empty_cache_directory_is_not_reported_as_a_part_without_a_mall(tmp_path):
+    # Enumeration completeness. `no_level2_plus_cache` is a claim about the
+    # *hardware* -- this part has no cache above L2 -- and it was also what got
+    # reported when every entry that would have answered failed to parse, which
+    # is a claim about the *read*. The gfx950 path fails closed either way, so
+    # this is not a soundness hole; it is a reader being sent to the wrong place
+    # to look, which is the same defect class in the diagnostics.
+    empty = benchmark._last_level_cache_bytes(
+        _hip_torch(), _properties(), _gfx950_node(tmp_path, [])
+    )[1]
+    assert empty["reason"] == "no_level2_plus_cache"
+    assert "skipped_cache_entries" not in empty
+
+
+def test_a_cache_directory_whose_entries_all_failed_says_so(tmp_path):
+    unusable = benchmark._last_level_cache_bytes(
+        _hip_torch(), _properties(), _gfx950_node(tmp_path, ["level 3\nsize 262_144\n"])
+    )[1]
+    assert unusable["reason"] == "no_usable_level2_plus_cache"
+    assert unusable["skipped_cache_entries"] == ["0:bad_size_level3"]
