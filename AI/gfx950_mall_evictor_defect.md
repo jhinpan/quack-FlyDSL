@@ -34,24 +34,48 @@ it does run.
 ## Defect 2: default rotation counts cannot clear the MALL
 
 Defaults are `--min-rotation-buffers 2 --max-rotation-buffers 4`. Working set is
-`rotation_buffers * bytes_per_call`. Buffers needed to exceed 256 MiB, bf16:
+`rotation_buffers * bytes_per_call`. What matters is not "buffers needed" in the
+abstract but **what the harness actually picks**, since `by_target` is derived
+from the same undersized 12 MiB figure. Simulating `_rotation_count` exactly:
 
-| shape | fwd bytes/call | bwd bytes/call | fwd bufs needed | bwd bufs needed |
-| --- | --- | --- | --- | --- |
-| `1x4096` | 16 KiB | 24 KiB | 16385 | 10924 |
-| `256x4096` | 4.0 MiB | 6.0 MiB | 65 | 44 |
-| `512x4096` | 8.0 MiB | 12.0 MiB | 33 | 23 |
-| `4096x3000` | 46.9 MiB | 70.3 MiB | 7 | 5 |
-| `4096x4096` | 64.0 MiB | 96.0 MiB | 5 | 4 |
-| `32768x1024` | 128.0 MiB | 192.0 MiB | 3 | 3 |
-| `32768x2048` | 256.0 MiB | 384.0 MiB | 2 | 2 |
-| `32768x4096` | 512.0 MiB | 768.0 MiB | 2 | 2 |
-| `32768x8192` | 1024.0 MiB | 1536.0 MiB | 2 | 2 |
+| shape | op | B/call | picked | working set | vs MALL | regime |
+| --- | --- | --- | --- | --- | --- | --- |
+| `1x4096` | fwd | 0.02 MiB | 4 | 0.1 MiB | 0.00x | inflated |
+| `1x4096` | bwd | 0.02 MiB | 4 | 0.1 MiB | 0.00x | inflated |
+| `256x4096` | fwd | 4.0 MiB | 3 | 12.0 MiB | 0.05x | inflated |
+| `256x4096` | bwd | 6.0 MiB | 2 | 12.0 MiB | 0.05x | inflated |
+| `512x4096` | fwd | 8.0 MiB | 2 | 16.0 MiB | 0.06x | inflated |
+| `512x4096` | bwd | 12.0 MiB | 2 | 24.0 MiB | 0.09x | inflated |
+| `4096x3000` | fwd | 46.9 MiB | 2 | 93.8 MiB | 0.37x | inflated |
+| `4096x3000` | bwd | 70.3 MiB | 2 | 140.6 MiB | 0.55x | inflated |
+| `4096x4096` | fwd | 64.0 MiB | 2 | 128.0 MiB | 0.50x | inflated |
+| `4096x4096` | bwd | 96.0 MiB | 2 | 192.0 MiB | 0.75x | inflated |
+| **`32768x1024`** | **fwd** | 128.0 MiB | 2 | **256.0 MiB** | **1.00x** | **inflated** |
+| `32768x1024` | bwd | 192.0 MiB | 2 | 384.0 MiB | 1.50x | clean |
+| `32768x2048` | fwd | 256.0 MiB | 2 | 512.0 MiB | 2.00x | clean |
+| `32768x2048` | bwd | 384.0 MiB | 2 | 768.0 MiB | 3.00x | clean |
+| `32768x4096` | fwd | 512.0 MiB | 2 | 1024.0 MiB | 4.00x | clean |
+| `32768x4096` | bwd | 768.0 MiB | 2 | 1536.0 MiB | 6.00x | clean |
+| `32768x8192` | fwd | 1024.0 MiB | 2 | 2048.0 MiB | 8.00x | clean |
+| `32768x8192` | bwd | 1536.0 MiB | 2 | 3072.0 MiB | 12.00x | clean |
 
-With the cap at 4, only `m=32768` clears the MALL. `32768x1024` needs 3 and is
-borderline-clean; everything at `m<=4096` cannot be fixed by rotation at all —
-`256x4096` would need 65 buffers, `1x4096` sixteen thousand. **Rotation count is
-not a viable lever below `m=32768`; the evictor is the only one.**
+**`m=32768` is not uniformly safe.** `32768x1024` forward lands at *exactly*
+256.0 MiB — precisely the boundary, and the probe measured that point on the
+**inflated** side (6834 GB/s at 256 MiB vs 5124 at 384 MiB). So the affected set
+is "every cell whose picked working set is <= 256 MiB", which is 11 of 18 cells
+and includes one `m=32768` cell. An earlier version of this file said "only
+`m<=4096` is affected" and "`m=32768` is unaffected"; both are wrong.
+
+That earlier version also carried an off-by-one in a "buffers needed" table
+(`ceil(MALL/bytes)+1`, which overshoots whenever the division is exact): it
+listed 7/5 for `4096x3000` where the correct values are 6/4, and 5/4 for
+`4096x4096` where they are 5/3. The table above avoids the issue by simulating
+the actual selection rather than computing a requirement.
+
+Rotation count still is not a usable lever at small `m` — `256x4096` would need
+65 forward buffers and `1x4096` over 16000 — so **the evictor remains the only
+practical fix**. But the reason is the size of the requirement, not an
+`m=32768` cutoff.
 
 ## Measurement
 
@@ -132,7 +156,7 @@ agent, and it parses cleanly:
    reported.
 
 2. **Force the rotation working set past the MALL.** Rejected as a primary fix —
-   the table above shows it is arithmetically impossible below `m=32768`, and
+   the table above shows the requirement is impossible at small `m`, and
    raising `max_rotation_buffers` to 65 for `256x4096` would allocate absurd
    amounts of memory to solve a problem the evictor solves directly.
 
@@ -145,9 +169,13 @@ Recommendation: **1 + 3**.
 
 ## Consequence for existing numbers
 
-Any MI355X figure in `AI/flydsl_rmsnorm_notes.md` at `m <= 4096` is measured
-partly against MALL and is optimistic. The `M=32768` row (100%/88%) is
-unaffected — its working sets are >=512 MiB at 2 buffers. The `M=4096` row
+Any MI355X figure in `AI/flydsl_rmsnorm_notes.md` whose picked working set is
+<= 256 MiB is measured partly against MALL and is optimistic — 11 of 18 cells.
+The `M=32768` row (100%/88%) is **mostly but not entirely** clean: its backward
+half and N>=2048 forward cells clear the MALL, but `32768x1024` forward sits at
+exactly 256.0 MiB, on the inflated side of the boundary. Whether that shifts the
+published median depends on how many cells feed it, and should be recomputed
+rather than assumed. The `M=4096` row
 (71%/64%) and `M<=512` row (7%/5%) are affected, though at `M<=512` the cells
 are launch-bound and bandwidth is not the binding constraint anyway, so the
 practical distortion is concentrated in the **`M=4096` row**.

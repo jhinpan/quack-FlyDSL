@@ -515,16 +515,18 @@ Large shapes are decided by HBM; mid shapes by the kernel; small batches are
 pure launch path, where the CuTe kernel is about 2.2x ahead (6.1 us against
 13.0 us at M=1, against a ~3.5 us Python/FFI floor).
 
-> **The MI355X column's two lower rows are known to be measured wrong.** On
-> gfx950 the harness does not produce cold reads below `m=32768`: rotation
-> working sets under 256 MiB stay resident in the MALL, and the evictor is
-> sized from the 4 MiB per-XCD L2 that torch reports, so it is both too small
-> and gated off. Measured inflation is 1.33x at the boundary. The `M=4096` row
-> (71% / 64%) is therefore optimistic; `M<=512` is launch-bound so bandwidth is
-> not the binding constraint there, and `M=32768` is unaffected (working sets
-> >=512 MiB). Full analysis and measurements in
-> [`gfx950_mall_evictor_defect.md`](gfx950_mall_evictor_defect.md). These rows
-> should be re-measured before being cited.
+> **The MI355X column is known to be measured wrong in most cells.** On gfx950
+> a rotation working set of 256 MiB or less stays resident in the MALL, and the
+> evictor is sized from the 4 MiB per-XCD L2 that torch reports, so it is both
+> too small and gated off. Measured inflation is 1.33x at the boundary.
+> Simulating the harness's actual buffer selection, **11 of 18 cells** land at
+> or under 256 MiB. The `M=4096` row (71% / 64%) is therefore optimistic;
+> `M<=512` is launch-bound so bandwidth is not the binding constraint there;
+> and `M=32768` is **mostly** clean but not entirely — `32768x1024` forward
+> sits at exactly 256.0 MiB, on the inflated side. Full analysis in
+> [`gfx950_mall_evictor_defect.md`](gfx950_mall_evictor_defect.md). All three
+> rows should be re-measured before being cited; do not assume the large-m
+> median is unaffected without recomputing it.
 
 **Provenance of the two Quack columns** (added 2026-08-01 after this table was
 challenged as unsourced, then verified and cleared). Both halves come from the
