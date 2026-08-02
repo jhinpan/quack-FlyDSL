@@ -3534,11 +3534,49 @@ import chain on `torch.version.hip is None`, so on a **CUDA** box `import
 quack.rmsnorm_flydsl` executes `quack/__init__.py` first and would die inside
 `quack/rmsnorm.py` before ever reaching the FlyDSL module — *if* cutedsl were
 broken in that interpreter. On the 4.6.1 venv it is not, so the FlyDSL import
-gets further and fails on its own missing `flydsl` package instead. The
-structural point holds regardless: `tests/test_import_isolation.py` passes here
+gets further and fails on its own missing `flydsl` package instead. It is a
+real failure mode all the same: it is precisely what both boxes' *system*
+interpreters do, carrying cutlass 4.5.2. The FlyDSL backend has no cutlass
+dependency and gets taken down by a package it does not use.
+
+###### And the third instance of the same mistake, in the sentence I wrote about the second
+
+I closed the paragraph above with: `tests/test_import_isolation.py` passes here
 because ROCm takes the other branch, so **this direction of the gate is
-untestable on this hardware** whether or not any particular CUDA box currently
-trips it.
+untestable on this hardware**. That is wrong, and it is the *same* wrong as
+everything else in this section — I asserted a property of the hardware from an
+observation about the current test file. "Untestable on this hardware" and
+"untested on this hardware" are different claims and I made the stronger one
+without checking.
+
+The branch is selected by `torch.version.hip`, which the sibling test at `:77`
+**already overrides** to simulate CUDA, and a failing cutedsl import is one
+`meta_path` loader away. So the test is writable on MI355X, and I wrote it:
+`test_simulated_cuda_broken_cutedsl_takes_the_flydsl_path_down_with_it`. It
+sets `torch.version.hip = None`, installs a loader that raises the real 4.5.2
+error (`cannot import name 'alloc_reserved_mbarrier' from 'cutlass.pipeline'`)
+for `quack.dsl` and `quack.rmsnorm`, then asserts that `import
+quack.rmsnorm_flydsl` fails **with that message** and that
+`quack.rmsnorm_flydsl` never lands in `sys.modules`.
+
+Two details that decide whether it is evidence:
+
+- It intercepts `quack.dsl` too, not just `quack.rmsnorm`. On a real CUDA box
+  `quack.dsl` is imported first and dies on the same missing cutlass; if only
+  `quack.rmsnorm` were intercepted, the run would fail earlier with a less
+  specific error and the assertion would pass for the wrong reason.
+- It asserts on the **message**, not merely that something raised. A bare
+  "it raises" would also be satisfied by FlyDSL simply being absent, which is
+  a different fact about a different package.
+
+Mutation-checked rather than assumed: wrapping the cutedsl chain in
+`try/except ImportError` inside `__init__.py` — the obvious repair — fails
+**only** this test (`1 failed, 4 passed`), which is the signal it exists to
+give. Disabling the gate entirely fails this one and the `:77` sibling, the
+right blast radius for removing the branch both depend on. Both mutations
+reverted; `quack/__init__.py` is untouched in the commit.
+
+Suite is now **738 passed, 2 skipped**.
 
 Conclusion, agreed both ways: **step 2 should be deleted, not rewritten.**
 `restore_value` buys rmsnorm zero correctness and costs the measurement regime.

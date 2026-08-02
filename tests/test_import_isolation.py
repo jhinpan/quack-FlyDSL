@@ -160,6 +160,88 @@ def test_simulated_cuda_preserves_eager_bootstrap_order_and_exports():
     )
 
 
+def test_simulated_cuda_broken_cutedsl_takes_the_flydsl_path_down_with_it():
+    """The gate at ``quack/__init__.py:6`` is one-directional, and this pins it.
+
+    On ROCm the ``torch.version.hip is None`` gate is what keeps the CuTe
+    bootstrap out of the way, so ``import quack.rmsnorm_flydsl`` works with no
+    cutlass installed at all. On a CUDA box the same gate runs that bootstrap
+    unconditionally -- so if the installed cutlass does not match what
+    ``quack/pipeline.py`` imports (e.g. ``alloc_reserved_mbarrier``, absent
+    before nvidia-cutlass-dsl 4.6.0), then ``import quack.rmsnorm_flydsl``
+    fails inside ``quack/__init__.py`` before Python ever looks for the FlyDSL
+    module. The FlyDSL backend has no cutlass dependency and is brought down
+    by a package it does not use.
+
+    This is a REAL failure mode, not a hypothetical: it is exactly what
+    hyper00/hyper01's system interpreters do, both carrying cutlass 4.5.2.
+
+    Why the test is written as a simulation rather than skipped on ROCm: I
+    claimed in AI/flydsl_rmsnorm_notes.md that this direction was
+    "structurally untestable on this hardware" because ROCm takes the other
+    branch. That was wrong in the same way as several things above it -- the
+    branch is chosen by ``torch.version.hip``, which the sibling test at
+    :77 already overrides, and the failing cutedsl import is a meta_path
+    loader away. Untestable on this hardware and untested on this hardware are
+    different claims, and I had asserted the stronger one.
+
+    The assertion is deliberately about the ERROR, not just the failure: a
+    bare "it raises" would also pass if FlyDSL were merely missing. What is
+    being pinned is that the cutedsl error propagates out of a FlyDSL import.
+    """
+    _run_python(
+        """
+        import importlib.abc
+        import importlib.util
+        import sys
+
+        import torch
+
+
+        MESSAGE = "cannot import name 'alloc_reserved_mbarrier' from 'cutlass.pipeline'"
+
+
+        class BrokenCutedslLoader(importlib.abc.Loader):
+            def create_module(self, spec):
+                return None
+
+            def exec_module(self, module):
+                raise ImportError(MESSAGE)
+
+
+        class BrokenCutedslFinder(importlib.abc.MetaPathFinder):
+            # quack.dsl too: on a real CUDA box it is imported first and would
+            # fail on the same missing cutlass, so intercepting only
+            # quack.rmsnorm would let the run die with a less specific error
+            # and the assertion below would pass for the wrong reason.
+            names = {"quack.dsl", "quack.rmsnorm"}
+
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname in self.names:
+                    return importlib.util.spec_from_loader(fullname, BrokenCutedslLoader())
+                return None
+
+
+        torch.version.hip = None
+        sys.meta_path.insert(0, BrokenCutedslFinder())
+
+        try:
+            import quack.rmsnorm_flydsl
+        except ImportError as exc:
+            assert MESSAGE in str(exc), f"wrong failure: {exc!r}"
+        else:
+            raise AssertionError(
+                "quack.rmsnorm_flydsl imported despite a broken cutedsl chain; "
+                "the __init__ gate no longer runs the CuTe bootstrap on CUDA"
+            )
+
+        # The FlyDSL module itself is never reached -- the failure is upstream
+        # of it, which is the whole point.
+        assert "quack.rmsnorm_flydsl" not in sys.modules
+        """
+    )
+
+
 def test_pytest_plugin_collects_on_rocm_without_cutlass(tmp_path):
     if not _is_rocm_build():
         pytest.skip("requires a real ROCm PyTorch build")
