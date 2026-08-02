@@ -47,6 +47,7 @@ import datetime
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 
@@ -91,8 +92,7 @@ def _median(xs):
     return s[n // 2] if n % 2 else 0.5 * (s[n // 2 - 1] + s[n // 2])
 
 
-def bench_rotation(elem_bytes, n_buffers, rounds=None, repeats=None,
-                   evictor_bytes=0):
+def bench_rotation(elem_bytes, n_buffers, rounds=None, repeats=None, evictor_bytes=0):
     """Copy between rotating buffer pairs.
 
     Returns (median GB/s, working-set bytes, [per-repeat GB/s]).
@@ -107,10 +107,8 @@ def bench_rotation(elem_bytes, n_buffers, rounds=None, repeats=None,
     repeats = REPEATS if repeats is None else repeats
     rounds = ROUNDS if rounds is None else rounds
     n = elem_bytes // 4
-    srcs = [torch.empty(n, dtype=torch.float32, device="cuda").normal_()
-            for _ in range(n_buffers)]
-    dsts = [torch.empty(n, dtype=torch.float32, device="cuda")
-            for _ in range(n_buffers)]
+    srcs = [torch.empty(n, dtype=torch.float32, device="cuda").normal_() for _ in range(n_buffers)]
+    dsts = [torch.empty(n, dtype=torch.float32, device="cuda") for _ in range(n_buffers)]
     evictor = _Evictor(evictor_bytes) if evictor_bytes else None
     torch.cuda.synchronize()
 
@@ -164,19 +162,20 @@ def sweep(elem_mib, record):
             break
         gbps, ws, samples, round_ms = bench_rotation(elem_bytes, nb)
         rows.append((nb, ws, gbps))
-        record.append({
-            "block": "rotation_sweep",
-            "buffer_mib": elem_mib,
-            "n_buffers": nb,
-            "working_set_bytes": ws,
-            "working_set_vs_mall": ws / MALL_BYTES,
-            "evictor_bytes": 0,
-            "gbps_median": gbps,
-            "gbps_samples": samples,
-            "round_ms_per_call": round_ms,
-        })
-        print(f"{nb:>8}  {ws / 2**20:>10.0f} MiB  "
-              f"{ws / MALL_BYTES:>7.2f}x  {gbps:>8.0f}")
+        record.append(
+            {
+                "block": "rotation_sweep",
+                "buffer_mib": elem_mib,
+                "n_buffers": nb,
+                "working_set_bytes": ws,
+                "working_set_vs_mall": ws / MALL_BYTES,
+                "evictor_bytes": 0,
+                "gbps_median": gbps,
+                "gbps_samples": samples,
+                "round_ms_per_call": round_ms,
+            }
+        )
+        print(f"{nb:>8}  {ws / 2**20:>10.0f} MiB  {ws / MALL_BYTES:>7.2f}x  {gbps:>8.0f}")
 
     # The headline is the adjacent-rotation step across the MALL boundary, not
     # best-vs-worst: same kernel, one rotation apart.
@@ -185,16 +184,20 @@ def sweep(elem_mib, record):
     lo = max((nb for nb, ws, _ in rows if ws <= MALL_BYTES), default=None)
     if lo is not None and (lo + 1) in by_nb:
         step = by_nb[lo] / by_nb[lo + 1]
-        print(f"  boundary step: {lo} bufs "
-              f"({2 * elem_bytes * lo / 2**20:.0f} MiB) {by_nb[lo]:.0f} GB/s vs "
-              f"{lo + 1} bufs ({2 * elem_bytes * (lo + 1) / 2**20:.0f} MiB) "
-              f"{by_nb[lo + 1]:.0f} GB/s -> {step:.3f}x")
+        print(
+            f"  boundary step: {lo} bufs "
+            f"({2 * elem_bytes * lo / 2**20:.0f} MiB) {by_nb[lo]:.0f} GB/s vs "
+            f"{lo + 1} bufs ({2 * elem_bytes * (lo + 1) / 2**20:.0f} MiB) "
+            f"{by_nb[lo + 1]:.0f} GB/s -> {step:.3f}x"
+        )
     elif lo is not None:
         # Do not silently fall back to a wider pair: a non-adjacent step is a
         # different claim. Say so rather than omitting the line entirely.
-        print(f"  boundary step: NOT COMPUTED -- {lo} bufs is the last one at or "
-              f"below MALL, but {lo + 1} is not in ROTATIONS, so no "
-              f"adjacent-rotation pair spans the boundary in this sweep.")
+        print(
+            f"  boundary step: NOT COMPUTED -- {lo} bufs is the last one at or "
+            f"below MALL, but {lo + 1} is not in ROTATIONS, so no "
+            f"adjacent-rotation pair spans the boundary in this sweep."
+        )
     return step
 
 
@@ -207,8 +210,10 @@ def evictor_control(record, elem_mib=64, n_buffers=2, hbm_buffers=8):
     """
     elem_bytes = elem_mib * 2**20
     ws = 2 * elem_bytes * n_buffers
-    print(f"\n### evictor control: buffer = {elem_mib} MiB x {n_buffers} bufs "
-          f"(WS = {ws / 2**20:.0f} MiB, exactly the MALL boundary)")
+    print(
+        f"\n### evictor control: buffer = {elem_mib} MiB x {n_buffers} bufs "
+        f"(WS = {ws / 2**20:.0f} MiB, exactly the MALL boundary)"
+    )
     print(f"{'evictor':>12}  {'GB/s':>8}   note")
 
     notes = {
@@ -216,33 +221,40 @@ def evictor_control(record, elem_mib=64, n_buffers=2, hbm_buffers=8):
         12: "current evictor size (4 MiB L2 x 3)",
     }
     for mib in EVICTOR_MIB:
-        gbps, _, samples, round_ms = bench_rotation(elem_bytes, n_buffers,
-                                                    evictor_bytes=mib * 2**20)
-        record.append({
-            "block": "evictor_control",
-            "buffer_mib": elem_mib,
-            "n_buffers": n_buffers,
-            "working_set_bytes": ws,
-            "evictor_bytes": mib * 2**20,
-            "gbps_median": gbps,
-            "gbps_samples": samples,
-            "round_ms_per_call": round_ms,
-        })
+        gbps, _, samples, round_ms = bench_rotation(
+            elem_bytes, n_buffers, evictor_bytes=mib * 2**20
+        )
+        record.append(
+            {
+                "block": "evictor_control",
+                "buffer_mib": elem_mib,
+                "n_buffers": n_buffers,
+                "working_set_bytes": ws,
+                "evictor_bytes": mib * 2**20,
+                "gbps_median": gbps,
+                "gbps_samples": samples,
+                "round_ms_per_call": round_ms,
+            }
+        )
         print(f"{mib:>9} MiB  {gbps:>8.0f}   {notes.get(mib, '')}")
 
     ref, ref_ws, ref_samples, ref_round_ms = bench_rotation(elem_bytes, hbm_buffers)
-    record.append({
-        "block": "hbm_reference",
-        "buffer_mib": elem_mib,
-        "n_buffers": hbm_buffers,
-        "working_set_bytes": ref_ws,
-        "evictor_bytes": 0,
-        "gbps_median": ref,
-        "gbps_samples": ref_samples,
-        "round_ms_per_call": ref_round_ms,
-    })
-    print(f"{'none':>9}      {ref:>8.0f}   HBM reference "
-          f"({hbm_buffers} bufs, WS = {ref_ws / 2**20:.0f} MiB)")
+    record.append(
+        {
+            "block": "hbm_reference",
+            "buffer_mib": elem_mib,
+            "n_buffers": hbm_buffers,
+            "working_set_bytes": ref_ws,
+            "evictor_bytes": 0,
+            "gbps_median": ref,
+            "gbps_samples": ref_samples,
+            "round_ms_per_call": ref_round_ms,
+        }
+    )
+    print(
+        f"{'none':>9}      {ref:>8.0f}   HBM reference "
+        f"({hbm_buffers} bufs, WS = {ref_ws / 2**20:.0f} MiB)"
+    )
     return ref
 
 
@@ -261,8 +273,17 @@ def fine_boundary(record):
         268439552: "32768x1024 fwd, 16-bit weight (256.003906 MiB)",
         268443648: "32768x1024 fwd, fp32 weight  (256.007812 MiB)",
     }
-    for ws in (268435456, 268437504, 268439552, 268443648, 268500992,
-               268697600, 269484032, 288 * 2**20, 384 * 2**20):
+    for ws in (
+        268435456,
+        268437504,
+        268439552,
+        268443648,
+        268500992,
+        268697600,
+        269484032,
+        288 * 2**20,
+        384 * 2**20,
+    ):
         # working_set = 2 * elem_bytes * n_buffers (each buffer is a src+dst
         # pair), so elem_bytes = ws/4. Do NOT round to a page here: the steps
         # being probed are 2 KiB apart and page-rounding collapses
@@ -270,20 +291,21 @@ def fine_boundary(record):
         # working set. 4-byte alignment is all float32 needs.
         elem_bytes = (ws // 4 // 4) * 4
         gbps, real_ws, samples, round_ms = bench_rotation(elem_bytes, 2)
-        record.append({
-            "block": "fine_boundary",
-            "buffer_bytes": elem_bytes,
-            "n_buffers": 2,
-            "working_set_bytes": real_ws,
-            "working_set_vs_mall": real_ws / MALL_BYTES,
-            "evictor_bytes": 0,
-            "gbps_median": gbps,
-            "gbps_samples": samples,
-            "round_ms_per_call": round_ms,
-            "note": notes.get(real_ws, ""),
-        })
-        print(f"{real_ws:>12}  {real_ws / 2**20:>12.6f}  {gbps:>8.0f}   "
-              f"{notes.get(real_ws, '')}")
+        record.append(
+            {
+                "block": "fine_boundary",
+                "buffer_bytes": elem_bytes,
+                "n_buffers": 2,
+                "working_set_bytes": real_ws,
+                "working_set_vs_mall": real_ws / MALL_BYTES,
+                "evictor_bytes": 0,
+                "gbps_median": gbps,
+                "gbps_samples": samples,
+                "round_ms_per_call": round_ms,
+                "note": notes.get(real_ws, ""),
+            }
+        )
+        print(f"{real_ws:>12}  {real_ws / 2**20:>12.6f}  {gbps:>8.0f}   {notes.get(real_ws, '')}")
 
 
 def environment():
@@ -317,10 +339,32 @@ def environment():
         "device_pci_bus_id": getattr(props, "pci_bus_id", None),
         "device_uuid": str(getattr(props, "uuid", "")) or None,
     }
-    # MALL is discoverable rather than hardcoded; record what the machine says.
+    # A bare bus byte does not identify a card: it omits domain/device/function,
+    # and it is not what any other tool prints. Record the full BDF in the same
+    # form `rocm-smi --showbus` uses so the selected card can be matched against
+    # the partition tables below instead of assumed.
+    env["device_bdf"] = "{:04x}:{:02x}:{:02x}.{:x}".format(
+        getattr(props, "pci_domain_id", 0),
+        getattr(props, "pci_bus_id", 0),
+        getattr(props, "pci_device_id", 0),
+        0,
+    )
+    # torch's `uuid` is not a UUID: its bytes are the ASCII text of a hex string
+    # which decodes to KFD's `unique_id` (verified equal on all 8 GPUs). Decode
+    # it so the value can be cross-checked against KFD/rocminfo directly. Note
+    # `rocm-smi --showuniqueid` prints a *different* per-GPU value that matches
+    # neither -- comparing against it alone once led me to call this field
+    # uncheckable.
     try:
-        out = subprocess.run(["rocminfo"], capture_output=True, text=True,
-                             timeout=30).stdout
+        env["device_unique_id"] = bytes.fromhex(str(props.uuid).replace("-", "")).decode("ascii")
+    except Exception:  # noqa: BLE001 - provenance only
+        env["device_unique_id"] = None
+    # MALL_BYTES is a hardcoded assumption. Record what the machine reports so a
+    # reader can corroborate it -- this does NOT make it discovered.
+    try:
+        out = subprocess.run(
+            ["rocminfo"], capture_output=True, check=False, text=True, timeout=30
+        ).stdout
         # Every L3 line, not just the first: one line cannot show whether the
         # agents agree, and a single unvalidated sample does not make MALL_BYTES
         # "discovered". MALL_BYTES below is still a hardcoded assumption; this
@@ -333,12 +377,46 @@ def environment():
         env["mall_bytes_is_hardcoded"] = True
     except Exception as exc:  # noqa: BLE001 - provenance only, never fatal
         env["rocminfo_l3_lines"] = f"unavailable: {exc}"
-    for tool, flag, key in (("rocm-smi", "--showcomputepartition", "compute_partition"),
-                            ("rocm-smi", "--showmemorypartition", "memory_partition")):
+    # Map rocm-smi's GPU index to a BDF first. rocm-smi's ordering is NOT torch's
+    # (here torch 0 is rocm-smi GPU 3), so the partition lines must be selected by
+    # PCI address. Truncating to the first two lines, as this used to do, recorded
+    # GPU[0]/GPU[1] regardless of which card was actually benchmarked.
+    smi_index_to_bdf = {}
+    try:
+        for ln in subprocess.run(
+            ["rocm-smi", "--showbus"], capture_output=True, check=False, text=True, timeout=30
+        ).stdout.splitlines():
+            m = re.search(
+                r"GPU\[(\d+)\].*?((?:[0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:"
+                r"[0-9a-fA-F]{2}\.[0-9a-fA-F])",
+                ln,
+            )
+            if m:
+                smi_index_to_bdf[m.group(1)] = m.group(2).lower()
+        env["rocm_smi_bus_map"] = smi_index_to_bdf
+    except Exception as exc:  # noqa: BLE001
+        env["rocm_smi_bus_map"] = f"unavailable: {exc}"
+    selected = [i for i, b in smi_index_to_bdf.items() if b == env["device_bdf"]]
+    env["rocm_smi_index_of_selected_device"] = selected[0] if len(selected) == 1 else None
+    for tool, flag, key in (
+        ("rocm-smi", "--showcomputepartition", "compute_partition"),
+        ("rocm-smi", "--showmemorypartition", "memory_partition"),
+    ):
         try:
-            env[key] = [ln.strip() for ln in subprocess.run(
-                [tool, flag], capture_output=True, text=True, timeout=30
-            ).stdout.splitlines() if "SPX" in ln or "NPS" in ln or "DPX" in ln][:2]
+            lines = [
+                ln.strip()
+                for ln in subprocess.run(
+                    [tool, flag], capture_output=True, check=False, text=True, timeout=30
+                ).stdout.splitlines()
+                if re.search(r"SPX|DPX|QPX|CPX|NPS", ln)
+            ]
+            env[key] = lines
+            idx = env["rocm_smi_index_of_selected_device"]
+            env[key + "_selected_device"] = (
+                next((ln for ln in lines if re.match(rf"GPU\[{idx}\]", ln)), None)
+                if idx is not None
+                else None
+            )
         except Exception as exc:  # noqa: BLE001
             env[key] = f"unavailable: {exc}"
     # Provenance of the *script*, not just of the checkout. HEAD alone is
@@ -346,16 +424,27 @@ def environment():
     # does not contain the code that produced the numbers.
     here = os.path.dirname(os.path.abspath(__file__))
     try:
-        env["git_commit"] = subprocess.run(
-            ["git", "rev-parse", "HEAD"], capture_output=True, text=True,
-            cwd=here, timeout=10
-        ).stdout.strip() or None
+        env["git_commit"] = (
+            subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True,
+                check=False,
+                text=True,
+                cwd=here,
+                timeout=10,
+            ).stdout.strip()
+            or None
+        )
     except Exception:  # noqa: BLE001
         env["git_commit"] = None
     try:
         dirty = subprocess.run(
-            ["git", "status", "--porcelain"], capture_output=True, text=True,
-            cwd=here, timeout=10
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            check=False,
+            text=True,
+            cwd=here,
+            timeout=10,
         ).stdout
         env["git_dirty"] = bool(dirty.strip())
         env["git_dirty_paths"] = [ln[3:] for ln in dirty.splitlines()][:20]
@@ -365,6 +454,7 @@ def environment():
     # when the working tree is dirty or the commit is the parent.
     try:
         import hashlib
+
         with open(os.path.abspath(__file__), "rb") as fh:
             env["script_sha256"] = hashlib.sha256(fh.read()).hexdigest()
     except Exception:  # noqa: BLE001
@@ -376,23 +466,31 @@ def environment():
 def main() -> None:
     global REPEATS
     ap = argparse.ArgumentParser()
-    ap.add_argument("--json", default="AI/probe_gfx950_mall_rotation.json",
-                    help="where to write raw samples + environment")
+    ap.add_argument(
+        "--json",
+        default="AI/probe_gfx950_mall_rotation.json",
+        help="where to write raw samples + environment",
+    )
     ap.add_argument("--repeats", type=int, default=REPEATS)
     args = ap.parse_args()
     REPEATS = args.repeats
 
     env = environment()
     print(f"device             : {env['device_name']} ({env['gcn_arch']})")
-    print(f"torch L2_cache_size: "
-          f"{env['torch_l2_cache_size_bytes'] / 2**20:.1f} MiB "
-          "(per-XCD; MALL not reported)")
-    print(f"MALL assumed       : {MALL_BYTES / 2**20:.0f} MiB "
-          "(32 MiB/stack x 8, per ROCm Kernel Wiki hw-chiplet-xcd)")
-    print(f"rocminfo L3        : {env['rocminfo_l3_lines']} "
-          f"(agrees with assumed MALL: {env.get('rocminfo_l3_agrees_with_assumed')})")
-    print(f"torch              : {env['torch_version']} "
-          f"(hip {env['torch_hip']})")
+    print(
+        f"torch L2_cache_size: "
+        f"{env['torch_l2_cache_size_bytes'] / 2**20:.1f} MiB "
+        "(per-XCD; MALL not reported)"
+    )
+    print(
+        f"MALL assumed       : {MALL_BYTES / 2**20:.0f} MiB "
+        "(32 MiB/stack x 8, per ROCm Kernel Wiki hw-chiplet-xcd)"
+    )
+    print(
+        f"rocminfo L3        : {env['rocminfo_l3_lines']} "
+        f"(agrees with assumed MALL: {env.get('rocminfo_l3_agrees_with_assumed')})"
+    )
+    print(f"torch              : {env['torch_version']} (hip {env['torch_hip']})")
     print()
     print("Kernel is identical in every row below. Only the rotation working")
     print("set changes, so any systematic difference is attributable to cache")
@@ -421,14 +519,19 @@ def main() -> None:
     print("(384 MiB) -- one rotation apart, same kernel. The 16 MiB sweep's")
     print("single-buffer row is additionally inflated by fitting the 32 MiB")
     print("aggregate L2 and should not be used as the headline.")
-    ev = {r["evictor_bytes"] // 2**20: r["gbps_median"]
-          for r in record if r["block"] == "evictor_control"}
+    ev = {
+        r["evictor_bytes"] // 2**20: r["gbps_median"]
+        for r in record
+        if r["block"] == "evictor_control"
+    }
     if ev and hbm_ref:
         big = [v for k, v in ev.items() if k >= 256]
         if big:
-            print(f"evictor control: {min(big):.0f}-{max(big):.0f} GB/s at "
-                  f">=256 MiB evictor vs {hbm_ref:.0f} GB/s HBM reference; "
-                  f"{ev.get(0, float('nan')):.0f} GB/s with none.")
+            print(
+                f"evictor control: {min(big):.0f}-{max(big):.0f} GB/s at "
+                f">=256 MiB evictor vs {hbm_ref:.0f} GB/s HBM reference; "
+                f"{ev.get(0, float('nan')):.0f} GB/s with none."
+            )
     if not ratios:
         print("INCONCLUSIVE: no size gave points both inside and outside MALL.")
         return
