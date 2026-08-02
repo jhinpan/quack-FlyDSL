@@ -1,0 +1,50 @@
+{
+  "gpu": "NVIDIA H200",
+  "arch": "sm_90",
+  "torch": "2.9.1+cu128",
+  "dtype": "bfloat16",
+  "warmup": 5,
+  "iters": 30,
+  "rows": [
+    {
+      "shape": "32768x2048",
+      "operation": "fwd",
+      "analytical_us": 76.656,
+      "tuned_us": 79.264,
+      "tuned_over_analytical": 1.034,
+      "search_seconds": 18.3,
+      "analytical_config": "RmsNormFwdConfig(num_threads=128, threads_per_row=32, cluster_n=1, reload_from=None, delay_w_load=False)",
+      "tuned_config": "config: RmsNormFwdConfig(num_threads=128, threads_per_row=128, cluster_n=1, reload_from=None, delay_w_load=False)"
+    },
+    {
+      "shape": "32768x2048",
+      "operation": "bwd",
+      "analytical_us": 137.28,
+      "tuned_us": 137.856,
+      "tuned_over_analytical": 1.0042,
+      "search_seconds": 83.9,
+      "analytical_config": "RmsNormBwdConfig(num_threads=128, threads_per_row=128, cluster_n=1, reload_wdy=None, reload_x=None, use_tma=False, smem_stages=2)",
+      "tuned_config": "config: RmsNormBwdConfig(num_threads=128, threads_per_row=128, cluster_n=1, reload_wdy=None, reload_x=None, use_tma=False, smem_stages=2)"
+    },
+    {
+      "shape": "32768x8192",
+      "operation": "fwd",
+      "analytical_us": 269.36,
+      "tuned_us": 272.48,
+      "tuned_over_analytical": 1.0116,
+      "search_seconds": 20.6,
+      "analytical_config": "RmsNormFwdConfig(num_threads=128, threads_per_row=128, cluster_n=1, reload_from=None, delay_w_load=False)",
+      "tuned_config": "config: RmsNormFwdConfig(num_threads=256, threads_per_row=256, cluster_n=2, reload_from='smem', delay_w_load=False)"
+    },
+    {
+      "shape": "32768x8192",
+      "operation": "bwd",
+      "analytical_us": 505.888,
+      "tuned_us": 421.136,
+      "tuned_over_analytical": 0.8325,
+      "search_seconds": 158.0,
+      "analytical_config": "RmsNormBwdConfig(num_threads=256, threads_per_row=256, cluster_n=1, reload_wdy=None, reload_x=None, use_tma=False, smem_stages=2)",
+      "tuned_config": "config: RmsNormBwdConfig(num_threads=128, threads_per_row=128, cluster_n=4, reload_wdy=None, reload_x='smem', use_tma=True, smem_stages=3)"
+    }
+  ]
+}

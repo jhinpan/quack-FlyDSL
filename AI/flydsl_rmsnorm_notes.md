@@ -537,16 +537,40 @@ table from the No.001 archive — that is a later, differently-configured run an
 it will not reproduce these numbers.
 
 Caveat worth keeping: at 4096x3000 and 4096x4096 Quack is slower on the H200
-than on the H100 despite 1.39x more bandwidth, while torch on the same two
-boxes moves the right way. That is Quack tuning on H200, not the machine. It
-holds on every dtype, forward and backward — Quack H200/H100 runs 1.03–1.33x
-while torch runs 0.78–0.88x.
+than on the H100 despite 1.39x more bandwidth. Stated exactly, over the 20
+matched m=4096 cells in the v1 pair:
 
-Two corrections to how that caveat used to be worded. First, it claimed those
-cells were "excluded from any median quoted above." They are not, and cannot
-be: 3000 and 4096 are the *only* N values at m=4096 in this sweep, so the
+- **Quack: 20 of 20 cells slower on H200**, ratio range 1.027–1.346. The
+  direction is unanimous.
+- **torch: 17 of 20 cells faster on H200**, ratio range 0.778–1.242. The three
+  exceptions are all backward, weight_mode `same`: 4096x3000 fp16 1.242,
+  4096x3000 bf16 1.236, 4096x4096 fp16 1.063.
+
+The `0.78–0.88x` figure that used to appear here was wrong as written: those are
+aggregated dtype-median ratios, not a per-cell range, and quoting them as if
+they bounded every cell hid the three counterexamples. The torch control is
+therefore *mostly* in the opposite direction, not uniformly.
+
+**What this does and does not establish.** Quack's 20/20 one-directional result
+against a control that mostly runs the other way is a real asymmetry worth
+recording. It is not proof of the mechanism. The earlier wording — "that is
+Quack tuning on H200, not the machine" — asserted a cause the data does not
+isolate: schema-v1 carries no commit, toolchain, host or config metadata, so
+environment differences are not excluded, and the control has three
+counterexamples of its own. Read it as an observation awaiting a controlled
+experiment (same commit, same toolchain, winning configs dumped per cell), not
+as a finding.
+
+Two further corrections to how this caveat used to be worded. First, it claimed
+those cells were "excluded from any median quoted above." They are not, and
+cannot be: 3000 and 4096 are the *only* N values at m=4096 in this sweep, so the
 M=4096 row of the table — H200 33% / 27% — is computed from exactly those ten
 dtype-shape cells and nothing else. The caveat explains that row; it does not
-exempt it. Second, the caveat is specific to the v1 run. In the later No.001
-archive the H200 is faster in these same cells on every provider, so it must
-not be carried across to that dataset.
+exempt it.
+
+Second, the caveat is specific to the v1 run and must not be carried across to
+No.001. In the No.001 archive the direction reverses for Quack: over 60 matched
+m=4096 cells the H200 is faster in **58**, the two exceptions both being torch
+backward at 4096x3000 (fp16 1.081, bf16 1.044). An earlier version of this
+paragraph said "on every provider," which is wrong for the same reason as
+above — a near-unanimous result reported as a unanimous one.
