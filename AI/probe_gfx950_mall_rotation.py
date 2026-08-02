@@ -52,7 +52,6 @@ import sys
 
 import torch
 
-
 MALL_BYTES = 256 * 2**20
 # 9 is sampled so the 16 MiB sweep has a true adjacent pair across the MALL
 # boundary (8 -> 9); without it the nearest sampled step is 8 -> 12, which is
