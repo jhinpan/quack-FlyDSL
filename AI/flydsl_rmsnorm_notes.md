@@ -780,16 +780,31 @@ copy as a denominator.** It was already correct, for a reason that was wrong.
 
 A consequence worth stating separately, because it removes an argument that was
 being used *against* a historical figure rather than for one. @Autotune derived
-a feasible band of `[4.8850, 4.8950]` — 0.2% wide — for the unarchived `4.89`
-copy denominator, and observed that every committed copy value misses it: the
-crossvendor probe by −5.03%, the roofline median and min by +13.91% and +14.10%.
-Read as exclusion, that says 4.89 is unreconstructable.
+a feasible band — 0.2% wide — for the unarchived `4.89` copy denominator, and
+observed that every committed copy value misses it: the crossvendor probe by
+−5.03%, the roofline values by +13.91% and +14.10%. Read as exclusion, that says
+4.89 is unreconstructable.
 
-Every one of those three is a **single allocation's draw**: the roofline probe
-allocates one source and one destination and times that pair, and so does the
-crossvendor probe. Pooling all 25 of the 512 MiB draws behind the table above
-gives min 4.701, max 5.597 — a **19.06%** range, with 6 draws below the band, 18
-above, and one at 4.895 sitting on its upper edge.
+The band is `[4.885, 4.895)`, **half-open under a nearest / half-up display
+rule** — a true value of 4.895 displays as 4.90, so it could not have produced
+the historical cell. That convention is stated here because the first version of
+this section published the band as a bare closed-looking pair, which is exactly
+what @Reviewer had told @Autotune not to do hours earlier; I then did it in a
+committed JSON file rather than in a message.
+
+Every one of those three values is a **single allocation's draw**: the roofline
+probe allocates one source and one destination and times that pair, and so does
+the crossvendor probe. Pooling the 30 committed 512 MiB draws gives min 4.701,
+max 5.597 — a **19.06%** range — with 7 below the band, 21 at or above it, 1
+inside, and **1 undecidable**.
+
+That last count is the honest part. The draw recorded as `4.895` was rounded to
+3 dp at generation, so it means "somewhere in [4.8945, 4.8955)" and straddles
+the band's upper edge; half of its bin is inside. Its membership cannot be
+recovered — my own probe destroyed the digits that would have settled a question
+asked of it four hours later, for readability. The probe now stores these
+unrounded. The straddle does not depend on it: draws sit below and above under
+either interval convention.
 
 So the band is not excluded by the data; it is straddled by it. The three
 distances the argument relies on (5–14%) are each smaller than the spread
@@ -797,10 +812,32 @@ between *identical buffers in a single process* (16–18%). This is the same rul
 that retired the equal-occupancy ratio's third digit: **a comparison must
 discriminate a gap larger than the confounds it cannot see.**
 
+**The 30 draws are not 30 independent samples**, and reporting a bare `n` invited
+exactly that misreading. They are **10 allocation slots sampled 2–3 times each**,
+and **99.63%** of the total sum of squares is explained by which slot a draw
+came from. Worst within-slot range is 2.446%; seven of ten slots reproduce to
+under 1%, one to 0.140%.
+
+That decomposition is a **better argument for the placement mechanism than the
+pooled range is** — @Autotune's point, and it improves on what I published. A
+placement effect predicts precisely this shape: the *n*-th allocation of a given
+size in a given program lands somewhere reproducible, so the same slot
+re-measures to a fraction of a percent while different slots differ by ~17%.
+Per-call noise predicts no slot structure at all. Two generator families with
+different but internally reproducible patterns is what an allocator does and
+what noise does not.
+
+It also corrects a sentence of mine that was too strong. **Copy at 512 MiB *is*
+repeatable — to 0.140–2.446% — conditional on the allocation slot.** What is not
+repeatable is which slot a fresh process lands in. The practical rule that
+follows is narrower and more useful than "copy is noisy": a copy denominator
+cannot be compared *across* processes or programs, and no historical artifact
+records which slot it drew.
+
 None of this restores `4.89` — its provenance is still absent, which is
 @Reviewer's disposition and is untouched. What changes is the reason: a single
 committed copy value at 512 MiB can neither confirm nor exclude any historical
-copy figure, because a ±10% allocation confound sits under a 0.2% band.
+copy figure, because a ~17% between-slot placement term sits under a 0.2% band.
 
 The asymmetry is the useful part. `two_read_one_write` gets *stronger* under the
 same sweep — four committed values within 0.55%, 1.37% across processes, against

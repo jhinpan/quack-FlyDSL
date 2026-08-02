@@ -1,13 +1,17 @@
 {
-  "what": "every 512 MiB copy draw behind the placement finding, pooled, so the claim rests on a committed artifact rather than on a chat message",
-  "why": "@Autotune's feasible band for the unarchived 4.89 copy denominator is [4.8850, 4.8950], 0.2% wide, and he observed that every committed copy value misses it. Each of those values is a SINGLE allocation's draw. These 25 draws show what a single draw is worth at this size: the distribution straddles the band. The band is not excluded by the data.",
+  "what": "every 512 MiB copy draw behind the placement finding, with the allocation-slot decomposition that explains almost all of their spread",
+  "why": "@Autotune derived a feasible band for the unarchived 4.89 copy denominator and observed that every committed copy value misses it, concluding copy is excluded. Each of those values is a single allocation's draw. These draws show what a single draw is worth at this size: the distribution straddles the band under either interval convention, so the band is not excluded by the data. This removes an argument against 4.89; it does not restore it, whose provenance remains absent.",
   "device": "physical 5 (MI355X, gfx950)",
   "buffer_bytes": 536870912,
   "op": "c.copy_(a), five identically-sized identically-filled sources, one fixed destination",
-  "commit_at_collection": "4d5a6f7633c563f2b4840706c10ba1978efc46c4",
+  "assembled_at_commit": "8f083dae8313ce1003ae794fc295e48f7f70f717",
+  "assembled_with_dirty_worktree": true,
+  "generator": "AI/assemble_copy_placement_draws.py",
   "runs": [
     {
       "source": "ad-hoc size sweep, ascending",
+      "family": "adhoc",
+      "precision": "3dp_transcribed",
       "draws": [
         4.816,
         5.009,
@@ -18,6 +22,8 @@
     },
     {
       "source": "ad-hoc size sweep, descending",
+      "family": "adhoc",
+      "precision": "3dp_transcribed",
       "draws": [
         4.701,
         4.977,
@@ -28,6 +34,8 @@
     },
     {
       "source": "ad-hoc size sweep, ascending",
+      "family": "adhoc",
+      "precision": "3dp_transcribed",
       "draws": [
         4.747,
         5.001,
@@ -38,6 +46,8 @@
     },
     {
       "source": "roofline generator, superseded run",
+      "family": "gen",
+      "precision": "3dp_transcribed",
       "draws": [
         5.338,
         4.768,
@@ -47,7 +57,9 @@
       ]
     },
     {
-      "source": "roofline generator, shipped artifact at this commit",
+      "source": "roofline generator, run rounded to 3dp before the probe kept raw rates",
+      "family": "gen",
+      "precision": "3dp_transcribed",
       "draws": [
         5.349,
         4.76,
@@ -55,24 +67,153 @@
         5.587,
         4.895
       ]
+    },
+    {
+      "source": "roofline generator at this commit (regenerable from committed code)",
+      "family": "gen",
+      "precision": "full",
+      "draws": [
+        5.3295558610427385,
+        4.763399232214882,
+        5.574206195853353,
+        5.570711261202525,
+        4.889554032345599
+      ],
+      "generator_commit": "8f083dae8313ce1003ae794fc295e48f7f70f717",
+      "generator_dirty": true
     }
   ],
-  "provenance_note": "The first four runs came from throwaway scripts, which is the same defect class this section is about -- a number whose only home was a message. They are recorded here verbatim as transcribed from those runs' stdout; only the fifth is regenerable from committed code (copy_variability in the roofline sidecar). Treat the first four as transcribed, and re-derive the finding from the fifth plus any new run if the distinction matters.",
   "pooled": {
-    "n_draws": 25,
+    "n_draws": 30,
+    "n_slots": 10,
     "min": 4.701,
     "max": 5.597,
     "range_pct_of_min": 19.06,
-    "band_tested": [
+    "read_this_as": "a between-slot spread measured 2-3 times per slot, not 25 independent draws; see slot_decomposition.effective_n_note"
+  },
+  "band_test": {
+    "band": [
       4.885,
       4.895
     ],
-    "draws_below_band": 6,
-    "draws_inside_band": 1,
-    "draws_above_band": 18,
+    "band_convention": "half-open [lo, hi) under a nearest / half-up display rule: a true value of 4.895 displays as 4.90, not 4.89, so it cannot have produced the historical cell. Convention fixed by @Reviewer in 4d6ed9de; stated here because a bare pair reads as closed and the earlier version of this file published one.",
+    "n_decidable": 29,
+    "draws_below_band": 7,
+    "draws_inside_band_half_open": 1,
+    "draws_inside_band_closed": 1,
+    "draws_at_or_above_band_half_open": 21,
+    "counts_exclude_undecidable": true,
+    "undecidable_at_recorded_precision": {
+      "values": [
+        4.895
+      ],
+      "why": "stored at 3 dp, so each means a 0.001-wide interval that straddles the band's upper edge; membership is not determined by the committed record. The probe now stores these unrounded, but runs collected before that cannot be recovered."
+    },
     "band_is_straddled": true,
-    "widest_gap_the_band_argument_uses_pct": 14.1,
-    "confound_pct": 19.06,
-    "verdict": "The confound exceeds every gap the argument discriminates, so a single committed copy value can neither confirm nor exclude a historical copy figure at this size. This removes an argument against 4.89; it does not restore it, whose provenance remains absent."
-  }
+    "straddle_survives_either_convention": true,
+    "straddle_survives_undecidable": "yes -- draws sit below and above the band under either convention, so the conclusion does not depend on how the undecidable draw is resolved"
+  },
+  "slot_decomposition": {
+    "per_slot": {
+      "adhoc_pos0": {
+        "draws": [
+          4.816,
+          4.701,
+          4.747
+        ],
+        "n": 3,
+        "range_pct_of_min": 2.446
+      },
+      "adhoc_pos1": {
+        "draws": [
+          5.009,
+          4.977,
+          5.001
+        ],
+        "n": 3,
+        "range_pct_of_min": 0.643
+      },
+      "adhoc_pos2": {
+        "draws": [
+          5.026,
+          4.952,
+          4.99
+        ],
+        "n": 3,
+        "range_pct_of_min": 1.494
+      },
+      "adhoc_pos3": {
+        "draws": [
+          5.597,
+          5.57,
+          5.592
+        ],
+        "n": 3,
+        "range_pct_of_min": 0.485
+      },
+      "adhoc_pos4": {
+        "draws": [
+          5.581,
+          5.561,
+          5.586
+        ],
+        "n": 3,
+        "range_pct_of_min": 0.45
+      },
+      "gen_pos0": {
+        "draws": [
+          5.338,
+          5.349,
+          5.3295558610427385
+        ],
+        "n": 3,
+        "range_pct_of_min": 0.365
+      },
+      "gen_pos1": {
+        "draws": [
+          4.768,
+          4.76,
+          4.763399232214882
+        ],
+        "n": 3,
+        "range_pct_of_min": 0.168
+      },
+      "gen_pos2": {
+        "draws": [
+          5.582,
+          5.581,
+          5.574206195853353
+        ],
+        "n": 3,
+        "range_pct_of_min": 0.14
+      },
+      "gen_pos3": {
+        "draws": [
+          5.583,
+          5.587,
+          5.570711261202525
+        ],
+        "n": 3,
+        "range_pct_of_min": 0.292
+      },
+      "gen_pos4": {
+        "draws": [
+          4.837,
+          4.895,
+          4.889554032345599
+        ],
+        "n": 3,
+        "range_pct_of_min": 1.199
+      }
+    },
+    "n_slots": 10,
+    "variance_explained_by_slot_pct": 99.63,
+    "worst_within_slot_range_pct": 2.446,
+    "slots_reproducing_under_1pct": 7,
+    "why_this_matters": "A placement effect predicts exactly this shape: the n-th allocation of a given size in a given program lands somewhere reproducible, so the same slot re-measures to a fraction of a percent while different slots differ by ~17%. Per-call noise predicts no slot structure at all. This is a stronger argument for the mechanism than the pooled range, which merely shows the draws are spread out.",
+    "effective_n_note": "Do not read the pooled draw count as a sample size. With almost all of the variance on a 10-level slot axis, the effective n for 'how much does a fresh draw vary' is nearer the slot count than the draw count, and for 'how much does a repeat vary' it is the 2-3 repeats per slot."
+  },
+  "what_is_and_is_not_repeatable": "Copy at 512 MiB IS repeatable, to 0.140-2.446%, conditional on the allocation slot. What is not repeatable is which slot a fresh process lands in. This corrects 'copy at that size is not a repeatable quantity', which was too strong: the practical consequence is that a copy denominator cannot be compared ACROSS processes or programs, not that it is noisy within one.",
+  "verdict": "The between-slot placement term swamps the band, and no historical artifact records which slot it drew. So no single 512 MiB copy value can authenticate a historical copy figure. Provenance, not arithmetic, remains the binding objection to 4.89.",
+  "provenance_note": "The first five runs are transcribed at 3 dp from runs collected before the probe stored raw rates, and cannot be re-derived from committed code. Only the final run is regenerable (copy_variability in the roofline sidecar). One consequence is recorded in band_test: a 3 dp value straddling the band edge cannot be placed inside or outside it."
 }

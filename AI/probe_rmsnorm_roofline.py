@@ -139,6 +139,21 @@ def _identical_buffer_spread(mib):
     only correct by evaluation order, and nothing in it said so. Numbers I was
     about to publish rested on that. Binding `dst` as a local of a real scope
     makes the guarantee structural instead of incidental.
+
+    Rates are stored unrounded. The first version rounded to 3 dp on the way
+    out, and that destroyed the answer to a question asked of it a few hours
+    later: whether the draw recorded as `4.895` fell inside the half-open band
+    `[4.885, 4.895)` that @Reviewer fixed for the historical `4.89` cell. At 3 dp
+    that value means "somewhere in [4.8945, 4.8955)", which straddles the
+    boundary -- exactly half the bin is inside. The rounding was applied for
+    readability, and it silently threw away the only digits that could decide a
+    membership question about a 0.2%-wide interval.
+
+    The general form is the one this file keeps running into from new angles:
+    *a summary is a claim about which distinctions will matter later, and it is
+    made before you know.* Raw rounds are retained everywhere else in this
+    generator for that reason; these were the exception and should not have been.
+    Rounded copies are kept alongside for readers, clearly named.
     """
     cnt = (mib * 1024 * 1024) // 4
     nbytes = 2 * cnt * 4
@@ -147,7 +162,13 @@ def _identical_buffer_spread(mib):
     rates = [_summarise(_bench(lambda s=s: dst.copy_(s)), nbytes)["TBps_at_min"] for s in srcs]
     lo, hi = min(rates), max(rates)
     return {
-        "TBps_per_identical_buffer": [round(r, 3) for r in rates],
+        "TBps_per_identical_buffer": rates,
+        "TBps_per_identical_buffer_rounded_3dp": [round(r, 3) for r in rates],
+        "rounding_note": (
+            "The unrounded list is authoritative. A rounded copy of this field once "
+            "made an interval-membership question undecidable against a 0.2%-wide "
+            "band; 3 dp is a display choice, not a measurement."
+        ),
         "spread_pct_of_min": round((hi - lo) / lo * 100.0, 2),
         "fits_in_mall": mib * 1024 * 1024 <= MALL_WORKING_SET_BYTES,
         "n_identical_buffers": len(srcs),
