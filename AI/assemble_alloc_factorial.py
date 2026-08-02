@@ -424,19 +424,31 @@ def _slot_structure(raw_rows):
     rows EVERY round of the slowest slot is slower than EVERY round of the
     fastest. The distributions do not overlap. These are genuinely slow buffers.
 
-    The split-plot decomposition (five slots share a process, so between-process
-    and within-process errors are different terms and must not be pooled):
+    The split-plot decomposition is in `split_plot_as_collected` -- five slots
+    share a process, so between-process and within-process errors are different
+    terms and must not be pooled. Figures are deliberately not restated here.
+    This docstring carried an `errors 3.06%` line that was a hand-sum of two
+    independently-rounded components against a computed 3.05, and it survived a
+    decimal audit that fixed the same figure in the notes: a number in prose has
+    no consumer to break when it goes stale, which is the whole argument for
+    keeping figures in the payload where a reader can recompute them.
+    (@Reviewer, 0bcf2057.)
 
-        cell            11.98%   F(3,12)  = 114.90  vs between-process error
-        slot index      10.08%   F(4,48)  =  45.89  vs within-process error
-        cell x slot     74.89%   F(12,48) = 113.66
-        errors           3.06%
+    The interaction dominates both main effects. Sorting each row's five rates
+    before the identical decomposition moves most of it into position, which
+    says the treatment substantially changes WHICH SLOT lands where in the
+    profile rather than only shifting the level.
 
-    The interaction is three quarters of all variance and dwarfs both main
-    effects. Sorting each row's five rates before running the identical
-    decomposition moves 74.89% -> 11.50% into interaction and 10.08% -> 73.79%
-    into position. So the SHAPE of the five-rate profile is nearly common across
-    cells; what the treatment changes is WHICH SLOT lands where in it.
+    It does NOT establish a nearly common profile shape, and this docstring said
+    it did (@Reviewer, 0bcf2057). Sorting is a per-row transform, so its
+    "position" factor is an order rank, not a fixed slot; and the sorted
+    interaction does not vanish -- see `split_plot_sorted_within_row`, whose
+    cell x position term stays clearly significant. A common shape would have
+    driven it to noise. What survives is the weaker and sufficient claim: enough
+    of the variance is relabelling that mean, median, max and min -- all
+    invariant to permuting slots -- read different positions of a profile whose
+    labelling moves. That is what makes them four estimands rather than four
+    estimators of one, and it does not need the shape to be common.
 
     That is the mechanism behind the aggregation dependence. Mean, median, max
     and min are all invariant to permuting the five slots, so each one reads a
@@ -601,10 +613,23 @@ def _slot_structure(raw_rows):
             f"cell x position term from {as_collected['pct_cell_x_position']}% to "
             f"{sorted_within['pct_cell_x_position']}%, and position from "
             f"{as_collected['pct_slot_position']}% to {sorted_within['pct_slot_position']}%. "
-            "The profile's SHAPE is largely common across cells; the treatment changes "
-            "which slot occupies which rank in it. Mean, median, max and min are all "
-            "invariant to permuting slots, so each reads a different position of that "
-            "profile. That makes them four estimands, not four estimators of one."
+            "So a substantial part of the cell x slot term is relabelling: the "
+            "treatment changes which slot occupies which rank. Mean, median, max and "
+            "min are all invariant to permuting slots, so each reads a different "
+            "position of that profile, which makes them four estimands rather than "
+            "four estimators of one."
+        ),
+        "what_the_sorting_comparison_does_NOT_show": (
+            "that the profile SHAPE is common across cells. This field claimed that and "
+            "it does not follow (@Reviewer, 0bcf2057), for two reasons. Sorting is a "
+            "per-row transform, so the sorted 'position' factor is an ORDER RANK, not a "
+            "fixed slot -- the two decompositions are not the same model with one term "
+            "moved. And the sorted interaction does not vanish: "
+            f"cell x position is still {sorted_within['pct_cell_x_position']}% at "
+            f"F(12,48) = {sorted_within['F_cell_x_position']}, far from noise. A common "
+            "shape would have driven it there. The estimand argument above needs only "
+            "that a substantial part of the term is relabelling, which the comparison "
+            "does show, so nothing downstream rests on the stronger claim."
         ),
         "consequence_for_the_headline": (
             "it removes 'which aggregation is correct?' as a question with an answer. "
@@ -647,21 +672,39 @@ def _slot_structure(raw_rows):
             "that separates the routes cleanly."
         ),
         "why_that_is_a_hypothesis_and_not_a_result": (
-            "four cells with four distinct argmin values is SATURATED -- zero residual "
-            "degrees of freedom, so some rule fits perfectly no matter what the values "
-            "were, and several mutually incompatible rules fit this one equally well. "
-            "The only claim with content here is the negative one above, because ruling "
-            "a family OUT does not need spare df. Reading a positive rule off these four "
-            "numbers would be the saturated-model version of the mistake this file keeps "
-            "finding: a fit that cannot fail is not evidence."
+            "any rule mapping the four cells to four distinct argmin values fits "
+            "perfectly, and several mutually incompatible rules fit equally well. The "
+            "only claim with content here is the negative one above, because ruling a "
+            "family OUT does not need spare df. Reading a positive rule off these four "
+            "values would be the version of the mistake this file keeps finding: a fit "
+            "that cannot fail is not evidence."
+        ),
+        "a_correction_to_how_that_was_stated": (
+            "this field said 'SATURATED -- zero residual degrees of freedom', and "
+            "@Reviewer (0bcf2057, 034ffd44) is right that the shorthand is wrong twice "
+            "over. It discarded the 16 independent process rows: a numeric-coded cell "
+            "model on those rows has 12 within-cell df, and it is the argmin's perfect "
+            "within-cell agreement that drives SSE to zero, not the cell count. And "
+            "argmin is NOMINAL, so the honest statement is model ambiguity rather than a "
+            "df count -- an unrestricted cell-specific multinomial is saturated by "
+            "construction whatever the sample size. The substantive point is unchanged, "
+            "and is better made without the df language: no positive rule is identified, "
+            "the refutation is."
         ),
         "declared_followup_for_the_anchor_run": (
             "the count=0 / count=13 anchor run is already declared in anchor_limitation. "
             "This pre-registers a SECOND outcome to record from it, before those numbers "
             "exist: the argmin slot index per process, with the prediction that count=0 "
             "differs from every count>0 cell, and the test that the two routes to a fixed "
-            "total continue to disagree. Two added cells give back the residual df this "
-            "grid lacks. Declared here rather than after the run for the same reason the "
+            "total continue to disagree. This field claimed the two added cells 'give "
+            "back the residual df this grid lacks'; they do not, and @Reviewer's "
+            "034ffd44 has the arithmetic. For the relevant total-only lookup the grid "
+            "went from 4 cells over 3 distinct totals to 6 over 5 -- one lack-of-fit "
+            "contrast either way. No restricted model was declared, so nothing was given "
+            "back. What the anchors actually buy is a prediction fixed before the data "
+            "existed and two cells outside the sampled range, which is what refuted the "
+            "headline; that value never depended on df. Declared here rather than after "
+            "the run for the same reason the "
             "rest of the analysis was: an outcome chosen once the data is visible is not "
             "a test of anything. Nothing about it requires new probe code -- "
             "probe_alloc_factorial already stores the whole spread dict."

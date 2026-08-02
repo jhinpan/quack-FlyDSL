@@ -1268,14 +1268,23 @@ within-process errors are different terms and pooling them inflates *F*:
 
 The interaction is three quarters of all variance and dwarfs both main effects.
 Sorting each row's five rates before running the identical decomposition moves
-74.89% → 11.50% into interaction and 10.08% → 73.79% into position. So the
-*shape* of the five-rate profile is nearly common across cells; what the
-treatment changes is **which slot lands where in it**.
+74.89% → 11.50% into interaction and 10.08% → 73.79% into position. So a
+substantial part of that interaction is **relabelling** — the treatment changes
+which slot lands where in the profile.
 
 That is the mechanism. Mean, median, max and min are all invariant to permuting
-the five slots, so each reads a different position of a profile whose shape is
-roughly fixed and whose labelling moves. It removes "which aggregation is
-correct?" as a question with an answer.
+the five slots, so each reads a different position of a profile whose labelling
+moves. It removes "which aggregation is correct?" as a question with an answer.
+
+**Correction, @Reviewer `0bcf2057`.** This said the profile *shape* is "nearly
+common across cells", and the sorting comparison does not establish that. Sorting
+is a per-row transform, so its "position" factor is an **order rank**, not a
+fixed slot — the two decompositions are not one model with a term moved. And the
+sorted interaction does not vanish: cell × position remains **11.50%**, F(12, 48)
+= **19.91**, far from noise, where a common shape would have driven it there. The
+estimand argument needs only that a substantial part of the term is relabelling,
+which the comparison does show, so nothing downstream rested on the stronger
+claim — but the stronger claim was the one written.
 
 It also **retracts a follow-up I had declared**. The old text said more repeats
 per cell were needed as much as more cells, because the sign instability was "as
@@ -1312,15 +1321,27 @@ reach 24 GiB by different routes give different slowest slots (24×1 GiB → 3,
 disagree about which factor is doing the work, and the argmin is the one that
 separates the routes cleanly.
 
-That negative claim has content. The positive one does not: four cells with four
-distinct argmin values is **saturated** — zero residual df, so some rule fits
-perfectly regardless of the values, and several incompatible rules fit these
-equally well. Ruling a family *out* survives saturation; reading a rule *off* it
-does not. So the argmin slot is declared as a second outcome of the already-
-pre-registered count=0 / count=13 anchor run — before those numbers exist, with
-the prediction that count=0 differs from every count>0 cell. Two extra cells give
-back the residual df this grid lacks, and no new probe code is needed, because
-`_measure` already stores the whole dict.
+That negative claim has content. The positive one does not: any rule mapping four
+cells to four distinct argmin values fits perfectly, and several incompatible
+rules fit these equally well. Ruling a family *out* survives that; reading a rule
+*off* it does not. So the argmin slot is declared as a second outcome of the
+already-pre-registered count=0 / count=13 anchor run — before those numbers
+exist, with the prediction that count=0 differs from every count>0 cell. No new
+probe code is needed, because `_measure` already stores the whole dict.
+
+**Corrected after @Reviewer's `0bcf2057` and `034ffd44`.** This paragraph said
+*saturated — zero residual df*, and that the two anchor cells *give back the
+residual df this grid lacks*. Both are wrong. The df claim discards the 16
+independent process rows: a cell model on those has 12 within-cell df, and SSE is
+zero because the argmin agrees perfectly *within* each cell, not because there
+are four of them. `argmin` is nominal, so the honest objection is model ambiguity
+rather than a df count — an unrestricted cell-specific multinomial is saturated
+by construction at any sample size. And the anchors gave nothing back: for the
+total-only lookup the grid went from 4 cells over 3 distinct totals to 6 over 5,
+one lack-of-fit contrast either way, with no restricted model declared. What the
+anchors actually bought was a prediction fixed in a pushed commit before the data
+existed, and two cells outside the sampled range — which is what refuted the
+headline, and never depended on df at all.
 
 ##### The anchored run refutes the bytes headline — and confirms both predictions
 

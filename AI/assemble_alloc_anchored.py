@@ -26,9 +26,19 @@ and reports everything else as exploratory:
                  and do the two 24 GiB routes still disagree?
 
 P2 is the sharper test because it is a prediction about a NOMINAL outcome with
-five possible values, made in advance. The four-cell grid could not test it at
-all: four cells with four distinct argmin values is saturated, zero residual df,
-so any rule fit perfectly. Six cells give df back.
+five possible values, fixed in a pushed commit before the data existed. The
+four-cell grid could not test it: any rule mapping four cells to four distinct
+argmins fits perfectly, so no positive rule was identified there.
+
+The earlier phrasing -- "saturated, zero residual df, six cells give df back" --
+was wrong twice, and @Reviewer's 0bcf2057 and 034ffd44 have both. It discarded
+the 16 process rows, where a cell model has 12 within-cell df and it is the
+argmin's perfect within-cell agreement that drives SSE to zero, not the cell
+count. And for the total-only lookup the anchors moved the grid from 4 cells
+over 3 distinct totals to 6 over 5: one lack-of-fit contrast either way, so no
+df was given back. What the anchors buy is a prediction made in advance and two
+cells outside the sampled range -- which is what refuted the headline, and never
+depended on df.
 
 What a null on P1 would and would not mean
 ------------------------------------------
@@ -258,9 +268,20 @@ def _p2_argmin(rows):
         ),
         "why_this_is_the_sharper_test": (
             "it is a prediction about a nominal outcome with five values, fixed in a "
-            "commit before the data existed. The four-cell grid could not test it: four "
-            "cells with four distinct argmins is saturated, zero residual df, so some "
-            "rule fit perfectly whatever the values were. Six cells give df back."
+            "pushed commit before the data existed. The four-cell grid could not test "
+            "it: any rule mapping four cells to four distinct argmins fits perfectly, so "
+            "no positive rule was identified there."
+        ),
+        "a_correction_to_how_that_was_stated": (
+            "this said 'saturated, zero residual df, six cells give df back', and it is "
+            "wrong twice (@Reviewer, 0bcf2057 and 034ffd44). It discarded the process "
+            "rows -- a cell model on 16 of them has 12 within-cell df, and SSE is zero "
+            "because the argmin agrees perfectly WITHIN each cell, not because there are "
+            "four cells. And the anchors gave no df back: for the total-only lookup the "
+            "grid went from 4 cells over 3 distinct totals to 6 over 5, one lack-of-fit "
+            "contrast either way, with no restricted model declared. The anchors' value "
+            "is a prediction fixed in advance plus two cells outside the sampled range, "
+            "which is what refuted the headline and never depended on df."
         ),
     }
 
