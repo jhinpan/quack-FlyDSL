@@ -2378,7 +2378,7 @@ because the naive table is the one that would have been sent.
 | split parameter reduce | `dw_partial` | yes | two-stage, no atomic variant |
 | dual dx dtype | yes | kernel only | absent from the API, not "partial" |
 | **layernorm / mean** | **yes** | **no** | **real gap** |
-| cluster / multicast | yes | n/a | **hides a 32x N ceiling**, see re-audit |
+| cluster / multicast | yes | n/a | DSMEM claim ok; **N ceiling is policy**, see re-audit |
 
 The four rows a grep gets wrong: `autotune` and `persistent` live in
 `quack/flydsl/`, not in `rmsnorm_flydsl.py`, so a module-scoped grep reads 0 on
@@ -2440,30 +2440,60 @@ dedicated barrier object" (`wiki/hardware/async-copy-lds.md`). But writing
 `n/a` there closes a question the row is not entitled to close, because
 `cluster_n` is not decoration: `quack/reduction_base.py:28` says in its own
 words that "a clustered launch splits the row across `cluster_n` CTAs." That
-is a row-length mechanism, and behind it sits a **32x ceiling** --
-`MAX_N = 8192` (`quack/flydsl/rmsnorm_config.py:33`, enforced at
-`rmsnorm_flydsl.py:138`) against cutedsl tested at N=262144
-(`tests/test_rmsnorm.py:38`).
+is a row-length mechanism, and there is a real ceiling behind it: `MAX_N = 8192`
+(`quack/flydsl/rmsnorm_config.py:33`, enforced at `rmsnorm_flydsl.py:138`)
+against cutedsl tested at N=262144 (`tests/test_rmsnorm.py:38`).
 
-The second reader concluded the ceiling *is* the cluster gap. That is also
-wrong, and checking it is what makes the row finally legible. Cutedsl sets
-`cluster_n = 1` on SM8x (`quack/rmsnorm.py:97-101`, "SM8x (Ampere/Ada) lacks
-cluster support") and still serves N=262144. So wide rows do not require
-clusters on any hardware. The real mechanism is `smem_stages`
-(`quack/rmsnorm.py:772,845`): cutedsl stages a wide row through shared memory,
-so the row length is bounded by LDS and a loop rather than by registers.
-FlyDSL's `MAX_N` is explicitly a register budget -- "a thread keeps
-`num_tiles * vecsize` elements in registers, so this is the register budget
-expressed as a row length. Every other cap on N derives from it" -- and its
-shared memory holds only cross-wave reduction slots
-(`quack/flydsl/rmsnorm_kernel.py:104`), never the row.
+**Three readers then produced three different causes for that ceiling, and
+all three were wrong, including both of mine.** The sequence is worth keeping
+because it is the sharpest instance in this file of the thing this file is
+about.
 
-So the honest row is: **the ceiling is real and large, it is a
-staging-strategy gap, and it has nothing to do with DSMEM.** The original row
-excused it with hardware FlyDSL does not need; the re-audit blamed hardware
-cutedsl does not need. Both named the wrong cause, which is worth recording,
-because the wrong cause here is what decides whether the gap is closeable on
-gfx950 -- and it is: LDS staging is available.
+I first wrote that the gap is 32x and that clusters conceal it. A second
+reader agreed the row is wrong but said the ceiling *is* the cluster gap. I
+checked that and retracted it: cutedsl sets `cluster_n = 1` on SM8x
+(`quack/rmsnorm.py:97-101`, "SM8x (Ampere/Ada) lacks cluster support") and
+still serves N=262144, so wide rows do not require clusters on any hardware. I
+sent that retraction to two threads and named LDS staging as the real
+mechanism.
+
+A third reader then found `_bump_cluster_n_for_smem`
+(`quack/rmsnorm_config.py:344-371`), which raises `cluster_n` precisely to fit
+the smem budget -- "Override if this cluster_n would overflow the device's
+smem budget" -- and concluded cluster is causally part of the ceiling after
+all. That is also wrong, but only just: the call site is line 211, and line
+211 is inside `_for_blackwell_bwd` (`:168-262`). It is a Blackwell *backward*
+heuristic. It cannot be why SM8x, which has no clusters at all, serves
+N=262144. The forward's wide-N escape is `reload_from="smem"/"gmem"`
+(`quack/rmsnorm.py:283-289,338-339`) -- re-read the row instead of holding it
+-- with no cluster involved.
+
+**And the 32x figure, mine, was the worst of the four claims, because this
+file had already measured the answer and I did not look.** At `:2124` above:
+monkeypatching `MAX_N` to `1 << 20` runs the FlyDSL forward correctly to
+**N = 262144** and the backward to 65536, at bf16 accuracy indistinguishable
+from shapes under the cap. `MAX_N = 8192` is therefore not a wall of any kind
+-- not registers, not LDS, not hardware. It is a **policy cap**, and the same
+section locates the real width cliff between **49152 and 57344**
+(`AI/data/rmsnorm_fwd_width_cliff.json`), where throughput halves.
+
+So the honest statement of row 10, after four wrong ones:
+
+- gfx950 has no DSMEM. True, and irrelevant to the ceiling.
+- FlyDSL refuses N > 8192 by policy. Its forward is *measured* correct to
+  262144, the same N cutedsl is tested at.
+- The distance to a measured degradation is **~6x** (8192 to ~49152), not
+  32x, and what sits at the far end is a throughput cliff, not a failure.
+- Whether to raise the cap is a policy question with data already in hand,
+  not a capability question.
+
+Four readers, four causes -- registers, clusters, LDS staging, Blackwell smem
+-- for a limit that is a constant in a config file with a probe already
+proving it non-binding. Every one of those causes was reached by reading code
+that really does do what it appears to do; none was reached by checking
+whether the limit binds. That is the defect class of this whole file, and I
+reproduced it twice in one afternoon, the second time in the act of correcting
+the first.
 
 **Row 8, `dual dx dtype | partial | narrower`, understates a total absence.**
 The FlyDSL *kernel* is dual-dtype capable -- it reads `dx.dtype` off a
@@ -2479,9 +2509,18 @@ in the kernel.
 **Rows 3, 5, 6, 7 are imprecise, all in the same shape**: the mechanism claim
 is right and the reachability claim is not. `per_head` differs in validation
 (cutedsl ORs over ranks, FlyDSL rejects mixed ranks at
-`rmsnorm_flydsl.py:126`); autotune covers forward *and backward* over 5-7 knobs
-on cutedsl (`quack/rmsnorm_config.py:405,442`) against forward-only over two on
-FlyDSL (`quack/flydsl/rmsnorm_autotune.py:40`); persistent backward is genuine
+`rmsnorm_flydsl.py:126`); autotune covers forward *and backward* on cutedsl
+(`quack/rmsnorm_config.py:405,442`) against forward-only on FlyDSL
+(`quack/flydsl/rmsnorm_autotune.py:111`) -- and the space differs by more than
+the direction count. Enumerated by running `_row_candidates` rather than
+reading it, FlyDSL's bf16 forward space is **12 configs at N=1024, 8 at 4096,
+4 at 8192**: the `elems_per_thread <= 32` filter (`:35`) kills every
+`threads_per_row` but 256 at the top of the range, so the tuner has the least
+freedom exactly at the widest row it admits, and only `waves_per_eu` is left
+to vary. Both tuners are opt-in, not default, on both sides
+(`rmsnorm_flydsl.py:1131`, and cutedsl's `rmsnorm()` routes to the untuned
+`rmsnorm_fwd`/`rmsnorm_bwd`) -- so "autotune | yes | yes" is true of both and
+describes neither; persistent backward is genuine
 on both but `sm_count` is a settable parameter (`quack/rmsnorm.py:1476`) while
 FlyDSL's `num_programs` is derived and unsettable (`rmsnorm_flydsl.py:227`);
 and the split reduce differs in that cutedsl's second stage is a host-side
