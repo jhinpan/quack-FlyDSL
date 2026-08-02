@@ -1067,6 +1067,60 @@ here can tell 512 MiB from 2 GiB** — all three patterns' ranges overlap once
 slot and peak are sampled. The table's size is known because notes:869 says so.
 That is documentary evidence and it is not dressed up as measured.
 
+##### "Slot" was three variables wearing one index, and it is the address
+
+Every copy probe in this tree allocated buffer *i* in position *i* and then
+measured it *i*-th. Allocation ordinal, timing order and address were the same
+number, so calling the effect *placement* was a reading of the design, not a
+result from it. @Reviewer's objection, and there was no answer to it in any
+artifact I had written: the same data are equally consistent with clock ramp,
+with cache warmth, or with anything else monotone in measurement order.
+
+`AI/probe_order_confound.py` allocates the five 2 GiB sources in a fixed order,
+then measures them in a **per-process random permutation** — 20 processes, 19
+distinct orders, 100 draws, addresses recorded. That breaks the index into its
+parts.
+
+| variable | η² of the rate |
+| --- | --- |
+| allocation ordinal | **98.10%** |
+| timing position (marginal) | 7.11% |
+| timing position *within* allocation ordinal | **0.30%** |
+| between identical repeats of one (ordinal, position) cell | 1.60% |
+
+The two marginal numbers overlap and do not sum to 100 — a random permutation
+per process gives an unbalanced grid (all 25 cells occupied, 1 to 7 replicates
+each), so neither marginal is a residual. The line that carries the argument is
+the third: once you know where a buffer was allocated, **when** it was measured
+explains less than the scatter between identical repeats. Warmup, clock ramp and
+drift are out.
+
+The addresses say what "slot" actually means. Across all 20 processes the source
+minus destination offset vector is **byte-identical** — `-10.35, -8.348, -6.346,
+-4.344, -2.002` GiB — while the absolute destination base lands in **11**
+distinct 1 TiB regions. Bucketing by relative offset recovers the same 98.10%,
+necessarily, because in this design the two partitions are identical. So the
+effect is a function of the source's offset *relative to the destination*, and
+absolute placement is randomized and does not track the rate. Per-address η²
+would read 100% and mean nothing: every address is unique, so each group holds
+one datum.
+
+What this does not do is retroactively upgrade the earlier artifacts. The
+placement reading turns out to be right, but it was never supported *by* those
+runs, which could not have told these cases apart. A conclusion being correct is
+not the same as the experiment having shown it — and the failure mode is not
+that I was wrong, it is that I would have said the same thing either way. Nor
+does this establish *why* a given offset is faster; that needs a probe that sets
+the offset directly instead of reaching it through the allocation sequence.
+
+Artifact: `AI/data/copy_placement_draws/order_confound_dev5.json`, with the 20
+raw runs under `raw_order_dev5/` and hashed into `input_manifest`. Its loader
+now refuses duplicate seeds, mixed devices or sizes, ragged row counts,
+non-permutation indices and non-finite rates, and records whether the input
+directory was inside the repo at all — the ambient-`/tmp`-input hole @Reviewer
+found in the copy-axes assembler, closed at the point where the assumption is
+made rather than by hard-coding the path.
+
 The live figures are in `copy_variability` and
 `denominator_stability_across_processes` in the sidecar, and the full three-axis
 decomposition in `copy_axes_dev5.json`; every number in the caveat string is

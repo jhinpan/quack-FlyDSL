@@ -1,0 +1,240 @@
+{
+  "what": "Separates allocation ordinal from timing order for the 2 GiB copy draws, and records addresses. Buffers are allocated 0..4 and measured in a per-process permuted order.",
+  "why": "every prior copy artifact in this tree allocated buffer i i-th and then measured it i-th, so allocation ordinal, timing order and address were one index, and the effect was reported as placement without the design being able to show that. Raised by @Reviewer against 9899e9d and 682e103.",
+  "device_name": "AMD Instinct MI355X",
+  "hip_visible_devices": "5",
+  "n_processes": 20,
+  "n_draws": 100,
+  "size_mib": 2048,
+  "distinct_measurement_orders": 19,
+  "generator": "AI/probe_order_confound.py",
+  "assembler": "AI/assemble_order_confound.py",
+  "input_manifest": {
+    "n_inputs": 22,
+    "source_dir": "/root/quack-FlyDSL-review/AI/data/copy_placement_draws/raw_order_dev5",
+    "source_dir_inside_repo": true,
+    "source_dir_note": "inputs are versioned alongside the artifact, so the hashes below can be rechecked by anyone with the commit",
+    "entries": [
+      {
+        "path": "AI/data/copy_placement_draws/raw_order_dev5/s1.json",
+        "sha256": "fb040826988d2d8e2de34b41c20965cae7b7fb4f065b2804fa2209f97f200ab5",
+        "bytes": 1574
+      },
+      {
+        "path": "AI/data/copy_placement_draws/raw_order_dev5/s10.json",
+        "sha256": "bd17d4cf0bf4c2178a198d4cd30e143caa2c9b89c0a4f653487aafcec0014861",
+        "bytes": 1568
+      },
+      {
+        "path": "AI/data/copy_placement_draws/raw_order_dev5/s11.json",
+        "sha256": "2ed44717c39a94c9a393ae39866ca36d096d4d6c5473bbd4f7d36a3b3315fd5f",
+        "bytes": 1572
+      },
+      {
+        "path": "AI/data/copy_placement_draws/raw_order_dev5/s12.json",
+        "sha256": "bd4d1713b9f2f91b07ff9c531a614e97131b99d49f0cd045adff8d9018213331",
+        "bytes": 1570
+      },
+      {
+        "path": "AI/data/copy_placement_draws/raw_order_dev5/s13.json",
+        "sha256": "19776c1448d620181ba050f1553bb3c9663ae32dfa2a6b07caf7a4838d88ce48",
+        "bytes": 1574
+      },
+      {
+        "path": "AI/data/copy_placement_draws/raw_order_dev5/s14.json",
+        "sha256": "c1e16002be0cb84f5954bc186028a44e7e5bf6e26d73b5e6723d780cd36a026d",
+        "bytes": 1570
+      },
+      {
+        "path": "AI/data/copy_placement_draws/raw_order_dev5/s15.json",
+        "sha256": "b2c0cf39b2fe286c5014dc7ffa1d6becaa4ec380e30967e59b5149f4ad109f92",
+        "bytes": 1569
+      },
+      {
+        "path": "AI/data/copy_placement_draws/raw_order_dev5/s16.json",
+        "sha256": "28aeecde0670d7a1db96d075310cfb061a14e3615d9c30539b69ae4926e23415",
+        "bytes": 1569
+      },
+      {
+        "path": "AI/data/copy_placement_draws/raw_order_dev5/s17.json",
+        "sha256": "785deb02b9b910aefeba9c399eae7798bf8eb0641e18a0b937d43c93a4616fb0",
+        "bytes": 1569
+      },
+      {
+        "path": "AI/data/copy_placement_draws/raw_order_dev5/s18.json",
+        "sha256": "5f7fd916a9c2565d352aca87061fa69477ef070f237f3fc88653a6c002e1e89f",
+        "bytes": 1577
+      },
+      {
+        "path": "AI/data/copy_placement_draws/raw_order_dev5/s19.json",
+        "sha256": "8cf3c695156948ca002292b8c45039d78fa28333c9228f8364afcc82c13febdf",
+        "bytes": 1578
+      },
+      {
+        "path": "AI/data/copy_placement_draws/raw_order_dev5/s2.json",
+        "sha256": "f919da62fdfa10e7fd8f3f4553a59f5556ac858605aec1dd487cdff909d6ae66",
+        "bytes": 1572
+      },
+      {
+        "path": "AI/data/copy_placement_draws/raw_order_dev5/s20.json",
+        "sha256": "69315787429eabdb59d2fb26f17cb49c8dacf215cc2d51811eceb383cc64db8b",
+        "bytes": 1571
+      },
+      {
+        "path": "AI/data/copy_placement_draws/raw_order_dev5/s3.json",
+        "sha256": "3fd858bba512cc100dc6044998dee465c44f8a50f35ed04f2d1f25084442d7fe",
+        "bytes": 1573
+      },
+      {
+        "path": "AI/data/copy_placement_draws/raw_order_dev5/s4.json",
+        "sha256": "20a48eb33353eed19541e089bac9a68eccca34685a8d544eb382e5379817056c",
+        "bytes": 1574
+      },
+      {
+        "path": "AI/data/copy_placement_draws/raw_order_dev5/s5.json",
+        "sha256": "6a0e9a2c596ca0bed72f2910bdce2a50359d664ccf86e5e7f637168e15ec7ccb",
+        "bytes": 1574
+      },
+      {
+        "path": "AI/data/copy_placement_draws/raw_order_dev5/s6.json",
+        "sha256": "95919d565850ce417394765d57a0221b5c69159209089226ac252633608a5c57",
+        "bytes": 1569
+      },
+      {
+        "path": "AI/data/copy_placement_draws/raw_order_dev5/s7.json",
+        "sha256": "0f173c6b3dd993412d57c0df07578577f07606031aad0b07ebfb6ab717b3600b",
+        "bytes": 1577
+      },
+      {
+        "path": "AI/data/copy_placement_draws/raw_order_dev5/s8.json",
+        "sha256": "40735b876e87df7a3e1b6b15583c9d3339b6a454975861d3fe39a8d862bb4559",
+        "bytes": 1569
+      },
+      {
+        "path": "AI/data/copy_placement_draws/raw_order_dev5/s9.json",
+        "sha256": "85b4cdc6aab26de4bf0dd0becc0132266554dc3208887aaf7d3bd4a8f8feba3b",
+        "bytes": 1571
+      },
+      {
+        "path": "AI/probe_order_confound.py",
+        "sha256": "0c6dee4426354efcebe17021895de890c83e31f116e071fd93a2488684c76a76",
+        "bytes": 4231
+      },
+      {
+        "path": "AI/assemble_order_confound.py",
+        "sha256": "de51ea952faa6d170e2225a21ddece8aa99cdd1ad27946d68e426de6f251224d",
+        "bytes": 15623
+      }
+    ],
+    "what_this_proves": "the assembler read exactly these bytes. It does not prove they came from a GPU, and a manifest cannot: it is a binding between artifact and raw runs, not an attestation."
+  },
+  "commit": "e5924c1",
+  "worktree_dirty": true,
+  "worktree_dirty_paths": [
+    ".gitignore",
+    "AI/assemble_order_confound.py",
+    "AI/data/copy_placement_draws/order_confound_dev5.json",
+    "AI/data/copy_placement_draws/raw_order_dev5/s1.json",
+    "AI/data/copy_placement_draws/raw_order_dev5/s10.json",
+    "AI/data/copy_placement_draws/raw_order_dev5/s11.json",
+    "AI/data/copy_placement_draws/raw_order_dev5/s12.json",
+    "AI/data/copy_placement_draws/raw_order_dev5/s13.json",
+    "AI/data/copy_placement_draws/raw_order_dev5/s14.json",
+    "AI/data/copy_placement_draws/raw_order_dev5/s15.json",
+    "AI/data/copy_placement_draws/raw_order_dev5/s16.json",
+    "AI/data/copy_placement_draws/raw_order_dev5/s17.json",
+    "AI/data/copy_placement_draws/raw_order_dev5/s18.json",
+    "AI/data/copy_placement_draws/raw_order_dev5/s19.json",
+    "AI/data/copy_placement_draws/raw_order_dev5/s2.json",
+    "AI/data/copy_placement_draws/raw_order_dev5/s20.json",
+    "AI/data/copy_placement_draws/raw_order_dev5/s3.json",
+    "AI/data/copy_placement_draws/raw_order_dev5/s4.json",
+    "AI/data/copy_placement_draws/raw_order_dev5/s5.json",
+    "AI/data/copy_placement_draws/raw_order_dev5/s6.json",
+    "AI/data/copy_placement_draws/raw_order_dev5/s7.json",
+    "AI/data/copy_placement_draws/raw_order_dev5/s8.json",
+    "AI/data/copy_placement_draws/raw_order_dev5/s9.json",
+    "AI/flydsl_rmsnorm_notes.md",
+    "AI/probe_order_confound.py"
+  ],
+  "worktree_dirty_note": "a dirty ancestor means the commit above does not pin the code that produced this artifact. The paths are listed so a reader can see whether the difference touches the probe or the assembler.",
+  "by_alloc_ordinal": {
+    "eta_squared_pct": 98.1,
+    "group_means": {
+      "0": 4.8369,
+      "1": 5.036,
+      "2": 4.926,
+      "3": 4.9906,
+      "4": 4.7925
+    },
+    "n_groups": 5,
+    "n_per_group": [
+      20
+    ]
+  },
+  "by_time_position": {
+    "eta_squared_pct": 7.11,
+    "group_means": {
+      "0": 4.8991,
+      "1": 4.907,
+      "2": 4.9567,
+      "3": 4.8882,
+      "4": 4.9308
+    },
+    "n_groups": 5,
+    "n_per_group": [
+      20
+    ]
+  },
+  "nested": {
+    "time_within_alloc_eta_squared_pct": 0.3,
+    "within_cell_eta_squared_pct": 1.6,
+    "cells_occupied": 25,
+    "cells_possible": 25,
+    "cell_replicate_counts_min_max": [
+      1,
+      7
+    ],
+    "note": "the design is unbalanced, so the two marginal eta-squareds overlap and do not sum to 100. Timing position within allocation ordinal is the residual that matters, and it is smaller than the scatter between identical repeats."
+  },
+  "by_relative_offset_from_dst": {
+    "eta_squared_pct": 98.1,
+    "bucket_width": "2 GiB",
+    "bucket_means": {
+      "-5": 4.7925,
+      "-4": 4.9906,
+      "-3": 4.926,
+      "-2": 5.036,
+      "-1": 4.8369
+    }
+  },
+  "address_structure": {
+    "distinct_offset_vectors": 1,
+    "distinct_dst_bases_by_1TiB_region": 11,
+    "n_processes": 20,
+    "offset_vector_bytes": [
+      "-11112808448",
+      "-8963227648",
+      "-6813646848",
+      "-4664066048",
+      "-2149580800"
+    ],
+    "offset_vector_GiB": [
+      -10.35,
+      -8.348,
+      -6.346,
+      -4.344,
+      -2.002
+    ],
+    "interpretation": "one offset vector across all processes while the absolute base varies means the ordinal effect is a function of the source's address RELATIVE to the destination, not of where the pair lands in the address space. Absolute placement is randomized here and does not track the rate."
+  },
+  "pooled_range_pct_of_min": 6.25,
+  "verdict": "Allocation ordinal explains 98.1% of the variance; timing position explains 7.11%. With the two varied independently across 19 distinct measurement orders, the effect tracks WHERE a buffer was allocated, not WHEN it was measured. Warmup, clock ramp and drift within a process are excluded as the primary cause. The placement reading of prior artifacts is supported -- but it was not supported BY those artifacts, which could not have distinguished these cases.",
+  "verdict_strength": "The two marginal figures overlap (7.11% is not a residual: the permuted design is unbalanced). The load-bearing number is timing position WITHIN allocation ordinal, 0.3%, which is smaller than the 1.6% scatter between identical repeats of the same (ordinal, position) cell. Once you know where a buffer was allocated, when it was measured tells you less than noise does.",
+  "mechanism": "The src-dst offset vector is byte-identical across every process while the absolute base varies over 11 distinct 1 TiB regions, and bucketing by that relative offset recovers 98.1% of the variance -- the same as allocation ordinal, because in this design they are the same partition. So 'allocation slot' is more precisely the source's offset relative to the destination. Absolute placement is randomized here and does not track the rate. What this does NOT establish is why a given offset is faster; that needs a probe that varies the offset directly rather than through the allocation sequence.",
+  "prose_guard": {
+    "accept_set_size": 226,
+    "false_negative_rate_pct": 0.95,
+    "ceiling_pct": 12.0
+  }
+}
