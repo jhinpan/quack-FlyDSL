@@ -447,7 +447,7 @@ comparisons use the contention canary and alternating protocol in
 `benchmarks/benchmark_rmsnorm_flydsl.py`. Generate the baseline from an
 immutable worktree on the same machine immediately before the candidate.
 
-Two traps, both of which produced a confident wrong answer at least once:
+Three traps, all of which produced a confident wrong answer at least once:
 
 `triton.testing.do_bench` picks its repeat count from a first call, so a first
 call that also runs the FlyDSL build skews the whole sample -- and only the
@@ -460,6 +460,30 @@ implementation, with no other tenant on the device. Contention can only cost
 time and never save it, so take the minimum of a few samples rather than one.
 A single sample is how 262144x128 once reported 0.75 TB/s against its own
 3.80.
+
+**A `torch.cuda.Event` pair times the device it was created on, not the device
+the work ran on.** Passing `device="cuda:6"` to every tensor does not move the
+process's *current* device, which stays 0. The events are then created on
+device 0, `record()` enqueues them on device 0's stream, and `elapsed_time`
+returns the gap between two markers on an idle device -- a number that is
+neither the kernel's duration nor obviously wrong. It read 26.9 us for a
+32768x4096 bf16 forward that actually takes 89.9 us, and the error is not a
+constant factor, so it cannot be divided out afterwards. Either
+`torch.cuda.set_device(N)` first, or select the card with
+`HIP_VISIBLE_DEVICES=N` and address it as plain `"cuda"`; the harness and every
+committed probe here do the latter, which is why this trap stayed in ad-hoc
+scripts.
+
+What makes it worth its own entry is that **the invalid measurement carried its
+own refutation and it still shipped**: 26.9 us over that shape's logical bytes
+is 19 TB/s, on a part whose measured copy roofline is ~5.3 TB/s. The check that
+would have caught it -- divide by the roofline, ask whether the answer is
+physically possible -- costs one line and was not run for an entire commit. It
+was eventually caught only because an unrelated probe read 45 TB/s, which was
+absurd enough to notice; at 19 TB/s the number was merely wrong, and wrong
+survived review. **Every throughput figure should be quoted with, or at least
+checked against, its share of the roofline**, precisely so that the impossible
+ones announce themselves rather than waiting for a more absurd sibling.
 
 **A canary agreeing to a fraction of a percent is not stability evidence.**
 The habit is to re-run one cell after a change, see it land within a percent
