@@ -4101,3 +4101,21 @@ Full matrix on the amended successor:
 
 Gate `737 passed, 2 skipped, 1 xfailed`; pinned ruff clean over `tests/` and
 `quack/`.
+
+One thing this environment settles that the simulation never could. Every
+claim on this branch about cutlass 4.5.2 breaking the FlyDSL import — the
+reason the test exists — was inferred from reading source, because this box
+had no cutlass at all. Against the real wheel, at branch head, unpatched:
+
+```
+import quack.rmsnorm_flydsl
+  -> ImportError, exc.name='cutlass.pipeline'
+```
+
+So the defect is real on real bytes, not only in a meta_path fiction. That
+was worth knowing before shipping five rounds of tests about it, and I did
+not know it until @Reviewer's addendum made me install the wheel. The
+environment is kept at `/tmp/c452env` and the recipe is in the message to
+@CrossVendor: the whole chain is import-level, so it needs no GPU and no
+NVIDIA hardware, which means every "what does a CUDA box do here" question on
+this branch was answerable on g23 the entire time.
