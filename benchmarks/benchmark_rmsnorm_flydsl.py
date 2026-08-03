@@ -5,14 +5,16 @@
 The CuTe backend's benchmark is benchmarks/benchmark_rmsnorm.py; this is the
 same harness and shape ladder pointed at the FlyDSL backend.
 
-This perf-report sweep is for quick iteration. Use
-``benchmarks/repro_pr7_wide.py`` for the wide-row headline: it adds
-steady-state warmup, alternating provider order, raw samples, provenance, and
-an opening/closing bandwidth canary.
+The default perf-report sweep is for quick iteration. ``--controlled`` runs a
+single shape with steady-state warmup, alternating provider order, batched
+event timing, and an opening/closing bandwidth canary.
 """
 
 import argparse
+import gc
 import os
+import statistics
+import time
 
 os.environ.setdefault("TORCH_COMPILE_DYNAMIC", "0")
 
@@ -144,6 +146,193 @@ def _bwd_reference(x, w, dy, eps):
     return dx, dw
 
 
+def _percentile(values: list[float], quantile: float) -> float:
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * quantile
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    fraction = position - lower
+    return ordered[lower] * (1.0 - fraction) + ordered[upper] * fraction
+
+
+def _summarize_us(values: list[float]) -> dict[str, float]:
+    return {
+        "median": statistics.median(values),
+        "p10": _percentile(values, 0.1),
+        "p90": _percentile(values, 0.9),
+    }
+
+
+def _time_batch(call, items: list, calls: int, offset: int) -> float:
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    output = None
+    for index in range(calls):
+        output = call(items[(offset + index) % len(items)])
+    end.record()
+    end.synchronize()
+    if output is None:
+        raise AssertionError("timed batch executed no calls")
+    return start.elapsed_time(end) * 1000.0 / calls
+
+
+def _bandwidth_probe(probe_mib: int, sample_rounds: int) -> dict:
+    num_bytes = probe_mib * 1024**2
+    elements = num_bytes // 2
+    left = torch.empty(elements, device="cuda", dtype=torch.bfloat16).fill_(1)
+    right = torch.empty_like(left).fill_(2)
+    out = torch.empty_like(left)
+    probes = {
+        "copy": (lambda: out.copy_(left), 2 * num_bytes),
+        "two_read_one_write": (lambda: torch.add(left, right, out=out), 3 * num_bytes),
+        "write": (lambda: out.zero_(), num_bytes),
+    }
+    results = {}
+    for name, (call, logical_bytes) in probes.items():
+        for _ in range(3):
+            call()
+        torch.cuda.synchronize()
+        samples = []
+        for _ in range(sample_rounds):
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            for _ in range(8):
+                call()
+            end.record()
+            end.synchronize()
+            samples.append(start.elapsed_time(end) * 1000.0 / 8)
+        median_us = statistics.median(samples)
+        results[name] = logical_bytes / (median_us * 1e-6) / 1e9
+    best = max(results, key=results.get)
+    return {"best_probe": best, "gbps": results[best], "probes": results}
+
+
+def _settle(calls: dict, items: list, seconds: float) -> int:
+    deadline = time.monotonic() + seconds
+    count = 0
+    names = list(calls)
+    while time.monotonic() < deadline:
+        for name in names if count % 2 == 0 else reversed(names):
+            calls[name](items[count % len(items)])
+            count += 1
+        if count % 16 == 0:
+            torch.cuda.synchronize()
+    torch.cuda.synchronize()
+    return count
+
+
+def run_controlled(
+    M: int,
+    N: int,
+    *,
+    backward: bool,
+    dtype_name: str,
+    weight_mode: str,
+    rounds: int,
+    calls_per_sample: int,
+    rotation_buffers: int,
+    settle_seconds: float,
+    probe_mib: int,
+    probe_samples: int,
+) -> dict:
+    """Run one correctness-gated, order-balanced steady-state comparison."""
+    if torch.cuda.device_count() != 1:
+        raise RuntimeError("isolate exactly one GPU with HIP_VISIBLE_DEVICES")
+    properties = torch.cuda.get_device_properties(0)
+    arch = properties.gcnArchName.split(":", 1)[0]
+    if arch != "gfx950":
+        raise RuntimeError(f"expected gfx950, found {arch}")
+
+    dtype = DTYPE_MAP[dtype_name]
+    param_dtype = _weight_dtype(dtype_name, weight_mode)
+    inputs = [
+        (torch.randn((M, N), device="cuda", dtype=dtype) * 0.5).requires_grad_(backward)
+        for _ in range(rotation_buffers)
+    ]
+    weight = (1.0 + torch.randn(N, device="cuda", dtype=param_dtype) * 0.1).requires_grad_(backward)
+    compiled = _compiled_ref()
+    items = list(range(rotation_buffers))
+
+    if not backward:
+        calls = {
+            "flydsl": lambda index: rmsnorm(inputs[index], weight, eps=EPS),
+            "torch_compile": lambda index: compiled(inputs[index], weight, eps=EPS),
+        }
+        expected = (rmsnorm_ref(inputs[0], weight, EPS),)
+    else:
+        douts = [torch.randn_like(x) * 0.1 for x in inputs]
+        flydsl_outputs = [rmsnorm(x, weight, eps=EPS) for x in inputs]
+        torch_outputs = [compiled(x, weight, eps=EPS) for x in inputs]
+        calls = {
+            "flydsl": lambda index: torch.autograd.grad(
+                flydsl_outputs[index],
+                (inputs[index], weight),
+                douts[index],
+                retain_graph=True,
+            ),
+            "torch_compile": lambda index: torch.autograd.grad(
+                torch_outputs[index],
+                (inputs[index], weight),
+                douts[index],
+                retain_graph=True,
+            ),
+        }
+        expected = _bwd_reference(inputs[0].detach(), weight.detach(), douts[0], EPS)
+
+    for name, call in calls.items():
+        output = call(items[0])
+        actual = output if isinstance(output, tuple) else (output,)
+        _gate("bwd" if backward else "fwd", dtype_name, actual, expected)
+        print(f"PASS correctness {name}", flush=True)
+    del output, expected
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    settled_calls = _settle(calls, items, settle_seconds)
+    opening = _bandwidth_probe(probe_mib, probe_samples)
+    torch.cuda.empty_cache()
+
+    samples = {name: [] for name in calls}
+    names = list(calls)
+    for round_index in range(rounds):
+        order = names if round_index % 2 == 0 else list(reversed(names))
+        for provider in order:
+            samples[provider].append(
+                _time_batch(
+                    calls[provider],
+                    items,
+                    calls_per_sample,
+                    round_index * calls_per_sample,
+                )
+            )
+
+    closing = _bandwidth_probe(probe_mib, probe_samples)
+    summaries = {name: _summarize_us(values) for name, values in samples.items()}
+    speedup = summaries["torch_compile"]["median"] / summaries["flydsl"]["median"]
+    canary = closing["gbps"] / opening["gbps"]
+    quiet = 0.95 <= canary <= 1.05
+    op = "bwd" if backward else "fwd"
+    print(f"controlled {op} M={M} N={N} {dtype_name}/{param_dtype}:")
+    for name, summary in summaries.items():
+        print(
+            f"  {name:13s} median={summary['median']:.3f}us "
+            f"p10={summary['p10']:.3f}us p90={summary['p90']:.3f}us"
+        )
+    print(f"  torch/FlyDSL={speedup:.3f}x after {settled_calls} settling calls")
+    print(f"  BW {opening['gbps']:.1f}->{closing['gbps']:.1f} GB/s ({canary:.3f}x, quiet={quiet})")
+    if not quiet:
+        raise RuntimeError("bandwidth contention canary moved outside 0.95-1.05")
+    return {
+        "operation": op,
+        "flydsl_us": summaries["flydsl"]["median"],
+        "torch_compile_us": summaries["torch_compile"]["median"],
+        "torch_over_flydsl": speedup,
+        "contention_canary": canary,
+    }
+
+
 def make_benchmark(op: str, dtype_name: str, weight_mode: str, features: str, x_vals=None):
     line_vals, line_names = zip(*_providers())
     return Benchmark(
@@ -238,12 +427,59 @@ def main():
     parser.add_argument("--M", type=int, default=None, help="Bench a single M (requires --N)")
     parser.add_argument("--N", type=int, default=None, help="Bench a single N (requires --M)")
     parser.add_argument("--save_path", default=None)
+    parser.add_argument(
+        "--controlled",
+        action="store_true",
+        help="Run one steady-state, order-balanced comparison instead of perf_report",
+    )
+    parser.add_argument("--rounds", type=int, default=12)
+    parser.add_argument("--calls_per_sample", type=int, default=None)
+    parser.add_argument("--rotation_buffers", type=int, default=2)
+    parser.add_argument("--settle_seconds", type=float, default=3.0)
+    parser.add_argument("--probe_mib", type=int, default=512)
+    parser.add_argument("--probe_samples", type=int, default=20)
     args = parser.parse_args()
 
     if (args.M is None) != (args.N is None):
         parser.error("--M and --N must be given together")
     if args.backward and args.features != "plain":
         parser.error("--features fused is forward only")
+    if args.controlled:
+        if args.features != "plain":
+            parser.error("--controlled supports only --features plain")
+        positive = {
+            "--rounds": args.rounds,
+            "--rotation_buffers": args.rotation_buffers,
+            "--settle_seconds": args.settle_seconds,
+            "--probe_mib": args.probe_mib,
+            "--probe_samples": args.probe_samples,
+        }
+        for name, value in positive.items():
+            if value <= 0:
+                parser.error(f"{name} must be positive")
+        M, N = (8192, 262144) if args.M is None else (args.M, args.N)
+        calls_per_sample = (
+            args.calls_per_sample
+            if args.calls_per_sample is not None
+            else (2 if args.backward else 4)
+        )
+        if calls_per_sample <= 0:
+            parser.error("--calls_per_sample must be positive")
+        torch.manual_seed(0)
+        run_controlled(
+            M,
+            N,
+            backward=args.backward,
+            dtype_name=args.dtype,
+            weight_mode=args.weight_dtype,
+            rounds=args.rounds,
+            calls_per_sample=calls_per_sample,
+            rotation_buffers=args.rotation_buffers,
+            settle_seconds=args.settle_seconds,
+            probe_mib=args.probe_mib,
+            probe_samples=args.probe_samples,
+        )
+        return
     x_vals = [(args.M, args.N)] if args.M is not None else None
 
     torch.manual_seed(0)

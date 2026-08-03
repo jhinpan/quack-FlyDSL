@@ -824,10 +824,18 @@ for FlyDSL/torch.compile at `8192 x 262144`, but it recorded neither raw
 samples, provider-order control, a steady-state warmup, nor a bandwidth
 contention canary. The forward speedup does not survive a controlled rerun.
 
-`benchmarks/repro_pr7_wide.py` alternates provider order, settles clocks for
-three seconds, rotates two 4 GiB inputs, correctness-gates each provider, and
-measures 512 MiB bandwidth probes before and after. With the exact same torch,
-HIP, FlyDSL, and Triton builds on two MI355X nodes:
+`benchmarks/benchmark_rmsnorm_flydsl.py --controlled` correctness-gates each
+provider, settles clocks for three seconds, alternates provider order, rotates
+two 4 GiB inputs, and measures 512 MiB bandwidth probes before and after:
+
+```bash
+PYTHONPATH=$PWD HIP_VISIBLE_DEVICES=0 python benchmarks/benchmark_rmsnorm_flydsl.py \
+  --controlled --M 8192 --N 262144 --dtype bfloat16 --weight_dtype float32
+PYTHONPATH=$PWD HIP_VISIBLE_DEVICES=0 python benchmarks/benchmark_rmsnorm_flydsl.py \
+  --controlled --backward --M 8192 --N 262144 --dtype bfloat16 --weight_dtype float32
+```
+
+The same torch, HIP, FlyDSL, and Triton builds on two MI355X nodes produced:
 
 | node | op | FlyDSL | torch.compile | torch / FlyDSL | BW canary |
 | --- | --- | ---: | ---: | ---: | ---: |
@@ -836,18 +844,13 @@ HIP, FlyDSL, and Triton builds on two MI355X nodes:
 | `mia1-p02-g23` | bwd | 3.957 ms | 5.206 ms | 1.316x | 0.998 |
 | `smci355-ccs-aus-n08-09` | bwd | 4.162 ms | 5.409 ms | 1.299x | 1.005 |
 
-The original PR7 commit and the proposed PR5 integration are indistinguishable
-on the remote node: forward is 2.575/2.431 ms at `4413997` and
-2.574-2.578/2.426-2.429 ms after integration. The nodes are healthy as well:
-their best opening/closing bandwidth probes are 6.80/6.75 TB/s and
-6.47/6.50 TB/s with under 0.7% drift,
-and the remote node had no KFD processes on any GPU.
-
-So the reproducible conclusion is narrower: backward is about 1.30x faster,
-while forward is 2.3%-5.9% slower than torch.compile at the target cell. The
-logical GB/s remains provider-independent rather than physical traffic because
-the wide FlyDSL forward deliberately performs an extra streaming read. Raw
-results, exact commands, and provenance are in `AI/pr7_wide_repro/`.
+Both nodes were healthy: their best bandwidth probes reached 6.47-6.80 TB/s,
+all canaries stayed within 0.7% of one, and the fully idle remote node had no
+KFD processes. The reproducible conclusion is therefore narrower: backward is
+about 1.30x faster, while forward is 2.3%-5.9% slower than torch.compile at the
+target cell. Logical GB/s remains provider-independent rather than physical
+traffic because the wide FlyDSL forward deliberately performs an extra
+streaming read.
 
 ## Where this backend stands against the cutedsl one
 
