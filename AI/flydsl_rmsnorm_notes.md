@@ -831,20 +831,20 @@ HIP, FlyDSL, and Triton builds on two MI355X nodes:
 
 | node | op | FlyDSL | torch.compile | torch / FlyDSL | BW canary |
 | --- | --- | ---: | ---: | ---: | ---: |
-| `mia1-p02-g23` | fwd | 2.448 ms | 2.395 ms | 0.978x | 0.997 |
-| `smci355-ccs-aus-n08-09` | fwd | 2.577 ms | 2.427 ms | 0.942x | 0.996 |
-| `mia1-p02-g23` | bwd | 3.929 ms | 5.180 ms | 1.318x | 0.999 |
-| `smci355-ccs-aus-n08-09` | bwd | 4.160 ms | 5.408 ms | 1.300x | 0.994 |
+| `mia1-p02-g23` | fwd | 2.448 ms | 2.392 ms | 0.977x | 0.993 |
+| `smci355-ccs-aus-n08-09` | fwd | 2.576 ms | 2.425 ms | 0.941x | 1.004 |
+| `mia1-p02-g23` | bwd | 3.957 ms | 5.206 ms | 1.316x | 0.998 |
+| `smci355-ccs-aus-n08-09` | bwd | 4.162 ms | 5.409 ms | 1.299x | 1.005 |
 
 The original PR7 commit and the proposed PR5 integration are indistinguishable
 on the remote node: forward is 2.575/2.431 ms at `4413997` and
 2.574-2.578/2.426-2.429 ms after integration. The nodes are healthy as well:
-their best opening/closing bandwidth probes are 6.81/6.79 TB/s and
-6.54/6.51 TB/s with under 0.7% drift,
+their best opening/closing bandwidth probes are 6.80/6.75 TB/s and
+6.47/6.50 TB/s with under 0.7% drift,
 and the remote node had no KFD processes on any GPU.
 
 So the reproducible conclusion is narrower: backward is about 1.30x faster,
-while forward is 2.2%-5.8% slower than torch.compile at the target cell. The
+while forward is 2.3%-5.9% slower than torch.compile at the target cell. The
 logical GB/s remains provider-independent rather than physical traffic because
 the wide FlyDSL forward deliberately performs an extra streaming read. Raw
 results, exact commands, and provenance are in `AI/pr7_wide_repro/`.

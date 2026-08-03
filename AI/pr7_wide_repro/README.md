@@ -25,21 +25,21 @@ Both nodes used Python 3.10.12, torch
 
 | node | operation | FlyDSL | torch.compile | torch / FlyDSL | BW canary |
 | --- | --- | ---: | ---: | ---: | ---: |
-| `mia1-p02-g23` | forward | 2.448 ms | 2.395 ms | 0.978x | 0.997 |
-| `smci355-ccs-aus-n08-09` | forward | 2.577 ms | 2.427 ms | 0.942x | 0.996 |
-| `mia1-p02-g23` | backward | 3.929 ms | 5.180 ms | 1.318x | 0.999 |
-| `smci355-ccs-aus-n08-09` | backward | 4.160 ms | 5.408 ms | 1.300x | 0.994 |
+| `mia1-p02-g23` | forward | 2.448 ms | 2.392 ms | 0.977x | 0.993 |
+| `smci355-ccs-aus-n08-09` | forward | 2.576 ms | 2.425 ms | 0.941x | 1.004 |
+| `mia1-p02-g23` | backward | 3.957 ms | 5.206 ms | 1.316x | 0.998 |
+| `smci355-ccs-aus-n08-09` | backward | 4.162 ms | 5.409 ms | 1.299x | 1.005 |
 
 The original PR7 commit and the PR5 integration are indistinguishable on the
 remote node: forward measured 2.575/2.431 ms at `4413997` and 2.574/2.429 ms
 after integration.
 
 The nodes are healthy. Their opening/closing best bandwidth probes were
-6.81/6.79 TB/s and 6.54/6.51 TB/s respectively, with less than 0.7% drift.
+6.80/6.75 TB/s and 6.47/6.50 TB/s respectively, with less than 0.7% drift.
 The remote node had no KFD processes on any of its eight GPUs.
 
 The backward speedup reproduces. The claimed forward speedup does not:
-torch.compile is 2.2% to 5.8% faster under the controlled protocol. The old
+torch.compile is 2.3% to 5.9% faster under the controlled protocol. The old
 benchmark has no steady-state warmup, provider-order control, provenance, or
 contention canary, so its 2.526/2.916 ms forward pair should not be retained as
 a merge claim.
