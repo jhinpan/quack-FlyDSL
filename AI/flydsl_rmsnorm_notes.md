@@ -482,25 +482,46 @@ Two corrections behind these numbers, both of which moved the conclusion:
    here. The cross-vendor comparison is not measurable on this host at all: the
    CuTe backend cannot be imported on ROCm.
 
-## `MAX_N = 8192` is a real cliff, but not where the constant says
+## Wide rows stream instead of spilling
 
-`rmsnorm_config.MAX_N` rejects any row wider than 8192. Monkeypatching it to
-`1 << 20` (probe only, nothing committed) shows it is not a correctness bound:
-the forward runs to N = 262144 and the backward to 65536 at bf16 accuracy
-indistinguishable from the shapes under the cap, with nothing spilling, wrapping
-or silently truncating.
+`MAX_N` is now 262144. The old 8192 cap matched the largest row whose whole
+per-thread fragment fit the 32-element register-cache budget, but the kernel
+continued caching after the cap was lifted. At N=262144 bf16 that meant 1024
+fp32 values per forward thread and 512 values plus persistent parameter
+accumulators per backward thread.
 
-There *is* a cliff worth keeping a cap for, and it sits between **49152 and
-57344**. Holding `m` at 4096 isolates width against the `two_read_one_write`
-ceiling: share of ceiling is flat at 83.1% for N=32768 and 77.5% for N=49152,
-then halves to 37.8% at 57344 and stays there, reading 39.6% at 65536 and 39.2%
-at 98304. The step is abrupt rather than a slope, and eager and graph-replay
-timing agree on all five widths to within 0.9 points.
+`rocprofv3` made the failure mode explicit:
 
-So the cap stays at 8192 as policy, not as the register bound its name suggests.
-cutedsl gates only at `N > 128k with dtype >= 32 bits` and escapes the register
-budget above 8k with `reload_from="smem"`, which this backend has no analogue
-for.
+| N / kernel | old VGPR | old scratch/thread | new VGPR | new scratch/thread |
+| --- | ---: | ---: | ---: | ---: |
+| 262144 forward | 256 | 3128 B | 12 | 0 B |
+| 262144 backward partial | 128 | 10828 B | 28 | 0 B |
+| 262144 backward correction | n/a | n/a | 32 | 0 B |
+| parameter reduce | 24 | 0 B | 24 | 0 B |
+
+Forward rows above the budget now compute `sum_sq` in a device loop and reload
+the activation for the epilogue. Backward first streams one row per block to
+write its scalar correction, then a column-tiled persistent kernel computes dx
+and bounded dweight/dbias partials; the existing deterministic parameter reduce
+is unchanged. There are no fp32 atomics.
+
+bf16 activation / fp32 weight results on the same gfx950, correctness-gated
+against the fp32 reference before timing:
+
+| M x N | FlyDSL fwd | compile fwd | FlyDSL bwd | compile bwd |
+| --- | ---: | ---: | ---: | ---: |
+| 32768 x 8192 | 0.2167 ms | 0.2027 ms | 0.3347 ms | 0.3650 ms |
+| 4096 x 49152 | 0.2409 ms | 0.2334 ms | 0.4470 ms | 0.5603 ms |
+| 4096 x 57344 | 0.3068 ms | 0.2635 ms | 0.5675 ms | 0.6531 ms |
+| 32768 x 65536 | 2.3643 ms | 2.1285 ms | 4.2279 ms | 5.3556 ms |
+| 16384 x 131072 | 2.5359 ms | 2.3543 ms | 4.1073 ms | 5.5240 ms |
+| 8192 x 262144 | 2.5715 ms | 2.6309 ms | 4.1247 ms | 5.7361 ms |
+
+The target cell improved from 11.29 to 2.57 ms forward and from 30.31 to
+4.12 ms backward. The benchmark reports provider-independent logical I/O
+bandwidth; wide kernels intentionally perform an extra streaming read, so that
+GB/s number is useful for provider comparison but is not their physical DRAM
+traffic.
 
 ## Feature parity with the cutedsl backend
 

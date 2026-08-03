@@ -11,7 +11,7 @@ from .rmsnorm_config import MAX_NUM_THREADS, RmsNormRowConfig, batch_short_rows
 from .rmsnorm_kernel import rmsnorm_direct
 
 
-RMSNORM_AUTOTUNE_SCHEMA_VERSION = 1
+RMSNORM_AUTOTUNE_SCHEMA_VERSION = 2
 _WAVES_PER_EU = (None, 1, 2, 4)
 
 
@@ -31,9 +31,10 @@ def _row_candidates(n: int, dtype_width: int) -> list[int]:
     for threads in sorted(candidates):
         if threads < 1 or threads > ceiling or threads & (threads - 1):
             continue
-        config = RmsNormRowConfig.with_num_threads(n, dtype_width, threads)
-        if config.elems_per_thread <= 32:
-            legal.append(threads)
+        # Wide candidates use the builder's gmem-reload path, so their total
+        # row assignment no longer has to fit in registers.
+        RmsNormRowConfig.with_num_threads(n, dtype_width, threads)
+        legal.append(threads)
     return legal
 
 

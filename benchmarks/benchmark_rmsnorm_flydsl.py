@@ -3,8 +3,7 @@
 """Benchmark rmsnorm fwd / bwd for the FlyDSL ROCm backend.
 
 The CuTe backend's benchmark is benchmarks/benchmark_rmsnorm.py; this is the
-same harness pointed at the FlyDSL backend, so the two read the same way.
-Shapes stop at N=8192 because that is the backend's MAX_N.
+same harness and shape ladder pointed at the FlyDSL backend.
 """
 
 import argparse
@@ -26,15 +25,17 @@ _functorch_config.donated_buffer = False
 
 
 MN_PAIRS = [
-    (1, 4096),
-    (256, 4096),
-    (512, 4096),
-    (4096, 3000),
-    (4096, 4096),
+    (32768, 256),
+    (32768, 512),
     (32768, 1024),
     (32768, 2048),
     (32768, 4096),
     (32768, 8192),
+    (32768, 16384),
+    (32768, 32768),
+    (32768, 65536),
+    (16384, 131072),
+    (8192, 262144),
 ]
 
 DTYPE_MAP = {

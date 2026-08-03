@@ -517,6 +517,9 @@ def _launch_rmsnorm_bwd(
     has_bias: bool,
     compute_dweight: bool,
     compute_dbias: bool,
+    compute_input_grad: bool,
+    store_dx: bool,
+    store_dresidual: bool,
     has_residual: bool,
     has_dresidual_out: bool,
     per_head: bool,
@@ -544,6 +547,12 @@ def _launch_rmsnorm_bwd(
         device=source.device,
         dtype=torch.float32,
     )
+    wide_bwd = rmsnorm_bwd_two_stage_config(n, source_dtype_str).reload_from == "gmem"
+    correction = (
+        torch.empty(m * num_heads, device=source.device, dtype=torch.float32)
+        if wide_bwd and compute_input_grad
+        else rstd
+    )
     with torch.cuda.device(source.device):
         key = (
             source.device.index,
@@ -559,6 +568,9 @@ def _launch_rmsnorm_bwd(
             has_bias,
             compute_dweight,
             compute_dbias,
+            compute_input_grad,
+            store_dx,
+            store_dresidual,
             has_residual,
             has_dresidual_out,
             per_head,
@@ -585,6 +597,9 @@ def _launch_rmsnorm_bwd(
                     has_bias=has_bias,
                     compute_dweight=compute_dweight,
                     compute_dbias=compute_dbias,
+                    compute_input_grad=compute_input_grad,
+                    store_dx=store_dx,
+                    store_dresidual=store_dresidual,
                     has_residual=has_residual,
                     has_dresidual_out=has_dresidual_out,
                     per_head=per_head,
@@ -599,6 +614,7 @@ def _launch_rmsnorm_bwd(
             dout,
             dresidual_out,
             rstd,
+            correction,
             dx,
             dresidual,
             dweight,
@@ -623,8 +639,9 @@ def _launch_rmsnorm_bwd(
         "Tensor rstd, Tensor(a5!) dx, Tensor(a6!) dresidual, "
         "Tensor(a7!) dweight, Tensor(a8!) dbias, float weight_offset, "
         "bool has_weight, bool has_bias, bool compute_dweight, "
-        "bool compute_dbias, bool has_residual, "
-        "bool has_dresidual_out, bool per_head, int num_heads) -> ()"
+        "bool compute_dbias, bool compute_input_grad, bool store_dx, "
+        "bool store_dresidual, bool has_residual, bool has_dresidual_out, "
+        "bool per_head, int num_heads) -> ()"
     ),
 )
 def _rmsnorm_flydsl_bwd_op(
@@ -642,6 +659,9 @@ def _rmsnorm_flydsl_bwd_op(
     has_bias: bool,
     compute_dweight: bool,
     compute_dbias: bool,
+    compute_input_grad: bool,
+    store_dx: bool,
+    store_dresidual: bool,
     has_residual: bool,
     has_dresidual_out: bool,
     per_head: bool,
@@ -662,6 +682,9 @@ def _rmsnorm_flydsl_bwd_op(
         has_bias=has_bias,
         compute_dweight=compute_dweight,
         compute_dbias=compute_dbias,
+        compute_input_grad=compute_input_grad,
+        store_dx=store_dx,
+        store_dresidual=store_dresidual,
         has_residual=has_residual,
         has_dresidual_out=has_dresidual_out,
         per_head=per_head,
@@ -759,10 +782,17 @@ class _RMSNormFunction(torch.autograd.Function):
         else:
             dresidual_out = source
 
-        dx = torch.empty_like(source, dtype=ctx.x_dtype)
+        store_dx = ctx.x_needs_grad
+        store_dresidual = ctx.residual_needs_grad
+        compute_input_grad = store_dx or store_dresidual
+        dx = (
+            torch.empty_like(source, dtype=ctx.x_dtype)
+            if store_dx
+            else torch.empty(0, device=source.device, dtype=ctx.x_dtype)
+        )
         dresidual = (
             torch.empty_like(source, dtype=ctx.residual_dtype)
-            if ctx.has_residual
+            if store_dresidual
             else torch.empty(0, device=source.device, dtype=ctx.residual_dtype)
         )
         parameter_shape = (ctx.num_heads, source.shape[-1]) if ctx.per_head else (source.shape[-1],)
@@ -797,6 +827,9 @@ class _RMSNormFunction(torch.autograd.Function):
             has_bias=ctx.has_bias,
             compute_dweight=ctx.weight_needs_grad,
             compute_dbias=ctx.bias_needs_grad,
+            compute_input_grad=compute_input_grad,
+            store_dx=store_dx,
+            store_dresidual=store_dresidual,
             has_residual=ctx.has_residual,
             has_dresidual_out=has_dresidual_out,
             per_head=ctx.per_head,
