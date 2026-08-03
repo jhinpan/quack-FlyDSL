@@ -1,13 +1,12 @@
 # Copyright (c) 2026, Tri Dao.
 
 import os
-from pathlib import Path
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -34,6 +33,7 @@ def _run_python(
         capture_output=True,
         text=True,
         timeout=30,
+        check=False,
     )
     if check:
         assert result.returncode == 0, result.stdout + result.stderr
@@ -80,6 +80,34 @@ def test_real_rocm_import_skips_cuda_bootstrap_without_initializing_context():
         assert quack.__version__
         assert not any(name == "cutlass" or name.startswith("cutlass.") for name in sys.modules)
         assert not torch.cuda.is_initialized()
+        """
+    )
+
+
+def test_flydsl_rmsnorm_import_does_not_load_benchmark_extras():
+    if not _is_rocm_build():
+        pytest.skip("requires a real ROCm PyTorch build")
+
+    _run_python(
+        """
+        import sys
+
+        import torch
+
+        assert torch.version.hip is not None
+        assert "pandas" not in sys.modules
+        assert "tyro" not in sys.modules
+        assert "triton" not in sys.modules
+
+        import quack.rmsnorm_flydsl
+
+        assert callable(quack.rmsnorm_flydsl.rmsnorm)
+        assert "pandas" not in sys.modules
+        assert "tyro" not in sys.modules
+        assert "triton" not in sys.modules
+        assert not any(
+            name == "cutlass" or name.startswith("cutlass.") for name in sys.modules
+        )
         """
     )
 
@@ -372,6 +400,7 @@ def test_pytest_plugin_collects_on_rocm_without_cutlass(tmp_path):
         capture_output=True,
         text=True,
         timeout=30,
+        check=False,
     )
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
@@ -425,6 +454,7 @@ def test_pytest_plugin_preserves_non_compile_outcomes_without_cutlass(tmp_path):
         capture_output=True,
         text=True,
         timeout=30,
+        check=False,
     )
     output = result.stdout + result.stderr
     assert result.returncode == 1, output

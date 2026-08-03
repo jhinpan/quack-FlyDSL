@@ -10,15 +10,15 @@ from pathlib import Path
 import pytest
 import torch
 
-
 if torch.version.hip is None:
     pytest.skip("FlyDSL RMSNorm requires a ROCm PyTorch build", allow_module_level=True)
 
 pytest.importorskip("flydsl")
 
-import quack.rmsnorm_flydsl as rmsnorm_flydsl_impl  # noqa: E402
-from quack.flydsl.rmsnorm_config import next_power_of_two  # noqa: E402
-from quack.rmsnorm_flydsl import rmsnorm, rmsnorm_autotuned  # noqa: E402
+import quack.flydsl.rmsnorm_autotune as rmsnorm_autotune_impl
+import quack.rmsnorm_flydsl as rmsnorm_flydsl_impl
+from quack.flydsl.rmsnorm_config import next_power_of_two
+from quack.rmsnorm_flydsl import rmsnorm, rmsnorm_autotuned
 
 
 def _reference(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
@@ -797,12 +797,16 @@ class _AtenOpRecorder(torch.utils._python_dispatch.TorchDispatchMode):
 
 def _clear_caches():
     rmsnorm_flydsl_impl._FWD_CACHE.clear()
-    rmsnorm_flydsl_impl._FWD_TUNED_CACHE.clear()
     rmsnorm_flydsl_impl._BWD_CACHE.clear()
     rmsnorm_flydsl_impl._BWD_CU_COUNT_CACHE.clear()
     rmsnorm_flydsl_impl._DEVICE_ARCH_CACHE.clear()
+    rmsnorm_flydsl_impl._AUTOTUNE_ARCH_CACHE.clear()
     rmsnorm_flydsl_impl._rmsnorm_fwd_tuner.cache.clear()
     rmsnorm_flydsl_impl._rmsnorm_fwd_tuner._artifact_cache.clear()
+    rmsnorm_flydsl_impl._rmsnorm_fwd_tuner._compiled_cache.clear()
+    rmsnorm_flydsl_impl._rmsnorm_fwd_tuner._compiled_lookup.clear()
+    rmsnorm_flydsl_impl._rmsnorm_fwd_tuner._device_jit_functions.clear()
+    rmsnorm_flydsl_impl._rmsnorm_fwd_tuner._hot_cache.clear()
 
 
 def test_custom_ops_are_unique_mutation_only_and_fake_safe():
@@ -999,6 +1003,171 @@ def test_forward_cache_identity_is_shape_and_dtype_only():
     assert len(rmsnorm_flydsl_impl._FWD_CACHE) == 3
 
 
+def _direct_autotune_call_args(
+    *,
+    rows=8,
+    n=512,
+    has_weight=True,
+    has_bias=False,
+    has_residual=False,
+    store_residual=False,
+    store_rstd=False,
+):
+    x = torch.randn((rows, n), device="cuda", dtype=torch.bfloat16)
+    weight = (
+        torch.randn(n, device=x.device, dtype=torch.float32)
+        if has_weight
+        else torch.empty(0, device=x.device, dtype=torch.bfloat16)
+    )
+    bias = (
+        torch.randn(n, device=x.device, dtype=torch.float32)
+        if has_bias
+        else torch.empty(0, device=x.device, dtype=torch.bfloat16)
+    )
+    residual = torch.randn_like(x) if has_residual else x
+    output = torch.empty_like(x)
+    residual_out = (
+        torch.empty_like(x)
+        if store_residual
+        else torch.empty(0, device=x.device, dtype=torch.bfloat16)
+    )
+    rstd = (
+        torch.empty(rows, device=x.device, dtype=torch.float32)
+        if store_rstd
+        else torch.empty(0, device=x.device, dtype=torch.float32)
+    )
+    args = (x, weight, bias, residual, output, residual_out, rstd, rows, 1e-6, 0.0)
+    kwargs = {
+        "n": n,
+        "has_weight": has_weight,
+        "has_bias": has_bias,
+        "has_residual": has_residual,
+        "store_residual": store_residual,
+        "store_rstd": store_rstd,
+        "per_head": False,
+        "num_heads": 1,
+    }
+    return args, kwargs
+
+
+def test_autotune_schema_three_and_candidates_retain_the_heuristic():
+    assert rmsnorm_autotune_impl.RMSNORM_AUTOTUNE_SCHEMA_VERSION == 3
+    for n, dtype_name in ((128, "bf16"), (512, "bf16"), (2048, "bf16"), (4096, "f32")):
+        default = rmsnorm_autotune_impl.rmsnorm_default_config(
+            n=n,
+            input_dtype_str=dtype_name,
+        )
+        candidates = rmsnorm_autotune_impl.rmsnorm_search_configs(
+            n=n,
+            input_dtype_str=dtype_name,
+        )
+        assert any(
+            config.kwargs["threads_per_row"] == default.kwargs["threads_per_row"]
+            and config.waves_per_eu is None
+            for config in candidates
+        )
+
+
+def test_l2_rotation_clones_preserve_metadata_aliases_and_distinct_addresses():
+    base = torch.randn((8, 520), device="cuda", dtype=torch.bfloat16)
+    x = base[:, :512]
+    weight = torch.randn(512, device=x.device, dtype=torch.float32)
+    absent = torch.empty(0, device=x.device, dtype=torch.bfloat16)
+    output = torch.empty_strided(x.shape, x.stride(), device=x.device, dtype=x.dtype)
+    rstd = torch.empty(0, device=x.device, dtype=torch.float32)
+    args = (x, weight, absent, x, output, absent, rstd, 8, 1e-6, 0.0)
+    kwargs = {"has_weight": True, "has_residual": False}
+
+    first_args, first_kwargs = rmsnorm_autotune_impl._clone_tensor_arguments(args, kwargs)
+    second_args, _ = rmsnorm_autotune_impl._clone_tensor_arguments(args, kwargs)
+
+    assert first_args[0] is first_args[3], "the absent-residual alias to x was broken"
+    assert first_args[2] is first_args[5], "shared empty placeholders were split"
+    for original, clone in zip(args[:7], first_args[:7]):
+        assert clone.shape == original.shape
+        assert clone.dtype == original.dtype
+        assert clone.stride() == original.stride()
+        assert clone.device == original.device
+    assert first_kwargs == kwargs
+    for index in (0, 1, 4):
+        pointers = {
+            args[index].data_ptr(),
+            first_args[index].data_ptr(),
+            second_args[index].data_ptr(),
+        }
+        assert len(pointers) == 3
+    assert first_args[2].numel() == first_args[5].numel() == 0
+
+
+def test_l2_rotation_working_set_exceeds_cache_and_is_device_local(monkeypatch):
+    args, kwargs = _direct_autotune_call_args()
+    monkeypatch.setattr(
+        rmsnorm_autotune_impl,
+        "_cache_authority",
+        lambda device: rmsnorm_autotune_impl._CacheAuthority(4096, "test"),
+    )
+    plan = rmsnorm_autotune_impl._build_l2_rotation_plan(
+        args,
+        kwargs,
+        n_timed_calls=8,
+    )
+
+    assert len(plan.arg_sets) >= 2
+    assert plan.working_set_bytes >= 3 * plan.cache_bytes
+    assert plan.read_bytes_per_set == (
+        args[0].numel() * args[0].element_size() + args[1].numel() * args[1].element_size()
+    )
+    assert plan.cache_source == "test"
+    assert plan.bench_stream.device == args[0].device
+    for arg_index in (0, 1, 4):
+        pointers = [arg_set[arg_index].data_ptr() for arg_set in plan.arg_sets]
+        assert len(pointers) == len(set(pointers))
+    assert all(arg_set[3] is arg_set[0] for arg_set in plan.arg_sets)
+
+
+def test_clone_oom_fallback_keeps_multiple_addresses_and_per_call_eviction(monkeypatch):
+    args, kwargs = _direct_autotune_call_args(rows=1, n=64)
+    monkeypatch.setattr(
+        rmsnorm_autotune_impl,
+        "_cache_authority",
+        lambda device: rmsnorm_autotune_impl._CacheAuthority(4096, "test"),
+    )
+    real_clone = rmsnorm_autotune_impl._clone_tensor_arguments
+    attempts = 0
+
+    def fail_during_full_rotation(args, kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            raise torch.OutOfMemoryError("synthetic clone OOM")
+        return real_clone(args, kwargs)
+
+    monkeypatch.setattr(
+        rmsnorm_autotune_impl,
+        "_clone_tensor_arguments",
+        fail_during_full_rotation,
+    )
+    plan = rmsnorm_autotune_impl._build_l2_rotation_plan(
+        args,
+        kwargs,
+        n_timed_calls=8,
+    )
+
+    assert len(plan.arg_sets) == 2
+    assert plan.arg_sets[0][0].data_ptr() != plan.arg_sets[1][0].data_ptr()
+    assert plan.working_set_bytes > plan.cache_bytes
+    assert plan.per_call_eviction
+    assert "clone allocation was reduced" in plan.fallback_reason
+
+
+def test_gfx950_cache_authority_uses_the_triton_benchmark_capacity():
+    authority = rmsnorm_autotune_impl._cache_authority(torch.device("cuda", 0))
+    assert authority.cache_bytes >= 256 * 1024**2
+    assert "Triton ROCm benchmark eviction buffer" in authority.source
+    assert authority.seed_buffer is not None
+    assert authority.seed_buffer.numel() * authority.seed_buffer.element_size() >= 256 * 1024**2
+
+
 def test_default_and_autotuned_forward_use_independent_caches(tmp_path, monkeypatch):
     _clear_caches()
     tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
@@ -1017,12 +1186,9 @@ def test_default_and_autotuned_forward_use_independent_caches(tmp_path, monkeypa
     assert not tuner.cache  # The default heuristic does not pretend to be a searched winner.
 
 
-def test_a_warm_tuned_call_does_not_re_enter_the_tuner(monkeypatch):
-    # The tuner re-resolves every argument into a JIT cache key on each call,
-    # which cost more host time than the kernel itself: a warm tuned call used
-    # to be 7x slower than the untuned one it is meant to improve on. The
-    # winner is a row width, so once it is known the launch is an ordinary
-    # cached build and the tuner has nothing left to decide.
+def test_a_warm_tuned_call_reuses_the_compiled_function(monkeypatch):
+    # A process-hot call still enters the RMSNorm tuner object, but it must skip
+    # config selection and launch its cached CompiledFunction directly.
     _clear_caches()
     tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
     entries = 0
@@ -1044,8 +1210,9 @@ def test_a_warm_tuned_call_does_not_re_enter_the_tuner(monkeypatch):
 
     for _ in range(5):
         _assert_close(rmsnorm_autotuned(x, weight), expected)
-    assert entries == 1, f"a warm tuned call re-entered the tuner {entries - 1} more time(s)"
-    assert len(rmsnorm_flydsl_impl._FWD_TUNED_CACHE) == 1
+    assert entries == 1, f"a warm call selected a config {entries - 1} more time(s)"
+    assert len(tuner._hot_cache) == 1
+    assert len(tuner._compiled_cache) == 1
 
 
 def test_autotuned_forward_searches_all_candidates_then_hits_cache(tmp_path, monkeypatch):
@@ -1098,6 +1265,218 @@ def test_autotuned_forward_searches_all_candidates_then_hits_cache(tmp_path, mon
     assert completed == candidate_count
 
 
+def test_candidates_and_winner_cache_hits_use_compiled_functions(tmp_path, monkeypatch):
+    """Candidate repetitions and a warm winner must never re-enter JitFunction."""
+    from flydsl.autotune import Config
+
+    _clear_caches()
+    tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
+    monkeypatch.setattr(tuner, "_cache_file", tmp_path / "winner.json")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CONFIG_DIR", str(tmp_path / "artifacts"))
+    config = Config(threads_per_row=128, waves_per_eu=2)
+    monkeypatch.setattr(tuner, "configs", [config])
+
+    jit_dispatches = 0
+    benchmark_launches = 0
+    jit_type = type(tuner.fn)
+    real_jit_call = jit_type.__call__
+
+    def counted_jit_call(self, *args, **kwargs):
+        nonlocal jit_dispatches
+        if self.func.__name__ == "rmsnorm_direct":
+            jit_dispatches += 1
+        return real_jit_call(self, *args, **kwargs)
+
+    def repeat_fast_callable(call, warmup, rep):
+        nonlocal benchmark_launches
+        dispatches_before = jit_dispatches
+        for _ in range(4):
+            call()
+            benchmark_launches += 1
+        torch.cuda.synchronize()
+        assert jit_dispatches == dispatches_before, "candidate timing re-entered JitFunction"
+        return 1.0
+
+    monkeypatch.setattr(jit_type, "__call__", counted_jit_call)
+    monkeypatch.setattr(tuner, "_do_bench", repeat_fast_callable)
+    original_hints = dict(tuner.fn.compile_hints)
+    x = torch.randn((16, 512), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(512, device="cuda", dtype=torch.float32)
+
+    first = rmsnorm_autotuned(x, weight)
+    _assert_close(first, _reference(x, weight, 1e-6))
+    assert benchmark_launches == 4
+    assert jit_dispatches == 1, "one untimed flyc.compile call is expected per candidate"
+    assert len(tuner.cache) == 1
+    assert len(tuner._compiled_cache) == 1
+    compiled = next(iter(tuner._compiled_cache.values()))
+    assert tuner.fn.compile_hints == original_hints, "Config hints leaked onto the shared JIT"
+
+    monkeypatch.delenv("FLYDSL_AUTOTUNE")
+    monkeypatch.setattr(
+        tuner,
+        "default",
+        lambda *args, **kwargs: pytest.fail("warm winner unexpectedly used default config"),
+    )
+
+    def forbid_jit_dispatch(self, *args, **kwargs):
+        if self.func.__name__ == "rmsnorm_direct":
+            pytest.fail("warm winner cache hit re-entered JitFunction")
+        return real_jit_call(self, *args, **kwargs)
+
+    monkeypatch.setattr(jit_type, "__call__", forbid_jit_dispatch)
+    second = rmsnorm_autotuned(x, weight, eps=0.5, weight_offset=1.0)
+    _assert_close(second, _reference(x, weight + 1.0, 0.5))
+    assert benchmark_launches == 4
+    assert len(tuner._compiled_cache) == 1
+    assert next(iter(tuner._compiled_cache.values())) is compiled
+
+
+def test_production_cold_candidate_path_gates_every_clone_and_stays_on_fast_callable(
+    tmp_path,
+    monkeypatch,
+):
+    """The real graph objective, not only an injected bench, must bypass JitFunction."""
+    from flydsl.autotune import Config
+
+    _clear_caches()
+    tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
+    monkeypatch.setattr(tuner, "_cache_file", tmp_path / "winner.json")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CONFIG_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setattr(tuner, "configs", [Config(threads_per_row=128)])
+    monkeypatch.setattr(tuner, "warmup", 2.0)
+    monkeypatch.setattr(tuner, "rep", 1)
+    monkeypatch.setattr(
+        rmsnorm_autotune_impl,
+        "_cache_authority",
+        lambda device: rmsnorm_autotune_impl._CacheAuthority(64 * 1024, "test"),
+    )
+
+    jit_dispatches = 0
+    jit_type = type(tuner.fn)
+    real_jit_call = jit_type.__call__
+
+    def counted_jit_call(self, *args, **kwargs):
+        nonlocal jit_dispatches
+        if self.func.__name__ == "rmsnorm_direct":
+            jit_dispatches += 1
+        return real_jit_call(self, *args, **kwargs)
+
+    gated = []
+    real_gate = rmsnorm_autotune_impl._candidate_correctness_gate
+
+    def checked_gate(compiled, positional_sets, plan):
+        gated.append(plan)
+        assert len(positional_sets) == len(plan.arg_sets) >= 2
+        assert plan.working_set_bytes >= 3 * plan.cache_bytes
+        return real_gate(compiled, positional_sets, plan)
+
+    monkeypatch.setattr(jit_type, "__call__", counted_jit_call)
+    monkeypatch.setattr(rmsnorm_autotune_impl, "_candidate_correctness_gate", checked_gate)
+
+    x = torch.randn((8, 512), device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    weight = torch.randn(512, device=x.device, dtype=torch.float32)
+    bias = torch.randn(512, device=x.device, dtype=torch.float32)
+    residual = torch.randn_like(x)
+    stream = torch.cuda.Stream(device=x.device)
+    stream.wait_stream(torch.cuda.current_stream(x.device))
+    with torch.cuda.stream(stream):
+        actual, residual_out = rmsnorm_autotuned(
+            x,
+            weight,
+            bias=bias,
+            residual=residual,
+            prenorm=True,
+        )
+    stream.synchronize()
+
+    expected, expected_residual = _full_reference(x, weight, bias, residual)
+    _assert_close(actual, expected)
+    _assert_close(residual_out, expected_residual)
+    assert jit_dispatches == 1, "only the untimed flyc.compile dispatch is permitted"
+    assert len(gated) == 1
+    assert gated[0].bench_stream.device == x.device
+
+
+def test_graph_failure_fallback_remains_l2_cold_and_multi_address(tmp_path, monkeypatch):
+    from flydsl.autotune import Config
+
+    _clear_caches()
+    tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
+    monkeypatch.setattr(tuner, "_cache_file", tmp_path / "winner.json")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CONFIG_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setattr(tuner, "configs", [Config(threads_per_row=128)])
+    monkeypatch.setattr(tuner, "warmup", 0.1)
+    monkeypatch.setattr(tuner, "rep", 1)
+    monkeypatch.setattr(
+        rmsnorm_autotune_impl,
+        "_cache_authority",
+        lambda device: rmsnorm_autotune_impl._CacheAuthority(64 * 1024, "test"),
+    )
+
+    def graph_failure():
+        raise RuntimeError("graph unavailable in test")
+
+    observed = []
+    real_fallback = rmsnorm_autotune_impl._event_l2_rotate_bench
+
+    def checked_fallback(compiled, positional_sets, plan, **kwargs):
+        pointers = [positional[0].data_ptr() for positional in positional_sets]
+        assert len(pointers) == len(set(pointers)) >= 2
+        assert plan.working_set_bytes > plan.cache_bytes
+        observed.append((len(pointers), plan.working_set_bytes))
+        return real_fallback(compiled, positional_sets, plan, **kwargs)
+
+    monkeypatch.setattr(torch.cuda, "CUDAGraph", graph_failure)
+    monkeypatch.setattr(rmsnorm_autotune_impl, "_event_l2_rotate_bench", checked_fallback)
+
+    x = torch.randn((8, 512), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(512, device=x.device, dtype=torch.float32)
+    with pytest.warns(RuntimeWarning, match="event-timed L2-cold multi-address fallback"):
+        actual = rmsnorm_autotuned(x, weight)
+
+    _assert_close(actual, _reference(x, weight, 1e-6))
+    assert observed
+
+
+def test_fast_callable_cache_partitions_config_and_tensor_abi(tmp_path, monkeypatch):
+    """A Config or memref ABI change must produce a distinct fast callable."""
+    from flydsl.autotune import Config
+
+    _clear_caches()
+    tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
+    monkeypatch.setattr(tuner, "_cache_file", tmp_path / "winner.json")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CONFIG_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setattr(
+        tuner,
+        "_do_bench",
+        lambda call, warmup, rep: (call(), torch.cuda.synchronize(), 1.0)[-1],
+    )
+    x = torch.randn((8, 512), device="cuda", dtype=torch.bfloat16)
+    weight_f32 = torch.randn(512, device="cuda", dtype=torch.float32)
+
+    monkeypatch.setattr(tuner, "configs", [Config(threads_per_row=64)])
+    out_64 = rmsnorm_autotuned(x, weight_f32)
+    _assert_close(out_64, _reference(x, weight_f32, 1e-6))
+    callable_64 = next(iter(tuner._compiled_cache.values()))
+
+    monkeypatch.setattr(tuner, "configs", [Config(threads_per_row=128)])
+    out_128 = rmsnorm_autotuned(x, weight_f32)
+    _assert_close(out_128, _reference(x, weight_f32, 1e-6))
+    assert len(tuner._compiled_cache) == 2
+    assert callable_64 not in tuple(tuner._compiled_cache.values())[1:]
+
+    weight_bf16 = weight_f32.to(torch.bfloat16)
+    out_bf16 = rmsnorm_autotuned(x, weight_bf16)
+    _assert_close(out_bf16, _reference(x, weight_bf16, 1e-6))
+    assert len(tuner._compiled_cache) == 3
+    assert len({id(compiled) for compiled in tuner._compiled_cache.values()}) == 3
+
+
 def test_autotuned_feature_outputs_on_non_default_stream(tmp_path, monkeypatch):
     _clear_caches()
     tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
@@ -1139,6 +1518,22 @@ def test_autotuned_feature_outputs_on_non_default_stream(tmp_path, monkeypatch):
     expected, expected_residual = _full_reference(x, weight, bias, residual)
     _assert_close(actual, expected)
     _assert_close(residual_out, expected_residual)
+
+    # The second stream takes the process-hot callable path, where no Autotuner
+    # stream context remains; the raw runtime stream argument must still win.
+    second_stream = torch.cuda.Stream(device=x.device)
+    second_stream.wait_stream(torch.cuda.current_stream(x.device))
+    with torch.cuda.stream(second_stream):
+        hot_actual, hot_residual = rmsnorm_autotuned(
+            x,
+            weight,
+            bias=bias,
+            residual=residual,
+            prenorm=True,
+        )
+    second_stream.synchronize()
+    _assert_close(hot_actual, expected)
+    _assert_close(hot_residual, expected_residual)
     assert observed == [(True, True, True, True, stream.cuda_stream)]
 
 
@@ -1254,12 +1649,89 @@ def test_same_architecture_eight_device_caches_are_device_local():
     assert {key[0] for key in rmsnorm_flydsl_impl._BWD_CACHE} == set(range(8))
 
 
+def test_autotuned_fast_callables_are_device_local():
+    """Same-architecture devices must not share a loaded function pointer."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("requires two ROCm devices")
+    _clear_caches()
+    tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
+    outputs = []
+
+    for device_index in range(2):
+        device = torch.device("cuda", device_index)
+        with torch.cuda.device(device):
+            x = torch.randn((8, 512), device=device, dtype=torch.bfloat16)
+            weight = torch.randn(512, device=device, dtype=torch.float32)
+            out = rmsnorm_autotuned(x, weight)
+            torch.cuda.synchronize(device)
+            _assert_close(out, _reference(x, weight, 1e-6))
+            outputs.append(out)
+
+    assert len(tuner._compiled_cache) == 2
+    assert set(tuner._device_jit_functions) == {("cuda", 0), ("cuda", 1)}
+    by_device = {dict(key)["device"]: compiled for key, compiled in tuner._compiled_cache.items()}
+    assert by_device[("cuda", 0)] is not by_device[("cuda", 1)]
+    assert by_device[("cuda", 0)]._keepalive is not by_device[("cuda", 1)]._keepalive
+
+
+def test_autotuned_runtime_change_cannot_reuse_a_loaded_callable(monkeypatch):
+    """A context miss must reach FlyDSL's compile/runtime pairing check."""
+    _clear_caches()
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    monkeypatch.delenv("FLYDSL_RUNTIME_KIND", raising=False)
+    tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
+    x = torch.randn((2, 64), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(64, device=x.device, dtype=torch.float32)
+
+    actual = rmsnorm_autotuned(x, weight)
+    _assert_close(actual, _reference(x, weight, 1e-6))
+    assert len(tuner._compiled_cache) == 1
+
+    monkeypatch.setenv("FLYDSL_RUNTIME_KIND", "invalid-runtime")
+    with pytest.raises(RuntimeError, match="requires device runtime kind"):
+        rmsnorm_autotuned(x, weight)
+    assert len(tuner._compiled_cache) == 1
+
+
 def test_compile_target_must_match_the_device(monkeypatch):
     """FlyDSL's own target is the authority, not the ARCH environment."""
     _clear_caches()
     monkeypatch.setattr(rmsnorm_flydsl_impl, "_flydsl_compile_target", lambda: ("rocm", "gfx90a"))
     with pytest.raises(ValueError, match="mixed architectures"):
         rmsnorm_flydsl_impl._validate_arch(torch.device("cuda", 0))
+
+
+@pytest.mark.parametrize("env_name", ["FLYDSL_GPU_ARCH", "HSA_OVERRIDE_GFX_VERSION"])
+def test_runtime_helper_arch_must_match_the_device(monkeypatch, env_name):
+    _clear_caches()
+    monkeypatch.delenv("FLYDSL_GPU_ARCH", raising=False)
+    monkeypatch.delenv("HSA_OVERRIDE_GFX_VERSION", raising=False)
+    monkeypatch.setenv(env_name, "gfx90a")
+    monkeypatch.setattr(rmsnorm_flydsl_impl, "_flydsl_compile_target", lambda: ("rocm", "gfx950"))
+
+    with pytest.raises(ValueError, match="runtime helpers"):
+        rmsnorm_flydsl_impl._validate_arch(torch.device("cuda", 0))
+
+
+@pytest.mark.parametrize(
+    "env_name",
+    [
+        "FLYDSL_COMPILE_BACKEND",
+        "ARCH",
+        "FLYDSL_GPU_ARCH",
+        "HSA_OVERRIDE_GFX_VERSION",
+    ],
+)
+def test_autotuned_arch_cache_revalidates_target_environment(monkeypatch, env_name):
+    _clear_caches()
+    device = torch.device("cuda", 0)
+    monkeypatch.setattr(rmsnorm_flydsl_impl, "_flydsl_compile_target", lambda: ("rocm", "gfx950"))
+    assert rmsnorm_flydsl_impl._validated_autotune_arch(device) == "gfx950"
+
+    monkeypatch.setenv(env_name, "changed")
+    monkeypatch.setattr(rmsnorm_flydsl_impl, "_flydsl_compile_target", lambda: ("rocm", "gfx90a"))
+    with pytest.raises(ValueError, match="mixed architectures"):
+        rmsnorm_flydsl_impl._validated_autotune_arch(device)
 
 
 def test_non_rocm_compile_backend_is_rejected(monkeypatch):
@@ -1345,6 +1817,39 @@ def test_concurrent_first_calls_build_one_launcher():
 
     assert not errors
     assert len(rmsnorm_flydsl_impl._FWD_CACHE) == 1
+
+
+def test_concurrent_autotuned_first_calls_build_one_fast_callable(tmp_path, monkeypatch):
+    _clear_caches()
+    tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
+    monkeypatch.setattr(tuner, "_cache_file", tmp_path / "winner.json")
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    weight = torch.randn(512, device="cuda", dtype=torch.float32)
+    barrier = threading.Barrier(4)
+    errors = []
+    outputs = []
+
+    def call():
+        try:
+            x = torch.randn((8, 512), device="cuda", dtype=torch.bfloat16)
+            barrier.wait(timeout=60)
+            out = rmsnorm_autotuned(x, weight)
+            torch.cuda.synchronize()
+            _assert_close(out, _reference(x, weight, 1e-6))
+            outputs.append(out)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=call) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=120)
+
+    assert not errors
+    assert len(outputs) == len(threads)
+    assert len(tuner._compiled_cache) == 1
+    assert len(tuner._device_jit_functions) == 1
 
 
 def test_fullgraph_empty_m_autograd():
@@ -1746,7 +2251,7 @@ def test_our_copy_predicate_is_a_subset_of_upstreams():
     safe. The direction that matters is the other one, and it is exact: no view
     that upstream copies may be kept here.
     """
-    upstream_keeps = lambda t: t.stride(-1) == 1  # noqa: E731 -- quack/rmsnorm.py
+    upstream_keeps = lambda t: t.stride(-1) == 1
     base = torch.randn(1 << 16, device="cuda", dtype=torch.bfloat16)
     kept_by_us_only = []
     for m, n in itertools.product((1, 2, 4, 16, 64), (8, 16, 64, 256)):
@@ -1762,9 +2267,8 @@ def test_our_copy_predicate_is_a_subset_of_upstreams():
         ]
         for view in candidates:
             ours_keeps = rmsnorm_flydsl_impl._packed_rows(view).data_ptr() == view.data_ptr()
-            if ours_keeps and not upstream_keeps(view):
-                if not view.is_contiguous():
-                    kept_by_us_only.append((tuple(view.shape), view.stride()))
+            if ours_keeps and not upstream_keeps(view) and not view.is_contiguous():
+                kept_by_us_only.append((tuple(view.shape), view.stride()))
     assert not kept_by_us_only, kept_by_us_only
 
 
@@ -1802,7 +2306,6 @@ def test_overlapping_rows_are_copied_and_do_not_poison_the_cache():
     plain = torch.randn((m, n), device="cuda", dtype=torch.bfloat16)
     poisoned_maybe = rmsnorm(plain, weight)
     rmsnorm_flydsl_impl._FWD_CACHE.clear()
-    rmsnorm_flydsl_impl._FWD_TUNED_CACHE.clear()
     rmsnorm_flydsl_impl._BWD_CACHE.clear()
     assert torch.equal(poisoned_maybe, rmsnorm(plain, weight)), (
         "the launcher built for the overlapping view was reused for a plain call"
@@ -1845,12 +2348,10 @@ def test_a_contiguous_singleton_row_does_not_poison_the_cache(use_compile):
 
     for first, second in ((singleton, plain), (plain, singleton)):
         rmsnorm_flydsl_impl._FWD_CACHE.clear()
-        rmsnorm_flydsl_impl._FWD_TUNED_CACHE.clear()
         rmsnorm_flydsl_impl._BWD_CACHE.clear()
         function(first, weight)
         after = function(second, weight)
         rmsnorm_flydsl_impl._FWD_CACHE.clear()
-        rmsnorm_flydsl_impl._FWD_TUNED_CACHE.clear()
         rmsnorm_flydsl_impl._BWD_CACHE.clear()
         assert torch.equal(after, function(second, weight)), (
             "a launcher built for one layout was reused for the other"
@@ -1908,13 +2409,11 @@ def test_compiled_singleton_first_does_not_poison_other_variants(variant):
             reference = lambda t: _full_reference(t, weight)[0]
 
     rmsnorm_flydsl_impl._FWD_CACHE.clear()
-    rmsnorm_flydsl_impl._FWD_TUNED_CACHE.clear()
     rmsnorm_flydsl_impl._BWD_CACHE.clear()
     call(singleton)
     after_singleton = call(ordinary)
 
     rmsnorm_flydsl_impl._FWD_CACHE.clear()
-    rmsnorm_flydsl_impl._FWD_TUNED_CACHE.clear()
     rmsnorm_flydsl_impl._BWD_CACHE.clear()
     assert torch.equal(after_singleton, call(ordinary)), (
         f"{variant}: the singleton launcher was reused for the ordinary call"
@@ -1981,7 +2480,6 @@ def test_the_singleton_layout_compiles_with_fullgraph(dynamic):
     for label, tensor in cases.items():
         torch._dynamo.reset()
         rmsnorm_flydsl_impl._FWD_CACHE.clear()
-        rmsnorm_flydsl_impl._FWD_TUNED_CACHE.clear()
         rmsnorm_flydsl_impl._BWD_CACHE.clear()
         function = torch.compile(rmsnorm, fullgraph=True, dynamic=dynamic)
         try:
@@ -2189,9 +2687,7 @@ def test_a_persisted_singleton_artifact_cannot_be_loaded_for_another_row_count(
     # out, written by the person clearing it out.
     tuner._artifact_cache.clear()
     tuner.cache.clear()
-    # A fresh process has no launcher memo either, and that memo is what keeps a
-    # warm tuned call from re-entering the tuner.
-    rmsnorm_flydsl_impl._FWD_TUNED_CACHE.clear()
+    tuner._hot_cache.clear()
     monkeypatch.delenv("FLYDSL_AUTOTUNE")
 
     loaded = []
@@ -2286,13 +2782,11 @@ def test_a_compiled_singleton_backward_does_not_poison_later_gradients():
         return tensor.grad, parameter.grad
 
     rmsnorm_flydsl_impl._FWD_CACHE.clear()
-    rmsnorm_flydsl_impl._FWD_TUNED_CACHE.clear()
     rmsnorm_flydsl_impl._BWD_CACHE.clear()
     gradients(singleton)
     dx_after_singleton, dweight_after_singleton = gradients(ordinary)
 
     rmsnorm_flydsl_impl._FWD_CACHE.clear()
-    rmsnorm_flydsl_impl._FWD_TUNED_CACHE.clear()
     rmsnorm_flydsl_impl._BWD_CACHE.clear()
     dx_clean, dweight_clean = gradients(ordinary)
 

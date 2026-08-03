@@ -118,8 +118,10 @@ launch; the reduce writes what it is asked for, so `torch.empty` is enough. The
 effect is inside the noise of the autograd path, but the launches are gone.
 And the raw MLIR `atomic_add` went with the kernel, which leaves nothing in this
 backend importing FlyDSL's private `_mlir` APIs. That was half the reason for
-the `flydsl<0.3` pin; the other half was that only 0.2.4 had been run, and 0.3
-is still a dev build, so the pin stays until a release is tested.
+the old `flydsl<0.3` pin. The released 0.3 API is now required
+(`flydsl>=0.3,<0.4`): the RMSNorm tuner relies on its public
+`CompiledFunction` fast callable and the thread-local `CompilationContext`
+hint overlay.
 
 Unlike the rest of this file, the numbers above were taken on flydsl
 0.3.0.dev765, with the suite passing there as well.
@@ -407,39 +409,49 @@ thread register budget. The key includes M/N, all operand dtypes, feature flags,
 per-head mode/count, target architecture, and a schema version. Runtime `eps`
 and `weight_offset` deliberately do not split winners.
 
-Each timing sample wraps 100 launches in one HIP event pair and divides the
-elapsed time by 100; the tuner takes the median of seven samples after an
-untimed compile and one warmup batch. Outputs are complete stores, so tuning
-does not zero `output`, `residual_out`, or `rstd`.
+Each config is first compiled outside the timing region, and every gate,
+warmup, graph capture and timed launch calls its `CompiledFunction` directly.
+One search call builds and reuses a set of different tensor addresses across
+all candidates. Exact shape/dtype/stride/device metadata is preserved, object
+aliases (including the absent-residual alias to `x`) remain aliases, empty
+placeholders remain empty, and every write target has independent storage.
+Before timing a candidate, every address set is run and its output,
+`residual_out` and `rstd` (when active) are checked against deterministic rows
+of an independent fp32 reference.
 
-Validation on gfx950 with FlyDSL 0.3.0 used BF16 `16 x 4096` with FP32 weight.
-All eight candidates compiled and ran; the measured winner was 256 threads at
-0.073 ms per launch, the emitted artifact recorded the full key, and a fresh
-process served the persisted winner with benchmarking replaced by a hard
-failure. Both the search result and a cache hit with different `eps` and
-`weight_offset` matched the FP32 reference after BF16 rounding exactly in that
-run. Tests also cover residual+bias+prenorm+rstd on a non-default stream and a
-`torch.compile(fullgraph=True, dynamic=True)` row-count change. Backward remains
-on its existing deterministic heuristic and is not tuned in this stage.
+The ROCm cache authority is Triton's active benchmark driver's eviction buffer:
+256 MiB on the tested ROCm stack. This deliberately overrides the 4 MiB
+`torch.cuda.get_device_properties().L2_cache_size` reported on gfx950, which is
+the per-XCD L2 and not the chip's roughly 256 MiB MALL. Rotation is sized from
+read operands only -- write-only outputs are still cloned but are not trusted
+to allocate in MALL -- so the normal read-address plus eviction working set is
+at least 3x the target. The plan is capped at 200 address sets and 4 GiB / 25%
+of free HBM; a reduced-memory plan explicitly falls back to per-call eviction
+rather than silently becoming cache-hot.
 
-### What the search is worth, measured
+The timed graph records 200 round-robin kernel launches. A replay-based warmup
+contributes about 200 ms of GPU work, then three graph replays are timed and
+their median is returned as ms/call. Compilation, cloning, correctness checks,
+warmup and cache-eviction writes are outside the event pair. Unsupported graph
+capture and graph OOM use an event-timed multi-address fallback; if the address
+pool alone cannot turn over one cache, that fallback evicts before each
+individually timed call. Graph capture uses a device-local non-default stream,
+and forced searches are serialized because CUDA/HIP permits one process-wide
+capture at a time.
 
-**At most 6%, and nothing at all on nine of the eleven shapes.** Timing every
-candidate width directly at the kernel level, bf16 with fp32 weight:
+The selected config, defaults, disk winners, and portable artifacts retain
+FlyDSL's normal semantics; a second process-local cache maps them to fast
+callables. Compiler hints use `CompilationContext.compile_hints`, not
+`flyc.compile[hints]`, because FlyDSL 0.3 implements the latter by mutating the
+shared JIT's persistent hints.
 
-| shape | heuristic | best candidate | headroom |
-| --- | --- | --- | --- |
-| 1 x 4096 | 256 (6.8us) | 256 | 1.00x |
-| 256 x 4096 | 256 (6.9us) | 256 | 1.00x |
-| 512 x 4096 | 256 (7.1us) | 256 | 1.00x |
-| 4096 x 3000 | 256 (14.5us) | 128 (13.8us) | 1.05x |
-| 4096 x 4096 | 256 (17.2us) | 128 (16.3us) | 1.06x |
-| 32768 x 256 | 32 (10.8us) | 32 | 1.00x |
-| 32768 x 512 | 64 (16.2us) | 64 | 1.00x |
-| 32768 x 1024 | 128 (36.2us) | 128 | 1.00x |
-| 32768 x 2048 | 256 (62.5us) | 256 | 1.00x |
-| 32768 x 4096 | 256 (114.5us) | 256 | 1.00x |
-| 32768 x 8192 | 256 (214.9us) | 256 | 1.00x |
+The process cache includes the physical device index, tensor ABI/layout,
+constexprs, config and compiler hints, toolchain and invalidating environment.
+Each device gets a cloned JIT instance as well as a distinct cache entry, so two
+same-architecture devices never share a loaded function pointer. Compilation
+and cache publication use `FLYDSL_BUILD_LOCK`; `CompiledFunction`'s CallState is
+itself thread-local. Schema version 3 prevents either dispatcher-scored schema
+1 winners or same-address cache-hot schema 2 winners from being loaded.
 
 The analytical heuristic lands on the best width or within 6% of it across the
 candidates it may consider, and `waves_per_eu=None` won every forced search.
@@ -465,17 +477,58 @@ of the 512 lanes have nothing to load, it picked it and ran 0.70x. Candidates
 now require `num_vecs >= threads`, which also drops several pre-existing
 candidates that idled lanes for the same reason.
 
-Two things this cost to learn. The tuned entry re-entered FlyDSL's tuner on
-every call, which re-resolves every argument into a JIT cache key: ~200us of
-host time, so a warm tuned call was **7.1x slower** than the untuned one at
-`4096x4096`. Going through the tuner once per key and then launching the
-winner through an ordinary cached build fixed the bulk of it; moving
-`_validate_arch` and the tuner-kwargs construction behind the memo lookup
-closed the rest. A warm tuned call now measures 0.98-1.00x of `rmsnorm`.
+Validation on gfx950 with released FlyDSL 0.3.0 used BF16 activations and FP32
+weights. At `256 x 4096`, public winner-cache-hit host enqueue fell from
+154.997 us to 33.070 us, against 24.200 us for the heuristic entry. The old
+128-136 us device-timing floor fell to 9-11 us on the three shortest shapes;
+larger shapes now measure kernel work rather than JIT-key construction. Search,
+cache hit with dynamic `eps`/`weight_offset`, residual+bias+prenorm+rstd on a
+non-default stream, dynamic fullgraph rows, and same-architecture multi-device
+isolation all have numerical regression coverage. Backward remains on its
+existing deterministic heuristic and is not tuned in this stage.
 
-The search is also order-dependent: searched in isolation `4096x4096` picks 256
-five times out of five, but searched after other shapes in the same process it
-has picked 128. Tune one shape per process if the winner matters.
+The schema-3 retest used physical GPU 3 while its activity was 0%, five
+provider-order-rotated rounds, and a 64 MiB add canary. The canary stayed within
+0.56% (35.84-36.04 us). Values are public-call device latency in microseconds;
+Triton's 256 MiB cache clear is outside each timed event:
+
+| M x N | heuristic | L2-cold-tuned winner | `torch.compile` |
+| --- | ---: | ---: | ---: |
+| 1 x 4096 | 6.44 | 7.96 | 6.32 |
+| 256 x 4096 | 6.60 | 7.40 | 6.56 |
+| 512 x 4096 | 7.00 | 7.40 | 6.92 |
+| 4096 x 3000 | 16.08 | 15.40 | 18.60 |
+| 4096 x 4096 | 18.88 | 19.44 | 21.84 |
+| 32768 x 1024 | 38.52 | 37.44 | 35.80 |
+| 32768 x 2048 | 67.88 | 68.96 | 70.24 |
+| 32768 x 4096 | 118.68 | 120.52 | 128.72 |
+| 32768 x 8192 | 221.96 | 222.04 | 207.24 |
+
+`32768 x 2048` produced a useful objective distinction. The requested
+multi-address graph objective chose 64 threads in all three forced searches,
+even after the read-only pool was enlarged to seven sets: 939.6 MiB of rotating
+reads plus a 256 MiB eviction buffer. Default-occupancy timings were:
+
+| threads | multi-address graph | clear-before-every-call |
+| ---: | ---: | ---: |
+| 64 | 49.91 us | 70.04 us |
+| 128 | 51.54 us | 68.60 us |
+| 256 (heuristic) | 54.61 us | 67.44 us |
+
+So the expected 256-thread cold winner is true for an independently measured
+clear-before-every-call objective, but not for the CuTe-style graph objective
+implemented here. The latter is stable and is the persisted schema-3
+definition, so the tuner correctly records 64 rather than forcing the
+heuristic. Interposing a 256 MiB memset immediately before every launch changes
+the ranking even though its own time is outside the event pair. At
+`32768 x 8192`, 256 threads won 3/3 searches (the occupancy hint was 4, 4,
+default); `256 x 4096` was a near-tie and changed from 128/default to 256/4 in
+the next two searches.
+
+The short-shape candidate objective still excludes public dispatch. On a
+same-stream GEMM backlog, `256 x 4096` host enqueue was 23.98 us for the
+heuristic entry and 32.71 us for the tuned cache hit: 8.72 us remains in
+winner-key/environment handling, separate from candidate kernel latency.
 
 Note that `benchmarks/benchmark_rmsnorm_flydsl.py` imports `rmsnorm`, not
 `rmsnorm_autotuned`, so setting `FLYDSL_AUTOTUNE=1` around the benchmark
@@ -484,8 +537,8 @@ harness does not have.
 
 ## Measuring this backend
 
-The suite figure quoted for this branch -- **631 passed, 2 skipped, 1 xfailed**
--- is this invocation. The two skips are the two- and eight-device tests; the
+The suite figure for this revision is **649 passed, 3 skipped, 1 xfailed** when
+one idle GPU is visible. The three skips require multiple visible devices; the
 xfail is `test_simulated_cuda_flydsl_import_survives_a_broken_cutedsl_chain`,
 which pins a real limitation rather than a passing behaviour (see the import
 coupling note below):
