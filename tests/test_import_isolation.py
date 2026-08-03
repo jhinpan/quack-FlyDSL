@@ -633,6 +633,18 @@ def test_real_cutlass_452_flydsl_import_fails_before_reaching_flydsl():
         f"QUACK_CUTLASS_452_ENV={CUTLASS_452_ENV} was set but {packages} is "
         "not a directory. Set it to a real install or unset it."
     )
+    # ...and it must actually contain the code-bearing package, not merely
+    # exist. @Reviewer's control: an *empty* python_packages plus a fake
+    # root-level ``cutlass`` and minimal 4.5.2 frontend metadata was accepted
+    # as ``1 xfailed``, exit 0. The directory check authenticated a path, the
+    # version check authenticated the metadata-only ``nvidia-cutlass-dsl``
+    # label, and neither authenticated the code that would run.
+    payload = packages / "cutlass"
+    assert payload.is_dir() and any(payload.iterdir()), (
+        f"QUACK_CUTLASS_452_ENV={CUTLASS_452_ENV} has no code-bearing cutlass "
+        f"under {packages}. The metadata-only nvidia-cutlass-dsl label is not "
+        "the payload; nvidia-cutlass-dsl-libs-base carries it."
+    )
 
     result = _run_python(
         f"""
@@ -650,8 +662,12 @@ def test_real_cutlass_452_flydsl_import_fails_before_reaching_flydsl():
         # /usr/lib/python3.10/sitecustomize.py, so -I is not the assertion.
         assert "quack" not in sys.modules, "quack was preloaded; the child is not hermetic"
 
-        sys.path.insert(0, {str(packages)!r})
+        # python_packages first. These were inserted the other way round, so
+        # $D preceded $D/nvidia_cutlass_dsl/python_packages and a root-level
+        # ``cutlass`` under $D won -- which is how @Reviewer's empty-packages
+        # fake got imported and accepted.
         sys.path.insert(0, {str(env_root)!r})
+        sys.path.insert(0, {str(packages)!r})
 
         import cutlass.pipeline
 
@@ -669,10 +685,14 @@ def test_real_cutlass_452_flydsl_import_fails_before_reaching_flydsl():
             "QUACK_CUTLASS_452_ENV resolves nvidia-cutlass-dsl==" + version
             + ", not 4.5.2; this test's whole claim is about 4.5.2"
         )
+        # Against ``python_packages``, not against $D. $D is a prefix of every
+        # path under it, so the old check accepted a root-level $D/cutlass --
+        # exactly the fake that must not pass. The payload directory is the
+        # only place a real install puts this module.
         origin = getattr(cutlass.pipeline, "__file__", "") or ""
-        assert origin.startswith({str(env_root)!r}), (
-            "imported cutlass.pipeline from " + origin + ", which is outside "
-            "the requested environment"
+        assert origin.startswith({str(packages)!r}), (
+            "imported cutlass.pipeline from " + origin + ", which is not the "
+            "code-bearing package under " + {str(packages)!r}
         )
         assert not hasattr(cutlass.pipeline, "alloc_reserved_mbarrier"), (
             "this cutlass exports alloc_reserved_mbarrier; it is not 4.5.2-like"
@@ -762,8 +782,16 @@ def test_real_cutlass_452_flydsl_import_fails_before_reaching_flydsl():
         # dying anywhere inside a cutedsl bootstrap it does not use -- so the
         # assertion is about that, and the specific edge is reported for the
         # reader rather than asserted.
-        assert (outcome["exc_name"] or "").startswith("cutlass"), (
-            f"the real failure was not attributed to cutlass at all: {outcome!r}"
+        # Namespace membership, not string prefix. ``startswith("cutlass")``
+        # also matches ``cutlass_typo``, ``cutlassx``, ``cutlass_foo`` -- names
+        # in no way part of the cutlass package. @Reviewer's control raised
+        # ImportError(name="cutlass_typo") before target entry and this
+        # accepted it as the expected coupling: 1 xfailed, exit 0. Wide across
+        # the real submodules (the 4.5.2 gap spans at least two independent
+        # edges), exact at the namespace boundary.
+        _name = outcome["exc_name"] or ""
+        assert _name == "cutlass" or _name.startswith("cutlass."), (
+            f"the real failure was not attributed to the cutlass namespace: {outcome!r}"
         )
         raise CutedslGateStillCouplesFlydsl(
             "against real cutlass 4.5.2, import quack.rmsnorm_flydsl still "
