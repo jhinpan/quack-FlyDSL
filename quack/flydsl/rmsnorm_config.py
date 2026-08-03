@@ -25,6 +25,12 @@ WAVE_SIZE = 64
 # the whole kernel.
 MIN_NUM_THREADS = WAVE_SIZE
 MAX_NUM_THREADS = 256
+# The analytical heuristic stops at 256 because it only sees N, and the right
+# width above that depends on M: 512 is 1.06x at 32768x8192 and 0.21x at
+# 32768x256. M cannot enter the heuristic, since it is symbolic under
+# ``dynamic=True`` and the row config has to be resolvable without it. The
+# tuner does see M, so it is allowed the wider block.
+MAX_TUNED_NUM_THREADS = 512
 SUPPORTED_DTYPE_WIDTHS = (16, 32)
 
 # Widest row this backend accepts. A thread keeps ``num_tiles * vecsize``
@@ -136,12 +142,13 @@ class RmsNormRowConfig:
         N: int,
         dtype_width: int,
         num_threads: int,
+        max_num_threads: int = MAX_NUM_THREADS,
     ) -> "RmsNormRowConfig":
         """Build a legal row config with an explicitly selected lane count."""
         if dtype_width not in SUPPORTED_DTYPE_WIDTHS:
             raise ValueError(f"unsupported element width: {dtype_width} bits")
-        if num_threads < 1 or num_threads > MAX_NUM_THREADS:
-            raise ValueError(f"num_threads must be between 1 and {MAX_NUM_THREADS}")
+        if num_threads < 1 or num_threads > max_num_threads:
+            raise ValueError(f"num_threads must be between 1 and {max_num_threads}")
         if num_threads & (num_threads - 1):
             raise ValueError("num_threads must be a power of two")
         vecsize = math.gcd(N, ACCESS_BITS // dtype_width)
@@ -185,6 +192,7 @@ def batch_short_rows(N: int, dtype_width: int) -> bool:
 
 __all__ = [
     "MAX_N",
+    "MAX_TUNED_NUM_THREADS",
     "N_ALIGNMENT",
     "WAVE_SIZE",
     "RmsNormRowConfig",

@@ -27,7 +27,11 @@ from flydsl.expr import Constexpr
 from flydsl.utils import env
 
 from .rmsnorm_common import FLYDSL_BUILD_LOCK
-from .rmsnorm_config import MAX_NUM_THREADS, RmsNormRowConfig, batch_short_rows
+from .rmsnorm_config import (
+    MAX_TUNED_NUM_THREADS,
+    RmsNormRowConfig,
+    batch_short_rows,
+)
 from .rmsnorm_kernel import rmsnorm_direct
 
 
@@ -51,18 +55,25 @@ def _row_candidates(n: int, dtype_width: int) -> list[int]:
         if batch_short_rows(n, dtype_width)
         else RmsNormRowConfig.from_analytical_heuristic(n, dtype_width)
     )
-    ceiling = 64 if batch_short_rows(n, dtype_width) else MAX_NUM_THREADS
+    ceiling = 64 if batch_short_rows(n, dtype_width) else MAX_TUNED_NUM_THREADS
     candidates = {heuristic.num_threads}
     candidates.update((heuristic.num_threads // 2, heuristic.num_threads * 2))
     if not batch_short_rows(n, dtype_width):
-        candidates.update((64, 128, 256))
+        # 512 is above what the heuristic may pick: it wins only when the row
+        # is wide and there are many of them, and only the tuner sees M.
+        candidates.update((64, 128, 256, 512))
 
     legal = []
     for threads in sorted(candidates):
         if threads < 1 or threads > ceiling or threads & (threads - 1):
             continue
-        config = RmsNormRowConfig.with_num_threads(n, dtype_width, threads)
-        if config.elems_per_thread <= 32:
+        config = RmsNormRowConfig.with_num_threads(n, dtype_width, threads, max_num_threads=ceiling)
+        # Upper bound is the register budget. The lower bound is that every
+        # lane gets at least one vector: a block wider than the row has vectors
+        # idles the surplus for the whole kernel, and the tuner's own timing
+        # does not reliably reject that -- offered 512 at N=1024, where 384 of
+        # the 512 lanes have nothing to load, it picked it and ran 0.70x.
+        if config.elems_per_thread <= 32 and config.num_vecs >= threads:
             legal.append(threads)
     return legal
 

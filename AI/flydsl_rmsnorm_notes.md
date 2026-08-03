@@ -453,6 +453,30 @@ and cache publication use `FLYDSL_BUILD_LOCK`; `CompiledFunction`'s CallState is
 itself thread-local. Schema version 3 prevents either dispatcher-scored schema
 1 winners or same-address cache-hot schema 2 winners from being loaded.
 
+The analytical heuristic lands on the best width or within 6% of it across the
+candidates it may consider, and `waves_per_eu=None` won every forced search.
+Within that space the search has almost nothing to find.
+
+The exception is 512 threads per row, which the heuristic may not pick and the
+tuner may. Inductor uses 512 at `32768x8192` and this backend could not: a block
+above 256 threads needs `known_block_size` declared on the kernel, which
+upstream FlyDSL passes and the vendored copy did not, so the AMDGPU default
+refused the launch outright. With it declared, 512 measures 202.0us against
+213.2us at the widest shape -- 1.06x, and 95% of the ceiling against 90%.
+
+It cannot go in the heuristic. 512 wins only when the row is wide *and* there
+are many rows: 1.06x at `32768x8192`, 0.98x at `4096x4096`, 0.21x at
+`32768x256`. The heuristic sees only `N`, and `M` cannot enter it because `M` is
+symbolic under `dynamic=True`. The tuner does see `M`, so 512 is offered there
+and nowhere else. `MAX_TUNED_NUM_THREADS` is the separate ceiling that says so;
+`MAX_NUM_THREADS` stays at 256 and no default choice changes.
+
+Offering it needed one more guard. The tuner's own timing does not reliably
+reject a block wider than the row has vectors: given 512 at `N=1024`, where 384
+of the 512 lanes have nothing to load, it picked it and ran 0.70x. Candidates
+now require `num_vecs >= threads`, which also drops several pre-existing
+candidates that idled lanes for the same reason.
+
 Validation on gfx950 with released FlyDSL 0.3.0 used BF16 activations and FP32
 weights. At `256 x 4096`, public winner-cache-hit host enqueue fell from
 154.997 us to 33.070 us, against 24.200 us for the heuristic entry. The old

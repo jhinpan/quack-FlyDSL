@@ -31,6 +31,7 @@ from .rmsnorm_common import (
     vector_access_plan,
 )
 from .rmsnorm_config import (
+    MAX_TUNED_NUM_THREADS,
     RmsNormRowConfig,
     batch_short_rows,
     multi_row_block_rows,
@@ -112,7 +113,9 @@ def build_rmsnorm_module(
     _, residual_per_access = vector_access_plan(vecsize, residual_bits)
     _, residual_out_per_access = vector_access_plan(vecsize, residual_out_bits)
 
-    @flyc.kernel
+    # A block wider than a wavefront quad needs the launch bound declared, or
+    # the AMDGPU backend keeps its 256-thread default and refuses the launch.
+    @flyc.kernel(**({} if block_threads <= 256 else {"known_block_size": [block_threads, 1, 1]}))
     def rmsnorm_kernel(
         input_tensor: fx.Tensor,
         weight_tensor: fx.Tensor,
@@ -445,6 +448,7 @@ def rmsnorm_direct(
         n,
         dtype_to_elem_bits(input_dtype_str),
         threads_per_row,
+        max_num_threads=MAX_TUNED_NUM_THREADS,
     )
     launch = build_rmsnorm_module(
         n,
