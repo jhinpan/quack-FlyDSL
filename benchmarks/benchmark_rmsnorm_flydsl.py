@@ -308,6 +308,14 @@ def run_controlled(
                 douts[index],
                 retain_graph=True,
             )
+        if "flydsl_tuned" in providers:
+            tuned_outputs = [rmsnorm_autotuned(x, weight, eps=EPS) for x in inputs]
+            calls["flydsl_tuned"] = lambda index: torch.autograd.grad(
+                tuned_outputs[index],
+                (inputs[index], weight),
+                douts[index],
+                retain_graph=True,
+            )
         if "torch_compile" in providers:
             compiled = _compiled_ref()
             torch_outputs = [compiled(x, weight, eps=EPS) for x in inputs]
@@ -446,6 +454,18 @@ def run_profiled_shapes(
                     lambda flydsl_output=flydsl_output, x=x, weight=weight, dout=dout: (
                         torch.autograd.grad(
                             flydsl_output,
+                            (x, weight),
+                            dout,
+                            retain_graph=True,
+                        )
+                    )
+                )
+            if "flydsl_tuned" in providers:
+                tuned_output = rmsnorm_autotuned(x, weight, eps=EPS)
+                calls["flydsl_tuned"] = (
+                    lambda tuned_output=tuned_output, x=x, weight=weight, dout=dout: (
+                        torch.autograd.grad(
+                            tuned_output,
                             (x, weight),
                             dout,
                             retain_graph=True,
@@ -602,7 +622,7 @@ def rmsnorm_bwd_runner(M, N, provider, dtype_name, weight_mode, features):
     if provider == "flydsl":
         forward = rmsnorm
     elif provider == "flydsl_tuned":
-        raise ValueError("the FlyDSL backend has no autotuned backward kernel")
+        forward = rmsnorm_autotuned
     elif provider == "torch_compile":
         forward = _compiled_ref()
     else:
@@ -614,8 +634,17 @@ def rmsnorm_bwd_runner(M, N, provider, dtype_name, weight_mode, features):
     y = forward(x, w, eps=EPS)
     fn = lambda: torch.autograd.grad(y, [x, w], grad_outputs=dy, retain_graph=True)
 
-    _gate("bwd", dtype_name, fn(), _bwd_reference(x.detach(), w.detach(), dy, EPS))
-    ms = _bench(fn)
+    expected = _bwd_reference(x.detach(), w.detach(), dy, EPS)
+    if provider == "flydsl_tuned":
+        actual, previous = _tune_once_then_disable(fn)
+        try:
+            _gate("bwd", dtype_name, actual, expected)
+            ms = _bench(fn)
+        finally:
+            _restore_autotune_env(previous)
+    else:
+        _gate("bwd", dtype_name, fn(), expected)
+        ms = _bench(fn)
     return _result(_mem_bytes("bwd", M, N, x, w, features), ms)
 
 
@@ -667,11 +696,8 @@ def main():
         parser.error("--M and --N must be given together")
     if args.backward and args.features != "plain":
         parser.error("--features fused is forward only")
-    if "flydsl_tuned" in args.providers:
-        if args.backward:
-            parser.error("FlyDSL autotuning is forward-only; there is no tuned backward kernel")
-        if os.environ.get("FLYDSL_AUTOTUNE") != "1":
-            parser.error("flydsl_tuned requires FLYDSL_AUTOTUNE=1")
+    if "flydsl_tuned" in args.providers and os.environ.get("FLYDSL_AUTOTUNE") != "1":
+        parser.error("flydsl_tuned requires FLYDSL_AUTOTUNE=1")
     if args.controlled and args.profile:
         parser.error("--controlled and --profile are mutually exclusive")
     if args.profile_repeats <= 0:

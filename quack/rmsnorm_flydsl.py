@@ -16,6 +16,10 @@ from quack.flydsl.rmsnorm_autotune import (
     RMSNORM_AUTOTUNE_SCHEMA_VERSION,
     _rmsnorm_fwd_tuner,
 )
+from quack.flydsl.rmsnorm_bwd_autotune import (
+    RMSNORM_BWD_AUTOTUNE_SCHEMA_VERSION,
+    _rmsnorm_bwd_tuner,
+)
 from quack.flydsl.rmsnorm_bwd_kernel import (
     TWO_STAGE_MAX_NUM_THREADS,
     build_rmsnorm_bwd_two_stage_module,
@@ -670,6 +674,74 @@ def _launch_rmsnorm_bwd(
         )
 
 
+def _launch_rmsnorm_bwd_autotuned(
+    source: torch.Tensor,
+    weight: torch.Tensor,
+    dout: torch.Tensor,
+    dresidual_out: torch.Tensor,
+    rstd: torch.Tensor,
+    dx: torch.Tensor,
+    dresidual: torch.Tensor,
+    dweight: torch.Tensor,
+    dbias: torch.Tensor,
+    weight_offset: float,
+    *,
+    has_weight: bool,
+    has_bias: bool,
+    compute_dweight: bool,
+    compute_dbias: bool,
+    compute_input_grad: bool,
+    store_dx: bool,
+    store_dresidual: bool,
+    has_residual: bool,
+    has_dresidual_out: bool,
+    per_head: bool,
+    num_heads: int,
+) -> None:
+    """Launch through the backward tuner's row/grid-aware compiled cache."""
+    m, n = source.shape[0], source.shape[-1]
+    workspace = torch.empty(0, device=source.device, dtype=torch.float32)
+    with torch.cuda.device(source.device):
+        _rmsnorm_bwd_tuner(
+            source,
+            weight,
+            dout,
+            dresidual_out,
+            rstd,
+            rstd,
+            dx,
+            dresidual,
+            dweight,
+            dbias,
+            workspace,
+            workspace.view(-1),
+            m,
+            weight_offset,
+            n=n,
+            source_dtype_str=_dtype_to_str(source.dtype),
+            dy_dtype_str=_dtype_to_str(dout.dtype),
+            dx_dtype_str=_dtype_to_str(dx.dtype),
+            dresidual_dtype_str=_dtype_to_str(dresidual.dtype),
+            dresidual_out_dtype_str=_dtype_to_str(dresidual_out.dtype),
+            weight_dtype_str=_dtype_to_str(weight.dtype),
+            dbias_dtype_str=_dtype_to_str(dbias.dtype),
+            has_weight=has_weight,
+            has_bias=has_bias,
+            compute_dweight=compute_dweight,
+            compute_dbias=compute_dbias,
+            compute_input_grad=compute_input_grad,
+            store_dx=store_dx,
+            store_dresidual=store_dresidual,
+            has_residual=has_residual,
+            has_dresidual_out=has_dresidual_out,
+            per_head=per_head,
+            num_heads=num_heads,
+            arch=_validated_autotune_arch(source.device),
+            schema_version=RMSNORM_BWD_AUTOTUNE_SCHEMA_VERSION,
+            stream=_current_raw_stream(source.device),
+        )
+
+
 @torch.library.custom_op(
     "quack::_rmsnorm_flydsl_bwd",
     mutates_args=("dx", "dresidual", "dweight", "dbias"),
@@ -733,6 +805,71 @@ def _rmsnorm_flydsl_bwd_op(
 
 
 _rmsnorm_flydsl_bwd_op.register_fake(_noop_fake)
+
+
+@torch.library.custom_op(
+    "quack::_rmsnorm_flydsl_bwd_autotuned",
+    mutates_args=("dx", "dresidual", "dweight", "dbias"),
+    device_types="cuda",
+    schema=(
+        "(Tensor source, Tensor weight, Tensor dout, Tensor dresidual_out, "
+        "Tensor rstd, Tensor(a5!) dx, Tensor(a6!) dresidual, "
+        "Tensor(a7!) dweight, Tensor(a8!) dbias, float weight_offset, "
+        "bool has_weight, bool has_bias, bool compute_dweight, "
+        "bool compute_dbias, bool compute_input_grad, bool store_dx, "
+        "bool store_dresidual, bool has_residual, bool has_dresidual_out, "
+        "bool per_head, int num_heads) -> ()"
+    ),
+)
+def _rmsnorm_flydsl_bwd_autotuned_op(
+    source: torch.Tensor,
+    weight: torch.Tensor,
+    dout: torch.Tensor,
+    dresidual_out: torch.Tensor,
+    rstd: torch.Tensor,
+    dx: torch.Tensor,
+    dresidual: torch.Tensor,
+    dweight: torch.Tensor,
+    dbias: torch.Tensor,
+    weight_offset: float,
+    has_weight: bool,
+    has_bias: bool,
+    compute_dweight: bool,
+    compute_dbias: bool,
+    compute_input_grad: bool,
+    store_dx: bool,
+    store_dresidual: bool,
+    has_residual: bool,
+    has_dresidual_out: bool,
+    per_head: bool,
+    num_heads: int,
+) -> None:
+    _launch_rmsnorm_bwd_autotuned(
+        source,
+        weight,
+        dout,
+        dresidual_out,
+        rstd,
+        dx,
+        dresidual,
+        dweight,
+        dbias,
+        weight_offset,
+        has_weight=has_weight,
+        has_bias=has_bias,
+        compute_dweight=compute_dweight,
+        compute_dbias=compute_dbias,
+        compute_input_grad=compute_input_grad,
+        store_dx=store_dx,
+        store_dresidual=store_dresidual,
+        has_residual=has_residual,
+        has_dresidual_out=has_dresidual_out,
+        per_head=per_head,
+        num_heads=num_heads,
+    )
+
+
+_rmsnorm_flydsl_bwd_autotuned_op.register_fake(_noop_fake)
 
 
 class _RMSNormFunction(torch.autograd.Function):
@@ -803,6 +940,7 @@ class _RMSNormFunction(torch.autograd.Function):
             ctx.per_head = per_head
             ctx.num_heads = num_heads
             ctx.prenorm = prenorm
+            ctx.autotuned = autotuned
             ctx.weight_offset = weight_offset
             ctx.x_needs_grad = ctx.needs_input_grad[0]
             ctx.weight_needs_grad = has_weight and ctx.needs_input_grad[1]
@@ -851,8 +989,8 @@ class _RMSNormFunction(torch.autograd.Function):
             dtype=bias.dtype if ctx.bias_needs_grad else weight.dtype,
         )
         _dispatch(
-            _rmsnorm_flydsl_bwd_op,
-            _launch_rmsnorm_bwd,
+            _rmsnorm_flydsl_bwd_autotuned_op if ctx.autotuned else _rmsnorm_flydsl_bwd_op,
+            _launch_rmsnorm_bwd_autotuned if ctx.autotuned else _launch_rmsnorm_bwd,
             source,
             weight,
             dout,

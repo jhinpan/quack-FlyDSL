@@ -85,6 +85,7 @@ def build_rmsnorm_bwd_two_stage_module(
     per_head: bool,
     num_heads: int,
     arch: str | None = None,
+    row_config: RmsNormRowConfig | None = None,
 ):
     """Build the deterministic persistent backward plus its parameter reduce."""
     if num_programs <= 0:
@@ -98,7 +99,7 @@ def build_rmsnorm_bwd_two_stage_module(
     dresidual_bits = dtype_to_elem_bits(dresidual_dtype_str)
     dresidual_out_bits = dtype_to_elem_bits(dresidual_out_dtype_str)
     weight_bits = dtype_to_elem_bits(weight_dtype_str)
-    config = rmsnorm_bwd_two_stage_config(n, source_dtype_str)
+    config = row_config or rmsnorm_bwd_two_stage_config(n, source_dtype_str)
     block_threads = config.num_threads
     vecsize = config.vecsize
     num_vecs = config.num_vecs
@@ -1094,3 +1095,94 @@ def build_rmsnorm_bwd_two_stage_module(
             )
 
     return launch_rmsnorm_bwd_two_stage
+
+
+@flyc.jit
+def rmsnorm_bwd_direct(
+    source_tensor: fx.Tensor,
+    weight_tensor: fx.Tensor,
+    dy_tensor: fx.Tensor,
+    dresidual_out_tensor: fx.Tensor,
+    rstd_tensor: fx.Tensor,
+    correction_tensor: fx.Tensor,
+    dx_tensor: fx.Tensor,
+    dresidual_tensor: fx.Tensor,
+    dweight_tensor: fx.Tensor,
+    dbias_tensor: fx.Tensor,
+    workspace_tensor: fx.Tensor,
+    workspace_flat: fx.Tensor,
+    m: fx.Int32,
+    weight_offset: fx.Float32,
+    n: fx.Constexpr[int],
+    source_dtype_str: fx.Constexpr[str],
+    dy_dtype_str: fx.Constexpr[str],
+    dx_dtype_str: fx.Constexpr[str],
+    dresidual_dtype_str: fx.Constexpr[str],
+    dresidual_out_dtype_str: fx.Constexpr[str],
+    weight_dtype_str: fx.Constexpr[str],
+    dbias_dtype_str: fx.Constexpr[str],
+    has_weight: fx.Constexpr[bool],
+    has_bias: fx.Constexpr[bool],
+    compute_dweight: fx.Constexpr[bool],
+    compute_dbias: fx.Constexpr[bool],
+    compute_input_grad: fx.Constexpr[bool],
+    store_dx: fx.Constexpr[bool],
+    store_dresidual: fx.Constexpr[bool],
+    has_residual: fx.Constexpr[bool],
+    has_dresidual_out: fx.Constexpr[bool],
+    per_head: fx.Constexpr[bool],
+    num_heads: fx.Constexpr[int],
+    arch: fx.Constexpr[str],
+    schema_version: fx.Constexpr[int],
+    threads_per_row: fx.Constexpr[int],
+    num_programs: fx.Constexpr[int],
+    stream: fx.Stream = fx.Stream(None),  # noqa: B008 - required by FlyDSL's traced ABI
+):
+    """Specialize the staged backward through autotunable row and grid geometry."""
+    row_config = RmsNormRowConfig.with_num_threads(
+        n,
+        dtype_to_elem_bits(source_dtype_str),
+        threads_per_row,
+        max_num_threads=TWO_STAGE_MAX_NUM_THREADS,
+    )
+    launch = build_rmsnorm_bwd_two_stage_module(
+        n,
+        source_dtype_str,
+        dy_dtype_str,
+        dx_dtype_str,
+        dresidual_dtype_str,
+        dresidual_out_dtype_str,
+        num_programs,
+        weight_dtype_str=weight_dtype_str,
+        dbias_dtype_str=dbias_dtype_str,
+        has_weight=has_weight,
+        has_bias=has_bias,
+        compute_dweight=compute_dweight,
+        compute_dbias=compute_dbias,
+        compute_input_grad=compute_input_grad,
+        store_dx=store_dx,
+        store_dresidual=store_dresidual,
+        has_residual=has_residual,
+        has_dresidual_out=has_dresidual_out,
+        per_head=per_head,
+        num_heads=num_heads,
+        arch=arch,
+        row_config=row_config,
+    )
+    launch(
+        source_tensor,
+        weight_tensor,
+        dy_tensor,
+        dresidual_out_tensor,
+        rstd_tensor,
+        correction_tensor,
+        dx_tensor,
+        dresidual_tensor,
+        dweight_tensor,
+        dbias_tensor,
+        workspace_tensor,
+        workspace_flat,
+        m,
+        weight_offset,
+        stream,
+    )

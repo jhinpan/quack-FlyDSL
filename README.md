@@ -86,9 +86,10 @@ What this backend does not do yet:
 - gfx950 only; other architectures are rejected rather than assumed to work
 - layernorm, and the lower-level `rmsnorm_fwd` / `rmsnorm_bwd` entry points
 
-Forward autotuning is available through `quack.rmsnorm_flydsl.rmsnorm_autotuned`
-and searches only when `FLYDSL_AUTOTUNE=1` is set. Design notes and measured
-results are in [AI/flydsl_rmsnorm_notes.md](AI/flydsl_rmsnorm_notes.md).
+Forward and backward autotuning are available through
+`quack.rmsnorm_flydsl.rmsnorm_autotuned` and search only when
+`FLYDSL_AUTOTUNE=1` is set. Design notes and measured results are in
+[AI/flydsl_rmsnorm_notes.md](AI/flydsl_rmsnorm_notes.md).
 
 ## Documentations
 

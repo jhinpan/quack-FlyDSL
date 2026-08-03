@@ -392,12 +392,12 @@ rather than around it: 7.1us of device time against roughly 5.7us, with the
 adapter measured at zero overhead either way. It is not chased down. That is
 the standing price of one implementation instead of two.
 
-## Native forward autotuning
+## Native forward and backward autotuning
 
-The first autotuning stage is forward-only and opt-in through
-`quack.rmsnorm_flydsl.rmsnorm_autotuned`. The existing `rmsnorm` entry and its
-`_FWD_CACHE` keep the analytical heuristic unchanged. A normal call to the
-tuned entry also serves that heuristic without searching; set
+Autotuning is opt-in through `quack.rmsnorm_flydsl.rmsnorm_autotuned`. The
+existing `rmsnorm` entry and its analytical forward/backward caches remain
+unchanged. A normal call to the tuned entry also serves those heuristics without
+searching; set
 `FLYDSL_AUTOTUNE=1` to force FlyDSL's native search. FlyDSL stores scratch
 winners under `FLYDSL_AUTOTUNE_CACHE_DIR` (default `~/.flydsl/autotune`) and
 portable artifacts under `FLYDSL_AUTOTUNE_CONFIG_DIR`.
@@ -486,8 +486,17 @@ weights. At `256 x 4096`, public winner-cache-hit host enqueue fell from
 larger shapes now measure kernel work rather than JIT-key construction. Search,
 cache hit with dynamic `eps`/`weight_offset`, residual+bias+prenorm+rstd on a
 non-default stream, dynamic fullgraph rows, and same-architecture multi-device
-isolation all have numerical regression coverage. Backward remains on its
-existing deterministic heuristic and is not tuned in this stage.
+isolation all have numerical regression coverage.
+
+Backward uses a separate schema-1 tuner over `threads_per_row` and
+`num_programs`. For each legal staged row width it tries half/base/double the
+CU-derived persistent grid, bounded by row count and a 4 GiB / 25%-free-HBM
+workspace budget. The parameter-reduce geometry, narrow/wide threshold, and
+`waves_per_eu` remain fixed in this stage. Candidate gates cover sampled
+`dx`/`dresidual` and complete `dweight`/`dbias` against an independent fp32
+reference. The untuned path remains bitwise unchanged; a cached tuned winner is
+bitwise stable, while different winners may use different deterministic
+reduction trees.
 
 The schema-3 retest used physical GPU 3 while its activity was 0%, five
 provider-order-rotated rounds, and a 64 MiB add canary. The canary stayed within
@@ -533,27 +542,26 @@ heuristic entry and 32.71 us for the tuned cache hit: 8.72 us remains in
 winner-key/environment handling, separate from candidate kernel latency.
 
 `benchmarks/benchmark_rmsnorm_flydsl.py` exposes the comparison explicitly:
-`--providers flydsl flydsl_tuned torch_compile` adds the tuned forward column,
-and `--controlled` measures all selected providers on the same rotating inputs.
-The tuned provider requires `FLYDSL_AUTOTUNE=1`; backward remains two-column
-because this backend has no backward tuner.
+`--providers flydsl flydsl_tuned torch_compile` adds tuned forward and backward
+columns, and `--controlled` measures all selected providers on the same
+rotating inputs. The tuned provider requires `FLYDSL_AUTOTUNE=1`.
 
-The ordinary public-API benchmark, which includes dispatch effects visible to
-short kernels, produced:
+The ordinary forward public-API benchmark, which includes dispatch effects
+visible to short kernels, produced:
 
-| M x N | fwd analytical (ms) | fwd tuned (ms) | fwd torch (ms) | bwd FlyDSL (ms) | bwd torch (ms) |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| 32768 x 256 | 0.0125 | 0.0281 | 0.0118 | 0.0729 | 0.0923 |
-| 32768 x 512 | 0.0177 | 0.0247 | 0.0212 | 0.0872 | 0.0886 |
-| 32768 x 1024 | 0.0363 | 0.0358 | 0.0373 | 0.0885 | 0.0937 |
-| 32768 x 2048 | 0.0626 | 0.0686 | 0.0657 | 0.1060 | 0.1528 |
-| 32768 x 4096 | 0.1113 | 0.1123 | 0.1100 | 0.1731 | 0.2673 |
-| 32768 x 8192 | 0.2111 | 0.2014 | 0.2002 | 0.3170 | 0.5287 |
-| 32768 x 16384 | 0.4948 | 0.3800 | 0.4413 | 0.6643 | 1.0825 |
-| 32768 x 32768 | 0.9669 | 0.8873 | 0.8834 | 1.9809 | 2.2251 |
-| 32768 x 65536 | 2.1758 | 1.7838 | 1.8361 | 4.0705 | 4.7513 |
-| 16384 x 131072 | 2.3562 | 1.9107 | 2.2102 | 4.0428 | 5.2555 |
-| 8192 x 262144 | 2.5639 | 2.4437 | 2.4903 | 4.1113 | 5.2836 |
+| M x N | fwd analytical (ms) | fwd tuned (ms) | fwd torch (ms) |
+| --- | ---: | ---: | ---: |
+| 32768 x 256 | 0.0125 | 0.0281 | 0.0118 |
+| 32768 x 512 | 0.0177 | 0.0247 | 0.0212 |
+| 32768 x 1024 | 0.0363 | 0.0358 | 0.0373 |
+| 32768 x 2048 | 0.0626 | 0.0686 | 0.0657 |
+| 32768 x 4096 | 0.1113 | 0.1123 | 0.1100 |
+| 32768 x 8192 | 0.2111 | 0.2014 | 0.2002 |
+| 32768 x 16384 | 0.4948 | 0.3800 | 0.4413 |
+| 32768 x 32768 | 0.9669 | 0.8873 | 0.8834 |
+| 32768 x 65536 | 2.1758 | 1.7838 | 1.8361 |
+| 16384 x 131072 | 2.3562 | 1.9107 | 2.2102 |
+| 8192 x 262144 | 2.5639 | 2.4437 | 2.4903 |
 
 The tuned public entry loses badly at `N=256/512`: its kernel is close to the
 analytical one, but winner-key/context handling dominates a sub-20 us call. It
@@ -570,8 +578,8 @@ is counted once rather than twice.
 
 The table below used BF16 activations, FP32 weights, ten profiled calls, and a
 fresh autotune cache on an idle MI355X GPU. Every provider passed the FP32
-correctness gate. The opening/closing write probes were 6.818/6.795 TB/s
-(0.997x). Other GPUs on the node were active, so the absolute times are scoped
+correctness gate. Across both sweeps the opening/closing write probes were
+6.818/6.748 TB/s (0.990x). Other GPUs on the node were active, so the absolute times are scoped
 to this same-GPU comparison rather than a whole-node-idle claim. Wide autotune
 cells used the tuner's documented degraded-allocation fallback when a full 3x
 rotating working set exceeded the memory budget.
@@ -582,36 +590,40 @@ FLYDSL_AUTOTUNE=1 PYTHONPATH=$PWD HIP_VISIBLE_DEVICES=5 \
   --providers flydsl flydsl_tuned torch_compile \
   --dtype bfloat16 --weight_dtype float32
 
-PYTHONPATH=$PWD HIP_VISIBLE_DEVICES=5 \
+FLYDSL_AUTOTUNE=1 PYTHONPATH=$PWD HIP_VISIBLE_DEVICES=5 \
   python benchmarks/benchmark_rmsnorm_flydsl.py --profile --backward \
-  --providers flydsl torch_compile \
+  --providers flydsl flydsl_tuned torch_compile \
   --dtype bfloat16 --weight_dtype float32
 ```
 
-| M x N | fwd analytical (us) | fwd tuned (us) | fwd torch (us) | analytical / tuned | torch / tuned | bwd FlyDSL (us) | bwd torch (us) | torch / FlyDSL |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 32768 x 256 | 7.043 | 7.315 | 5.975 | 0.963x | 0.817x | 37.198 | 21.573 | 0.580x |
-| 32768 x 512 | 11.447 | 11.863 | 10.843 | 0.965x | 0.914x | 37.862 | 33.045 | 0.873x |
-| 32768 x 1024 | 22.107 | 20.671 | 19.971 | 1.069x | 0.966x | 46.414 | 54.222 | 1.168x |
-| 32768 x 2048 | 40.715 | 39.155 | 38.451 | 1.040x | 0.982x | 78.195 | 118.462 | 1.515x |
-| 32768 x 4096 | 92.892 | 93.080 | 88.144 | 0.998x | 0.947x | 151.515 | 225.215 | 1.486x |
-| 32768 x 8192 | 192.749 | 182.172 | 183.017 | 1.058x | 1.005x | 298.797 | 498.862 | 1.670x |
-| 32768 x 16384 | 452.907 | 359.870 | 398.790 | 1.259x | 1.108x | 632.356 | 1035.776 | 1.638x |
-| 32768 x 32768 | 1023.331 | 858.222 | 876.102 | 1.192x | 1.021x | 2006.504 | 2237.503 | 1.115x |
-| 32768 x 65536 | 2088.749 | 1810.610 | 1815.146 | 1.154x | 1.003x | 3918.897 | 4575.896 | 1.168x |
-| 16384 x 131072 | 2320.743 | 2015.872 | 2021.764 | 1.151x | 1.003x | 4017.730 | 5075.753 | 1.263x |
-| 8192 x 262144 | 2343.880 | 2229.159 | 2307.391 | 1.051x | 1.035x | 3944.229 | 5213.702 | 1.322x |
+`A` means the analytical heuristic; all times below are microseconds.
+
+| M x N | fwd A | fwd tuned | fwd torch | A / tuned | torch / tuned | bwd A | bwd tuned | bwd torch | A / tuned | torch / tuned |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 32768 x 256 | 7.043 | 7.315 | 5.975 | 0.963x | 0.817x | 36.066 | 29.486 | 20.953 | 1.223x | 0.711x |
+| 32768 x 512 | 11.447 | 11.863 | 10.843 | 0.965x | 0.914x | 37.382 | 31.306 | 31.133 | 1.194x | 0.994x |
+| 32768 x 1024 | 22.107 | 20.671 | 19.971 | 1.069x | 0.966x | 45.878 | 45.046 | 53.481 | 1.018x | 1.187x |
+| 32768 x 2048 | 40.715 | 39.155 | 38.451 | 1.040x | 0.982x | 77.875 | 77.699 | 115.086 | 1.002x | 1.481x |
+| 32768 x 4096 | 92.892 | 93.080 | 88.144 | 0.998x | 0.947x | 157.347 | 151.523 | 231.595 | 1.038x | 1.528x |
+| 32768 x 8192 | 192.749 | 182.172 | 183.017 | 1.058x | 1.005x | 289.036 | 291.284 | 493.505 | 0.992x | 1.694x |
+| 32768 x 16384 | 452.907 | 359.870 | 398.790 | 1.259x | 1.108x | 632.979 | 572.230 | 1043.038 | 1.106x | 1.823x |
+| 32768 x 32768 | 1023.331 | 858.222 | 876.102 | 1.192x | 1.021x | 1967.168 | 1965.348 | 2200.395 | 1.001x | 1.120x |
+| 32768 x 65536 | 2088.749 | 1810.610 | 1815.146 | 1.154x | 1.003x | 3848.064 | 3727.327 | 4532.630 | 1.032x | 1.216x |
+| 16384 x 131072 | 2320.743 | 2015.872 | 2021.764 | 1.151x | 1.003x | 3851.153 | 3870.237 | 5086.520 | 0.995x | 1.314x |
+| 8192 x 262144 | 2343.880 | 2229.159 | 2307.391 | 1.051x | 1.035x | 3810.633 | 3772.445 | 5144.010 | 1.010x | 1.364x |
 
 Tuning wins 8/11 forward cells over the analytical heuristic and 6/11 over
 torch.compile; its largest analytical gain is 1.26x at `32768 x 16384`.
-Backward FlyDSL beats torch.compile in 9/11 cells, peaking at 1.67x for
-`32768 x 8192`; the two launch-bound `N=256/512` cells remain losses. Forward
-is one GPU event for every provider. Backward uses two FlyDSL events through
-`N=16384` and three above it, while torch.compile moves from three to two.
+Backward tuning wins 9/11 cells over the analytical grid and 9/11 over
+torch.compile. Its largest analytical gain is 1.22x at `N=256`; the largest
+torch-relative lead is 1.82x at `N=16384`. `N=8192` and `N=131072` are
+sub-1% tuning regressions, while torch still wins the launch-bound `N=256/512`
+cells. Forward is one GPU event for every provider. Backward keeps the same
+two/three-event split as the analytical path.
 
 ## Measuring this backend
 
-The suite figure for this revision is **803 passed, 3 skipped, 1 xfailed** when
+The suite figure for this revision is **810 passed, 3 skipped, 1 xfailed** when
 one idle GPU is visible. The three skips require multiple visible devices; the
 xfail is `test_simulated_cuda_flydsl_import_survives_a_broken_cutedsl_chain`,
 which pins a real limitation rather than a passing behaviour (see the import
@@ -977,7 +989,7 @@ is not a multiple of 8 is still refused.
 | bias, residual (fused add), prenorm | yes | yes |
 | weight_offset (`w+1` fusion) | yes | yes |
 | per-head affine | one kernel, symbolic head extent | one kernel **per head count** |
-| autotune | forward **and** backward tuners | **forward only**, and off unless `FLYDSL_AUTOTUNE=1` |
+| autotune | forward **and** backward tuners | forward **and** backward, off unless `FLYDSL_AUTOTUNE=1` |
 | persistent backward | `sm_count` is a caller knob | computed internally, **no knob** |
 | split parameter reduce | `dw_partial` | same mechanism, spelled `partial`/`dweight_total` |
 | dual dx dtype | internal `dx_dtype` only | not exposed either -- **neither public API reaches it** |

@@ -401,8 +401,16 @@ def _build_l2_rotation_plan(
     *,
     n_timed_calls: int = _L2_TIMED_CALLS,
     target_ratio: int = _L2_TARGET_RATIO,
+    read_bytes_fn=None,
+    clone_fn=None,
+    reference_fn=None,
+    validate_addresses_fn=None,
 ) -> _L2RotationPlan:
     """Clone one call into a bounded, whole-cache-sized round-robin plan."""
+    read_bytes_fn = read_bytes_fn or _rmsnorm_cache_read_bytes
+    clone_fn = clone_fn or _clone_tensor_arguments
+    reference_fn = reference_fn or _reference_samples
+    validate_addresses_fn = validate_addresses_fn or _validate_rotation_addresses
     device = next(
         (value.device for value in (*args, *kwargs.values()) if isinstance(value, torch.Tensor)),
         None,
@@ -411,7 +419,7 @@ def _build_l2_rotation_plan(
         raise RuntimeError("L2-cold RMSNorm tuning requires CUDA/ROCm tensor arguments")
     authority = _cache_authority(device)
     cache_bytes = authority.cache_bytes
-    read_bytes = _rmsnorm_cache_read_bytes(args, kwargs)
+    read_bytes = read_bytes_fn(args, kwargs)
     clone_bytes = _all_tensor_storage_bytes(args, kwargs)
     if read_bytes <= 0 or clone_bytes <= 0:
         raise RuntimeError("L2-cold RMSNorm tuning found no tensor working set")
@@ -447,7 +455,7 @@ def _build_l2_rotation_plan(
     clone_failure = None
     try:
         for _ in range(1, n_sets):
-            cloned_args, cloned_kwargs = _clone_tensor_arguments(args, kwargs)
+            cloned_args, cloned_kwargs = clone_fn(args, kwargs)
             arg_sets.append(cloned_args)
             kwarg_sets.append(cloned_kwargs)
     except (RuntimeError, MemoryError) as error:
@@ -461,7 +469,7 @@ def _build_l2_rotation_plan(
     if clone_failure is not None:
         torch.cuda.empty_cache()
         try:
-            cloned_args, cloned_kwargs = _clone_tensor_arguments(args, kwargs)
+            cloned_args, cloned_kwargs = clone_fn(args, kwargs)
         except (RuntimeError, MemoryError) as clone_error:
             raise RuntimeError(
                 "Unable to allocate even two RMSNorm address sets for L2-cold autotuning"
@@ -509,7 +517,7 @@ def _build_l2_rotation_plan(
     bench_stream = torch.cuda.Stream(device=device)
     bench_stream.wait_stream(current_stream)
     with torch.cuda.stream(bench_stream):
-        expected = _reference_samples(args, kwargs)
+        expected = reference_fn(args, kwargs)
     bench_stream.synchronize()
 
     plan = _L2RotationPlan(
@@ -530,7 +538,7 @@ def _build_l2_rotation_plan(
             "L2-cold rotation working set does not exceed the cache target: "
             f"{plan.working_set_bytes} <= {cache_bytes}"
         )
-    _validate_rotation_addresses(plan)
+    validate_addresses_fn(plan)
     return plan
 
 

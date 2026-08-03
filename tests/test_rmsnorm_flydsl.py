@@ -16,8 +16,13 @@ if torch.version.hip is None:
 pytest.importorskip("flydsl")
 
 import quack.flydsl.rmsnorm_autotune as rmsnorm_autotune_impl
+import quack.flydsl.rmsnorm_bwd_autotune as rmsnorm_bwd_autotune_impl
 import quack.rmsnorm_flydsl as rmsnorm_flydsl_impl
 from quack.flydsl.rmsnorm_autotune import rmsnorm_search_configs
+from quack.flydsl.rmsnorm_bwd_autotune import (
+    rmsnorm_bwd_default_config,
+    rmsnorm_bwd_search_configs,
+)
 from quack.flydsl.rmsnorm_config import (
     MAX_TUNED_NUM_THREADS,
     RmsNormRowConfig,
@@ -912,12 +917,20 @@ def _clear_caches():
     rmsnorm_flydsl_impl._rmsnorm_fwd_tuner._compiled_lookup.clear()
     rmsnorm_flydsl_impl._rmsnorm_fwd_tuner._device_jit_functions.clear()
     rmsnorm_flydsl_impl._rmsnorm_fwd_tuner._hot_cache.clear()
+    rmsnorm_flydsl_impl._rmsnorm_bwd_tuner.cache.clear()
+    rmsnorm_flydsl_impl._rmsnorm_bwd_tuner._artifact_cache.clear()
+    rmsnorm_flydsl_impl._rmsnorm_bwd_tuner._compiled_cache.clear()
+    rmsnorm_flydsl_impl._rmsnorm_bwd_tuner._compiled_lookup.clear()
+    rmsnorm_flydsl_impl._rmsnorm_bwd_tuner._device_jit_functions.clear()
+    rmsnorm_flydsl_impl._rmsnorm_bwd_tuner._hot_cache.clear()
 
 
 def test_custom_ops_are_unique_mutation_only_and_fake_safe():
     fwd = torch.ops.quack._rmsnorm_flydsl_fwd.default
+    fwd_tuned = torch.ops.quack._rmsnorm_flydsl_fwd_autotuned.default
     bwd = torch.ops.quack._rmsnorm_flydsl_bwd.default
-    for op in (fwd, bwd):
+    bwd_tuned = torch.ops.quack._rmsnorm_flydsl_bwd_autotuned.default
+    for op in (fwd, fwd_tuned, bwd, bwd_tuned):
         assert str(op._schema).endswith("-> ()")
     # The staged workspace is scratch the launcher allocates for itself; nothing
     # outside the op reads it, so it is not in the schema.
@@ -940,49 +953,51 @@ def test_custom_ops_are_unique_mutation_only_and_fake_safe():
         bias = torch.empty_like(weight)
         residual = torch.empty_like(x)
         residual_out = torch.empty_like(x)
-        fwd(
-            x,
-            weight,
-            bias,
-            residual,
-            out,
-            residual_out,
-            rstd,
-            1e-6,
-            0.0,
-            True,
-            True,
-            True,
-            True,
-            True,
-            False,
-            1,
-        )
+        for op in (fwd, fwd_tuned):
+            op(
+                x,
+                weight,
+                bias,
+                residual,
+                out,
+                residual_out,
+                rstd,
+                1e-6,
+                0.0,
+                True,
+                True,
+                True,
+                True,
+                True,
+                False,
+                1,
+            )
         dresidual = torch.empty_like(x)
         dbias = torch.empty_like(weight, dtype=torch.float32)
-        bwd(
-            x,
-            weight,
-            dout,
-            residual,
-            rstd,
-            dx,
-            dresidual,
-            dweight,
-            dbias,
-            0.0,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            False,
-            1,
-        )
+        for op in (bwd, bwd_tuned):
+            op(
+                x,
+                weight,
+                dout,
+                residual,
+                rstd,
+                dx,
+                dresidual,
+                dweight,
+                dbias,
+                0.0,
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                False,
+                1,
+            )
 
 
 def test_eager_fast_path_bypasses_custom_op_dispatch():
@@ -1287,6 +1302,216 @@ def test_wide_autotune_candidates_all_use_the_reload_path():
             max_num_threads=MAX_TUNED_NUM_THREADS,
         )
         assert row.reload_from == "gmem"
+
+
+def _direct_bwd_autotune_call_args(m=64, n=512):
+    source = torch.randn((m, n), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(n, device="cuda", dtype=torch.float32)
+    dout = torch.randn_like(source)
+    rstd = torch.rsqrt(source.float().square().mean(dim=-1) + 1e-6)
+    dx = torch.empty_like(source)
+    dweight = torch.empty_like(weight)
+    absent = torch.empty(0, device=source.device, dtype=source.dtype)
+    dbias = torch.empty(1, device=source.device, dtype=weight.dtype)
+    workspace = torch.empty((1, n), device=source.device, dtype=torch.float32)
+    args = (
+        source,
+        weight,
+        dout,
+        source,
+        rstd,
+        rstd,
+        dx,
+        absent,
+        dweight,
+        dbias,
+        workspace,
+        workspace.view(-1),
+        m,
+        0.0,
+    )
+    kwargs = {
+        "n": n,
+        "source_dtype_str": "bf16",
+        "dy_dtype_str": "bf16",
+        "dx_dtype_str": "bf16",
+        "dresidual_dtype_str": "bf16",
+        "dresidual_out_dtype_str": "bf16",
+        "weight_dtype_str": "f32",
+        "dbias_dtype_str": "f32",
+        "has_weight": True,
+        "has_bias": False,
+        "compute_dweight": True,
+        "compute_dbias": False,
+        "compute_input_grad": True,
+        "store_dx": True,
+        "store_dresidual": False,
+        "has_residual": False,
+        "has_dresidual_out": False,
+        "per_head": False,
+        "num_heads": 1,
+        "arch": "gfx950",
+        "schema_version": rmsnorm_bwd_autotune_impl.RMSNORM_BWD_AUTOTUNE_SCHEMA_VERSION,
+        "stream": torch.cuda.current_stream().cuda_stream,
+    }
+    return args, kwargs
+
+
+@pytest.mark.parametrize("n", [256, 512])
+def test_backward_autotune_candidates_cover_row_and_grid_axes(n):
+    args, kwargs = _direct_bwd_autotune_call_args(m=512, n=n)
+    configs = rmsnorm_bwd_search_configs(*args, **kwargs)
+    default = rmsnorm_bwd_default_config(*args, **kwargs)
+    identities = {
+        (config.kwargs["threads_per_row"], config.kwargs["num_programs"]) for config in configs
+    }
+
+    assert (default.kwargs["threads_per_row"], default.kwargs["num_programs"]) in identities
+    assert all(threads >= 64 and threads & (threads - 1) == 0 for threads, _ in identities)
+    assert len({programs for _, programs in identities}) >= 2
+
+
+def test_autotuned_backward_default_matches_reference_without_using_plain_cache():
+    _clear_caches()
+    torch.manual_seed(24)
+    x = torch.randn((64, 512), device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    weight = torch.randn(512, device="cuda", dtype=torch.float32, requires_grad=True)
+    dout = torch.randn_like(x)
+
+    output = rmsnorm_autotuned(x, weight)
+    dx, dweight = torch.autograd.grad(output, (x, weight), dout)
+    _, dx_ref, dweight_ref = _reference_with_grads(x, weight, dout, 1e-6)
+    assert not rmsnorm_flydsl_impl._BWD_CACHE
+    assert len(rmsnorm_flydsl_impl._rmsnorm_bwd_tuner._hot_cache) == 1
+    x_plain = x.detach().clone().requires_grad_(True)
+    weight_plain = weight.detach().clone().requires_grad_(True)
+    plain = rmsnorm(x_plain, weight_plain)
+    dx_plain, dweight_plain = torch.autograd.grad(
+        plain,
+        (x_plain, weight_plain),
+        dout,
+    )
+
+    _assert_grad_close(dx, dx_ref)
+    _assert_grad_close(dweight, dweight_ref)
+    torch.testing.assert_close(dx, dx_plain, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(dweight, dweight_plain, rtol=0.0, atol=0.0)
+
+
+def test_autotuned_backward_searches_once_then_reuses_pinned_winner(tmp_path, monkeypatch):
+    from flydsl.autotune import Config
+
+    _clear_caches()
+    tuner = rmsnorm_flydsl_impl._rmsnorm_bwd_tuner
+    monkeypatch.setattr(tuner, "_cache_file", tmp_path / "winner.json")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CONFIG_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setattr(
+        tuner,
+        "configs",
+        [
+            Config(threads_per_row=64, num_programs=32),
+            Config(threads_per_row=64, num_programs=64),
+        ],
+    )
+    completed = 0
+
+    def bench_once(call, warmup, rep):
+        nonlocal completed
+        call()
+        torch.cuda.synchronize()
+        completed += 1
+        return float(completed)
+
+    monkeypatch.setattr(tuner, "_do_bench", bench_once)
+    args, kwargs = _direct_bwd_autotune_call_args()
+
+    tuner(*args, **kwargs)
+    assert completed == 2
+    assert len(tuner.cache) == len(tuner._hot_cache) == 1
+    artifacts = list((tmp_path / "artifacts").glob("*.json"))
+    assert len(artifacts) == 1
+    first_dx = args[6].clone()
+    first_dweight = args[8].clone()
+
+    monkeypatch.delenv("FLYDSL_AUTOTUNE")
+    monkeypatch.setattr(
+        tuner,
+        "_do_bench",
+        lambda *args, **kwargs: pytest.fail("hot winner unexpectedly benchmarked"),
+    )
+    tuner(*args, **kwargs)
+
+    assert completed == 2
+    torch.testing.assert_close(args[6], first_dx, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(args[8], first_dweight, rtol=0.0, atol=0.0)
+
+
+def test_autotuned_backward_runs_on_non_default_stream():
+    _clear_caches()
+    torch.manual_seed(26)
+    x = torch.randn((64, 512), device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    weight = torch.randn(512, device="cuda", dtype=torch.float32, requires_grad=True)
+    dout = torch.randn_like(x)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+
+    with torch.cuda.stream(stream):
+        output = rmsnorm_autotuned(x, weight)
+        dx, dweight = torch.autograd.grad(output, (x, weight), dout)
+    stream.synchronize()
+    _, dx_ref, dweight_ref = _reference_with_grads(x, weight, dout, 1e-6)
+    _assert_grad_close(dx, dx_ref)
+    _assert_grad_close(dweight, dweight_ref)
+
+
+def test_autotuned_backward_handles_per_head_residual_and_selective_grads():
+    _clear_caches()
+    torch.manual_seed(25)
+    x = torch.randn((4, 2, 512), device="cuda", dtype=torch.bfloat16)
+    residual = torch.randn_like(x, requires_grad=True)
+    weight = torch.randn((2, 512), device="cuda", dtype=torch.float32)
+    bias = torch.randn((2, 512), device="cuda", dtype=torch.float32, requires_grad=True)
+    dout = torch.randn_like(x)
+
+    actual = rmsnorm_autotuned(x, weight, bias=bias, residual=residual)
+    dresidual, dbias = torch.autograd.grad(actual, (residual, bias), dout)
+
+    residual_ref = residual.detach().float().requires_grad_(True)
+    bias_ref = bias.detach().float().requires_grad_(True)
+    expected, _ = _full_reference(
+        x.float(),
+        weight.float(),
+        bias_ref,
+        residual_ref,
+    )
+    dresidual_ref, dbias_ref = torch.autograd.grad(
+        expected,
+        (residual_ref, bias_ref),
+        dout.float(),
+    )
+    _assert_grad_close(dresidual, dresidual_ref.to(dresidual.dtype))
+    _assert_grad_close(dbias, dbias_ref)
+
+
+def test_autotuned_fullgraph_dynamic_backward_uses_tuned_custom_op():
+    _clear_caches()
+    torch._dynamo.reset()
+    compiled = torch.compile(rmsnorm_autotuned, fullgraph=True, dynamic=True)
+    weight = torch.randn(512, device="cuda", dtype=torch.float32, requires_grad=True)
+    for rows in (8, 16):
+        x = torch.randn(
+            (rows, 512),
+            device="cuda",
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
+        dout = torch.randn_like(x)
+        output = compiled(x, weight)
+        dx, dweight = torch.autograd.grad(output, (x, weight), dout)
+        _, dx_ref, dweight_ref = _reference_with_grads(x, weight, dout, 1e-6)
+        _assert_grad_close(dx, dx_ref)
+        _assert_grad_close(dweight, dweight_ref)
 
 
 def test_autotuned_wide_forward_matches_reference(tmp_path, monkeypatch):
