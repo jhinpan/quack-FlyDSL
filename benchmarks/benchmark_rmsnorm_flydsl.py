@@ -23,7 +23,7 @@ import torch._functorch.config as _functorch_config
 from triton.testing import Benchmark, do_bench, perf_report
 
 from quack.bench.bench_utils import run_and_print
-from quack.rmsnorm_flydsl import rmsnorm
+from quack.rmsnorm_flydsl import rmsnorm, rmsnorm_autotuned
 
 # Inductor's donated-buffer optimization is incompatible with retain_graph=True
 # (used so we benchmark only bwd, not fwd+bwd). Disable it for the torch.compile
@@ -83,8 +83,15 @@ def _bench(fn, **kwargs) -> float:
     return do_bench(fn, warmup=10, rep=100, **kwargs)
 
 
-def _providers():
-    return [("flydsl", "flydsl"), ("torch_compile", "torch.compile")]
+PROVIDER_NAMES = {
+    "flydsl": "flydsl",
+    "flydsl_tuned": "flydsl autotuned",
+    "torch_compile": "torch.compile",
+}
+
+
+def _providers(names):
+    return [(name, PROVIDER_NAMES[name]) for name in names]
 
 
 def _compiled_ref(features: str = "plain"):
@@ -223,6 +230,28 @@ def _settle(calls: dict, items: list, seconds: float) -> int:
     return count
 
 
+def _tune_once_then_disable(call):
+    previous = os.environ.get("FLYDSL_AUTOTUNE")
+    os.environ["FLYDSL_AUTOTUNE"] = "1"
+    try:
+        output = call()
+    except Exception:
+        if previous is None:
+            os.environ.pop("FLYDSL_AUTOTUNE", None)
+        else:
+            os.environ["FLYDSL_AUTOTUNE"] = previous
+        raise
+    os.environ["FLYDSL_AUTOTUNE"] = "0"
+    return output, previous
+
+
+def _restore_autotune_env(previous) -> None:
+    if previous is None:
+        os.environ.pop("FLYDSL_AUTOTUNE", None)
+    else:
+        os.environ["FLYDSL_AUTOTUNE"] = previous
+
+
 def run_controlled(
     M: int,
     N: int,
@@ -236,6 +265,7 @@ def run_controlled(
     settle_seconds: float,
     probe_mib: int,
     probe_samples: int,
+    providers: list[str],
 ) -> dict:
     """Run one correctness-gated, order-balanced steady-state comparison."""
     if torch.cuda.device_count() != 1:
@@ -252,34 +282,46 @@ def run_controlled(
         for _ in range(rotation_buffers)
     ]
     weight = (1.0 + torch.randn(N, device="cuda", dtype=param_dtype) * 0.1).requires_grad_(backward)
-    compiled = _compiled_ref()
     items = list(range(rotation_buffers))
+    calls = {}
 
     if not backward:
-        calls = {
-            "flydsl": lambda index: rmsnorm(inputs[index], weight, eps=EPS),
-            "torch_compile": lambda index: compiled(inputs[index], weight, eps=EPS),
-        }
+        if "flydsl" in providers:
+            calls["flydsl"] = lambda index: rmsnorm(inputs[index], weight, eps=EPS)
+        if "flydsl_tuned" in providers:
+            calls["flydsl_tuned"] = lambda index: rmsnorm_autotuned(
+                inputs[index],
+                weight,
+                eps=EPS,
+            )
+        if "torch_compile" in providers:
+            compiled = _compiled_ref()
+            calls["torch_compile"] = lambda index: compiled(inputs[index], weight, eps=EPS)
         expected = (rmsnorm_ref(inputs[0], weight, EPS),)
     else:
         douts = [torch.randn_like(x) * 0.1 for x in inputs]
-        flydsl_outputs = [rmsnorm(x, weight, eps=EPS) for x in inputs]
-        torch_outputs = [compiled(x, weight, eps=EPS) for x in inputs]
-        calls = {
-            "flydsl": lambda index: torch.autograd.grad(
+        if "flydsl" in providers:
+            flydsl_outputs = [rmsnorm(x, weight, eps=EPS) for x in inputs]
+            calls["flydsl"] = lambda index: torch.autograd.grad(
                 flydsl_outputs[index],
                 (inputs[index], weight),
                 douts[index],
                 retain_graph=True,
-            ),
-            "torch_compile": lambda index: torch.autograd.grad(
+            )
+        if "torch_compile" in providers:
+            compiled = _compiled_ref()
+            torch_outputs = [compiled(x, weight, eps=EPS) for x in inputs]
+            calls["torch_compile"] = lambda index: torch.autograd.grad(
                 torch_outputs[index],
                 (inputs[index], weight),
                 douts[index],
                 retain_graph=True,
-            ),
-        }
+            )
         expected = _bwd_reference(inputs[0].detach(), weight.detach(), douts[0], EPS)
+
+    previous_autotune_env = None
+    if "flydsl_tuned" in calls:
+        _, previous_autotune_env = _tune_once_then_disable(lambda: calls["flydsl_tuned"](items[0]))
 
     for name, call in calls.items():
         output = call(items[0])
@@ -310,7 +352,6 @@ def run_controlled(
 
     closing = _bandwidth_probe(probe_mib, probe_samples)
     summaries = {name: _summarize_us(values) for name, values in samples.items()}
-    speedup = summaries["torch_compile"]["median"] / summaries["flydsl"]["median"]
     canary = closing["gbps"] / opening["gbps"]
     quiet = 0.95 <= canary <= 1.05
     op = "bwd" if backward else "fwd"
@@ -320,21 +361,169 @@ def run_controlled(
             f"  {name:13s} median={summary['median']:.3f}us "
             f"p10={summary['p10']:.3f}us p90={summary['p90']:.3f}us"
         )
-    print(f"  torch/FlyDSL={speedup:.3f}x after {settled_calls} settling calls")
+    if "flydsl" in summaries:
+        baseline = summaries["flydsl"]["median"]
+        for name in ("flydsl_tuned", "torch_compile"):
+            if name in summaries:
+                print(f"  {name}/flydsl={summaries[name]['median'] / baseline:.3f}x")
+    print(f"  settled with {settled_calls} provider calls")
     print(f"  BW {opening['gbps']:.1f}->{closing['gbps']:.1f} GB/s ({canary:.3f}x, quiet={quiet})")
     if not quiet:
+        if "flydsl_tuned" in calls:
+            _restore_autotune_env(previous_autotune_env)
         raise RuntimeError("bandwidth contention canary moved outside 0.95-1.05")
+    if "flydsl_tuned" in calls:
+        _restore_autotune_env(previous_autotune_env)
     return {
         "operation": op,
-        "flydsl_us": summaries["flydsl"]["median"],
-        "torch_compile_us": summaries["torch_compile"]["median"],
-        "torch_over_flydsl": speedup,
+        "providers": {name: summary["median"] for name, summary in summaries.items()},
         "contention_canary": canary,
     }
 
 
-def make_benchmark(op: str, dtype_name: str, weight_mode: str, features: str, x_vals=None):
-    line_vals, line_names = zip(*_providers())
+def _profile_device_call(call, repeats: int) -> tuple[float, float]:
+    from torch.profiler import ProfilerActivity, profile
+
+    for _ in range(5):
+        call()
+    torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+        for _ in range(repeats):
+            call()
+        torch.cuda.synchronize()
+    device_events = [
+        event
+        for event in prof.events()
+        if event.device_type == torch.autograd.DeviceType.CUDA
+        and not event.name.startswith("## Call CompiledFxGraph")
+    ]
+    return (
+        sum(event.device_time_total for event in device_events) / repeats,
+        len(device_events) / repeats,
+    )
+
+
+def run_profiled_shapes(
+    shapes,
+    *,
+    backward: bool,
+    dtype_name: str,
+    weight_mode: str,
+    providers: list[str],
+    repeats: int,
+    save_path: str | None,
+):
+    """Profile raw GPU events after every provider is warm and tuning is complete."""
+    import pandas as pd
+
+    rows = []
+    dtype = DTYPE_MAP[dtype_name]
+    param_dtype = _weight_dtype(dtype_name, weight_mode)
+    for M, N in shapes:
+        x = torch.randn((M, N), device="cuda", dtype=dtype, requires_grad=backward)
+        weight = torch.randn(N, device="cuda", dtype=param_dtype, requires_grad=backward)
+        calls = {}
+        if not backward:
+            if "flydsl" in providers:
+                calls["flydsl"] = lambda x=x, weight=weight: rmsnorm(x, weight, eps=EPS)
+            if "flydsl_tuned" in providers:
+                calls["flydsl_tuned"] = lambda x=x, weight=weight: rmsnorm_autotuned(
+                    x,
+                    weight,
+                    eps=EPS,
+                )
+            if "torch_compile" in providers:
+                compiled = _compiled_ref()
+                calls["torch_compile"] = lambda compiled=compiled, x=x, weight=weight: compiled(
+                    x, weight, eps=EPS
+                )
+            expected = (rmsnorm_ref(x, weight, EPS),)
+        else:
+            dout = torch.randn_like(x)
+            if "flydsl" in providers:
+                flydsl_output = rmsnorm(x, weight, eps=EPS)
+                calls["flydsl"] = (
+                    lambda flydsl_output=flydsl_output, x=x, weight=weight, dout=dout: (
+                        torch.autograd.grad(
+                            flydsl_output,
+                            (x, weight),
+                            dout,
+                            retain_graph=True,
+                        )
+                    )
+                )
+            if "torch_compile" in providers:
+                compiled = _compiled_ref()
+                torch_output = compiled(x, weight, eps=EPS)
+                calls["torch_compile"] = (
+                    lambda torch_output=torch_output, x=x, weight=weight, dout=dout: (
+                        torch.autograd.grad(
+                            torch_output,
+                            (x, weight),
+                            dout,
+                            retain_graph=True,
+                        )
+                    )
+                )
+            expected = _bwd_reference(x.detach(), weight.detach(), dout, EPS)
+
+        previous_autotune_env = None
+        if "flydsl_tuned" in calls:
+            _, previous_autotune_env = _tune_once_then_disable(calls["flydsl_tuned"])
+        for name, call in calls.items():
+            actual = call()
+            actual_tensors = actual if isinstance(actual, tuple) else (actual,)
+            _gate("bwd" if backward else "fwd", dtype_name, actual_tensors, expected)
+            device_us, launches = _profile_device_call(call, repeats)
+            rows.append(
+                {
+                    "M": M,
+                    "N": N,
+                    "provider": name,
+                    "device_us": round(device_us, 3),
+                    "gpu_events_per_call": round(launches, 2),
+                }
+            )
+            print(
+                f"PASS profile {name:14s} M={M:<5d} N={N:<6d} "
+                f"{device_us:.3f}us, {launches:.2f} GPU events/call",
+                flush=True,
+            )
+        if "flydsl_tuned" in calls:
+            _restore_autotune_env(previous_autotune_env)
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    frame = pd.DataFrame(rows)
+    times = frame.pivot(index=["M", "N"], columns="provider", values="device_us")
+    launches = frame.pivot(
+        index=["M", "N"],
+        columns="provider",
+        values="gpu_events_per_call",
+    )
+    print("\nDevice time per call (us):")
+    print(times.to_string())
+    print("\nGPU events per call:")
+    print(launches.to_string())
+    if save_path:
+        os.makedirs(save_path, exist_ok=True)
+        op = "bwd" if backward else "fwd"
+        frame.to_csv(
+            os.path.join(save_path, f"rmsnorm-flydsl-profile-{op}.csv"),
+            index=False,
+        )
+    return frame
+
+
+def make_benchmark(
+    op: str,
+    dtype_name: str,
+    weight_mode: str,
+    features: str,
+    providers,
+    x_vals=None,
+):
+    line_vals, line_names = zip(*_providers(providers))
     return Benchmark(
         x_names=["M", "N"],
         x_vals=x_vals if x_vals is not None else MN_PAIRS,
@@ -357,26 +546,46 @@ def rmsnorm_fwd_runner(M, N, provider, dtype_name, weight_mode, features):
     if features == "plain":
         if provider == "flydsl":
             fn = lambda: rmsnorm(x, w, eps=EPS)
-        else:
+        elif provider == "flydsl_tuned":
+            fn = lambda: rmsnorm_autotuned(x, w, eps=EPS)
+        elif provider == "torch_compile":
             compiled = _compiled_ref()
             fn = lambda: compiled(x, w, eps=EPS)
+        else:
+            raise ValueError(provider)
         expected = (rmsnorm_ref(x, w, EPS),)
     else:
         bias = torch.randn(N, device="cuda", dtype=param_dtype)
         residual = torch.randn(M, N, device="cuda", dtype=dtype)
         if provider == "flydsl":
             fn = lambda: rmsnorm(x, w, bias=bias, residual=residual, eps=EPS, prenorm=True)
-        else:
+        elif provider == "flydsl_tuned":
+            fn = lambda: rmsnorm_autotuned(
+                x,
+                w,
+                bias=bias,
+                residual=residual,
+                eps=EPS,
+                prenorm=True,
+            )
+        elif provider == "torch_compile":
             compiled = _compiled_ref("fused")
             fn = lambda: compiled(x, w, bias, residual, EPS)
+        else:
+            raise ValueError(provider)
         expected = rmsnorm_fused_ref(x, w, bias, residual, EPS)
 
-    if provider not in ("flydsl", "torch_compile"):
-        raise ValueError(provider)
-
-    actual = fn()
-    _gate("fwd", dtype_name, actual if isinstance(actual, tuple) else (actual,), expected)
-    ms = _bench(fn)
+    if provider == "flydsl_tuned":
+        actual, previous = _tune_once_then_disable(fn)
+        try:
+            _gate("fwd", dtype_name, actual if isinstance(actual, tuple) else (actual,), expected)
+            ms = _bench(fn)
+        finally:
+            _restore_autotune_env(previous)
+    else:
+        actual = fn()
+        _gate("fwd", dtype_name, actual if isinstance(actual, tuple) else (actual,), expected)
+        ms = _bench(fn)
     return _result(_mem_bytes("fwd", M, N, x, w, features), ms)
 
 
@@ -392,6 +601,8 @@ def rmsnorm_bwd_runner(M, N, provider, dtype_name, weight_mode, features):
 
     if provider == "flydsl":
         forward = rmsnorm
+    elif provider == "flydsl_tuned":
+        raise ValueError("the FlyDSL backend has no autotuned backward kernel")
     elif provider == "torch_compile":
         forward = _compiled_ref()
     else:
@@ -428,10 +639,22 @@ def main():
     parser.add_argument("--N", type=int, default=None, help="Bench a single N (requires --M)")
     parser.add_argument("--save_path", default=None)
     parser.add_argument(
+        "--providers",
+        nargs="+",
+        choices=tuple(PROVIDER_NAMES),
+        default=["flydsl", "torch_compile"],
+    )
+    parser.add_argument(
         "--controlled",
         action="store_true",
         help="Run one steady-state, order-balanced comparison instead of perf_report",
     )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Use torch.profiler GPU timestamps after warmup and tuning",
+    )
+    parser.add_argument("--profile_repeats", type=int, default=10)
     parser.add_argument("--rounds", type=int, default=12)
     parser.add_argument("--calls_per_sample", type=int, default=None)
     parser.add_argument("--rotation_buffers", type=int, default=2)
@@ -444,6 +667,15 @@ def main():
         parser.error("--M and --N must be given together")
     if args.backward and args.features != "plain":
         parser.error("--features fused is forward only")
+    if "flydsl_tuned" in args.providers:
+        if args.backward:
+            parser.error("FlyDSL autotuning is forward-only; there is no tuned backward kernel")
+        if os.environ.get("FLYDSL_AUTOTUNE") != "1":
+            parser.error("flydsl_tuned requires FLYDSL_AUTOTUNE=1")
+    if args.controlled and args.profile:
+        parser.error("--controlled and --profile are mutually exclusive")
+    if args.profile_repeats <= 0:
+        parser.error("--profile_repeats must be positive")
     if args.controlled:
         if args.features != "plain":
             parser.error("--controlled supports only --features plain")
@@ -478,6 +710,7 @@ def main():
             settle_seconds=args.settle_seconds,
             probe_mib=args.probe_mib,
             probe_samples=args.probe_samples,
+            providers=args.providers,
         )
         return
     x_vals = [(args.M, args.N)] if args.M is not None else None
@@ -485,10 +718,28 @@ def main():
     torch.manual_seed(0)
 
     op = "bwd" if args.backward else "fwd"
+    if args.profile:
+        run_profiled_shapes(
+            x_vals if x_vals is not None else MN_PAIRS,
+            backward=args.backward,
+            dtype_name=args.dtype,
+            weight_mode=args.weight_dtype,
+            providers=args.providers,
+            repeats=args.profile_repeats,
+            save_path=args.save_path,
+        )
+        return
     runner = rmsnorm_bwd_runner if args.backward else rmsnorm_fwd_runner
-    bench = perf_report(make_benchmark(op, args.dtype, args.weight_dtype, args.features, x_vals))(
-        runner
-    )
+    bench = perf_report(
+        make_benchmark(
+            op,
+            args.dtype,
+            args.weight_dtype,
+            args.features,
+            args.providers,
+            x_vals,
+        )
+    )(runner)
 
     run_and_print(bench, save_path=args.save_path)
 
