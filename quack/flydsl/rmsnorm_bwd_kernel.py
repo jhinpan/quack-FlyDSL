@@ -534,7 +534,7 @@ def build_rmsnorm_bwd_two_stage_module(
         rstd = load_scalar(f32_copy, fx.Float32, rstd_div, rstd_index)
 
         thread_sum = fx.Float32(0.0)
-        for tile_i in range(0, wide_full_tiles):
+        for tile_i in range(wide_full_tiles):
             index = tid + tile_i * block_threads
             source = load_dtype_vec(
                 source_copy,

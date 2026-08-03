@@ -250,7 +250,7 @@ def build_rmsnorm_module(
         row_values = []
         if const_expr(runtime_wide_loop):
             # A device loop keeps code size and temporary VGPRs independent of N.
-            for tile_i in range(0, wide_full_tiles):
+            for tile_i in range(wide_full_tiles):
                 index = lane + tile_i * threads_per_row
                 value = load_dtype_vec(
                     input_copy,
@@ -308,7 +308,7 @@ def build_rmsnorm_module(
                         safe_index,
                         vecsize,
                     )
-                if const_expr(store_residual):
+                if const_expr(store_residual):  # noqa: SIM102 - compile-time guard
                     if in_row:
                         store_dtype_vec(
                             residual_out_copy,
@@ -407,7 +407,7 @@ def build_rmsnorm_module(
                 )
 
         if const_expr(runtime_wide_loop):
-            for tile_i in range(0, wide_full_tiles):
+            for tile_i in range(wide_full_tiles):
                 index = lane + tile_i * threads_per_row
                 value = load_dtype_vec(
                     input_copy,
