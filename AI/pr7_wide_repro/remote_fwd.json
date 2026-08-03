@@ -3,37 +3,37 @@
   "closing_bandwidth": {
     "best_probe": "write",
     "calls_per_sample": 8,
-    "median_gbps": 6481.7466792804935,
+    "median_gbps": 6510.041372841365,
     "probe_mib": 512,
     "probes": {
       "copy": {
-        "logical_gbps": 5223.327658441821,
-        "max_us": 209.4314992427826,
-        "median_us": 205.5666223168373,
-        "min_us": 204.021617770195,
-        "p10_us": 204.34550642967224,
-        "p90_us": 206.68612718582153
+        "logical_gbps": 5213.754731892049,
+        "max_us": 209.85649526119232,
+        "median_us": 205.94406127929688,
+        "min_us": 203.9715051651001,
+        "p10_us": 204.10349369049072,
+        "p90_us": 207.07350224256516
       },
       "two_read_one_write": {
-        "logical_gbps": 5635.41084538114,
-        "max_us": 288.73226046562195,
-        "median_us": 285.8021855354309,
-        "min_us": 283.79225730895996,
-        "p10_us": 285.0036293268204,
-        "p90_us": 286.537629365921
+        "logical_gbps": 5630.144948225154,
+        "max_us": 287.7021133899689,
+        "median_us": 286.06949746608734,
+        "min_us": 283.997118473053,
+        "p10_us": 284.93111431598663,
+        "p90_us": 287.3906224966049
       },
       "write": {
-        "logical_gbps": 6481.7466792804935,
-        "max_us": 84.3956246972084,
-        "median_us": 82.82812312245369,
-        "min_us": 81.62562549114227,
-        "p10_us": 81.86112344264984,
-        "p90_us": 83.9141234755516
+        "logical_gbps": 6510.041372841365,
+        "max_us": 84.73062515258789,
+        "median_us": 82.46812596917152,
+        "min_us": 80.7105004787445,
+        "p10_us": 81.66461139917374,
+        "p90_us": 83.71062651276588
       }
     }
   },
   "contention_canary": {
-    "closing_over_opening": 0.995985698483022,
+    "closing_over_opening": 0.9956035877614905,
     "quiet": true
   },
   "dtype": "bfloat16",
@@ -41,36 +41,37 @@
     "arch": "gfx950",
     "flydsl": "0.3.0.dev765",
     "free_memory_bytes_at_start": 308556070912,
-    "git_commit": "920a841749704635e15cb906611bf80afadbc533",
+    "git_commit": "1cee61be0138e4dec7a111cd4b97ef29f96cab1f",
     "git_diff_scope": [
       "pyproject.toml",
       "quack",
       "benchmarks",
       "tests"
     ],
-    "git_diff_sha256": "2e9003429f2910ef56cb1357581be6158d4f5fc5b0562a1cbfff6c4ffad5a8ff",
+    "git_diff_sha256": "d2c0af2a9e22b34f936e0d00afbab83d19a77c88c3fab1e2f1a995bc623643d3",
     "git_dirty_paths": [
       "AI/flydsl_rmsnorm_notes.md",
       "AI/pr7_wide_repro/README.md",
+      "AI/pr7_wide_repro/local_bwd.json",
+      "AI/pr7_wide_repro/local_fwd.json",
+      "AI/pr7_wide_repro/remote_bwd.json",
+      "AI/pr7_wide_repro/remote_fwd.json",
       "benchmarks/benchmark_rmsnorm_flydsl.py",
       "benchmarks/repro_pr7_wide.py",
-      "pyproject.toml",
       "quack/flydsl/rmsnorm_autotune.py",
       "quack/flydsl/rmsnorm_bwd_kernel.py",
       "quack/flydsl/rmsnorm_config.py",
       "quack/flydsl/rmsnorm_kernel.py",
       "quack/rmsnorm_flydsl.py",
       "tests/test_rmsnorm_flydsl.py",
-      "tests/test_rmsnorm_flydsl_config.py",
-      "AI/pr7_wide_repro/remote_bwd.json",
-      "AI/pr7_wide_repro/remote_fwd.json"
+      "tests/test_rmsnorm_flydsl_config.py"
     ],
     "gpu": "AMD Instinct MI355X",
     "hip": "7.2.26015-fc0010cf6a",
     "hostname": "smci355-ccs-aus-n08-09.cs-aus.dcgpu",
     "python": "3.10.12",
-    "quack_module": "/tmp/quack-pr7-final/quack/rmsnorm_flydsl.py",
-    "script": "/tmp/quack-pr7-final/benchmarks/repro_pr7_wide.py",
+    "quack_module": "/tmp/quack-pr7-latest/quack/rmsnorm_flydsl.py",
+    "script": "/tmp/quack-pr7-latest/benchmarks/repro_pr7_wide.py",
     "script_sha256": "0ef978f9b63f9de0cdb0baa91836b524aae0e97833e6f462394c4a51c5e054e2",
     "torch": "2.9.1+rocm7.2.0.git7e1940d4",
     "total_memory_bytes": 309220868096,
@@ -84,82 +85,82 @@
   "opening_bandwidth": {
     "best_probe": "write",
     "calls_per_sample": 8,
-    "median_gbps": 6507.871236658108,
+    "median_gbps": 6538.78858299266,
     "probe_mib": 512,
     "probes": {
       "copy": {
-        "logical_gbps": 5218.632707915009,
-        "max_us": 209.28162336349487,
-        "median_us": 205.75156062841415,
-        "min_us": 203.0014991760254,
-        "p10_us": 204.32651042938232,
-        "p90_us": 207.3375180363655
+        "logical_gbps": 5224.792230383757,
+        "max_us": 209.31650698184967,
+        "median_us": 205.5089995265007,
+        "min_us": 203.5064995288849,
+        "p10_us": 204.27260994911194,
+        "p90_us": 207.87249952554703
       },
       "two_read_one_write": {
-        "logical_gbps": 5630.1423087933745,
-        "max_us": 288.1271243095398,
-        "median_us": 286.0696315765381,
-        "min_us": 283.7071120738983,
-        "p10_us": 284.53562557697296,
-        "p90_us": 287.37376034259796
+        "logical_gbps": 5629.306026818448,
+        "max_us": 287.7921164035797,
+        "median_us": 286.11212968826294,
+        "min_us": 284.8721146583557,
+        "p10_us": 285.33350229263306,
+        "p90_us": 287.4781161546707
       },
       "write": {
-        "logical_gbps": 6507.871236658108,
-        "max_us": 83.53074640035629,
-        "median_us": 82.49562606215477,
-        "min_us": 81.0406282544136,
-        "p10_us": 81.87762722373009,
-        "p90_us": 83.4751270711422
+        "logical_gbps": 6538.78858299266,
+        "max_us": 84.38549935817719,
+        "median_us": 82.10556209087372,
+        "min_us": 80.33562451601028,
+        "p10_us": 80.65501004457474,
+        "p90_us": 84.02212634682655
       }
     }
   },
   "operation": "fwd",
   "providers": {
     "flydsl": {
-      "max_us": 2589.3397331237793,
-      "median_us": 2578.0396461486816,
-      "min_us": 2568.7994956970215,
-      "p10_us": 2570.9213972091675,
-      "p90_us": 2583.594489097595
+      "max_us": 4502.957820892334,
+      "median_us": 2576.8539905548096,
+      "min_us": 2568.378686904907,
+      "p10_us": 2568.5707092285156,
+      "p90_us": 2680.787754058838
     },
     "torch_compile": {
-      "max_us": 2437.2284412384033,
-      "median_us": 2425.568461418152,
-      "min_us": 2419.51847076416,
-      "p10_us": 2421.0045099258423,
-      "p90_us": 2434.5223426818848
+      "max_us": 2546.828508377075,
+      "median_us": 2427.157759666443,
+      "min_us": 2419.497489929199,
+      "p10_us": 2423.530697822571,
+      "p90_us": 2430.982828140259
     }
   },
   "rotation_buffers": 2,
   "rounds": 12,
   "samples_us": {
     "flydsl": [
-      2589.3397331237793,
-      2579.7698497772217,
-      2580.2197456359863,
-      2574.1894245147705,
-      2570.6493854522705,
-      2577.009439468384,
-      2568.7994956970215,
-      2580.8494091033936,
-      2579.0698528289795,
-      2583.89949798584,
-      2573.3695030212402,
-      2574.7697353363037
+      2589.7789001464844,
+      2578.7787437438965,
+      2577.148914337158,
+      2576.559066772461,
+      2570.208787918091,
+      2580.7390213012695,
+      2568.378686904907,
+      2574.799060821533,
+      2568.3887004852295,
+      4502.957820892334,
+      2690.8998489379883,
+      2575.1590728759766
     ],
     "torch_compile": [
-      2437.2284412384033,
-      2420.968532562256,
-      2434.6582889556885,
-      2421.32830619812,
-      2425.5783557891846,
-      2425.168514251709,
-      2432.3084354400635,
-      2422.66845703125,
-      2419.51847076416,
-      2426.1984825134277,
-      2433.2988262176514,
-      2425.558567047119
+      2430.9377670288086,
+      2428.908109664917,
+      2430.98783493042,
+      2419.497489929199,
+      2426.527738571167,
+      2427.7877807617188,
+      2426.407814025879,
+      2423.64764213562,
+      2429.637908935547,
+      2423.9578247070312,
+      2546.828508377075,
+      2423.5177040100098
     ]
   },
   "settle_seconds": 3.0,
@@ -169,6 +170,6 @@
     262144
   ],
   "status": "passed",
-  "torch_over_flydsl": 0.9408577036593267,
+  "torch_over_flydsl": 0.9419073678846133,
   "weight_dtype": "float32"
 }
