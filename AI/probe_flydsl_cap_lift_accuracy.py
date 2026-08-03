@@ -144,12 +144,19 @@ def _worst_samples(torch, actual, expected, rtol, atol, k=8):
     uncheckable from the JSON, which is the whole complaint being answered.
     Caveat that the records carry themselves: at these shapes most elements
     round to zero in both tensors, so ``diff - thr`` ties at exactly ``-atol``
-    across millions of them and ``argsort`` returns eight arbitrary members of
-    that tie set. Those rows are checkable but not reproducible -- a rerun may
-    name eight different indices with identical numbers. ``margin_tied_at_min``
-    counts the tie set so a reader can see that, and ``worst_margin`` is the
-    tensor-wide extremum, which is a fact about the tensor rather than about
-    which representative argsort happened to pick.
+    across millions of them and ``argsort`` returns arbitrary members of that
+    tie set. Those rows are checkable but not reproducible -- a rerun may name
+    different indices with identical numbers. ``margin_tied_at_worst`` counts
+    the tie set at the margin actually retained, so a reader can tell a genuine
+    worst case (count 1) from one representative of millions (count large).
+
+    That counter was itself wrong on first writing: it counted ties at
+    ``margin.min()`` while ``argsort(descending=True)`` retains the *max* end,
+    so it reported 1 -- "these are genuine worst cases" -- for exactly the
+    tensors whose retained rows were tie representatives. A field describing a
+    set other than the one its name and purpose point at, inside the field
+    added to disclose that hazard. It counts at the max end now, which is where
+    the samples come from.
     """
     a, b = actual.float().flatten(), expected.float().flatten()
     diff = (a - b).abs()
@@ -174,7 +181,7 @@ def _worst_samples(torch, actual, expected, rtol, atol, k=8):
     ]
     return records, {
         "worst_margin": float(margin.max()),
-        "margin_tied_at_min": int((margin <= margin.min() + 1e-9).sum()),
+        "margin_tied_at_worst": int((margin >= margin.max() - 1e-9).sum()),
         "n_elements": int(a.numel()),
     }
 
