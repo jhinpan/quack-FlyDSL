@@ -8,6 +8,7 @@ FlyDSL, and this backend does not alter Quack's existing CUDA/CuTe dispatch.
 
 import math
 import numbers
+import os
 
 import torch
 
@@ -19,15 +20,9 @@ from quack.flydsl.rmsnorm_bwd_kernel import (
 from quack.flydsl.rmsnorm_autotune import (
     RMSNORM_AUTOTUNE_SCHEMA_VERSION,
     _rmsnorm_fwd_tuner,
-    rmsnorm_default_config,
 )
-from quack.flydsl.rmsnorm_common import EPS, FLYDSL_BUILD_LOCK, dtype_to_elem_bits, run_compiled
-from quack.flydsl.rmsnorm_config import (
-    MAX_N,
-    N_ALIGNMENT,
-    RmsNormRowConfig,
-    next_power_of_two,
-)
+from quack.flydsl.rmsnorm_common import EPS, FLYDSL_BUILD_LOCK, run_compiled
+from quack.flydsl.rmsnorm_config import MAX_N, N_ALIGNMENT, next_power_of_two
 from quack.flydsl.rmsnorm_kernel import build_rmsnorm_module
 
 __all__ = ["rmsnorm", "rmsnorm_autotuned"]
@@ -41,11 +36,10 @@ _SUPPORTED_ARCHES = frozenset({"gfx950"})
 # packing raises a struct.error from inside the dispatch.
 _MAX_ROWS = 2**31 - 1
 _FWD_CACHE: dict[tuple, object] = {}
-# Launchers rebuilt from a tuner winner, so a warm tuned call skips the tuner.
-_FWD_TUNED_CACHE: dict[tuple, object] = {}
 _BWD_CACHE: dict[tuple, object] = {}
 _BWD_CU_COUNT_CACHE: dict[torch.device, int] = {}
 _DEVICE_ARCH_CACHE: dict[int, str] = {}
+_AUTOTUNE_ARCH_CACHE: dict[tuple, str] = {}
 
 
 def _dtype_to_str(dtype: torch.dtype) -> str:
@@ -107,6 +101,21 @@ def _validate_arch(device: torch.device) -> str:
             "Set ARCH and FLYDSL_GPU_ARCH to the device architecture."
         )
     return actual
+
+
+def _validated_autotune_arch(device: torch.device) -> str:
+    """Revalidate the compile target only when its controlling environment changes."""
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    key = (
+        index,
+        os.environ.get("FLYDSL_COMPILE_BACKEND", ""),
+        os.environ.get("ARCH", ""),
+    )
+    arch = _AUTOTUNE_ARCH_CACHE.get(key)
+    if arch is None:
+        arch = _validate_arch(device)
+        _AUTOTUNE_ARCH_CACHE[key] = arch
+    return arch
 
 
 def _validate_inputs(
@@ -355,28 +364,6 @@ def _launch_rmsnorm_fwd(
         )
 
 
-def _tuned_threads_per_row(tuner_args: tuple, tuner_kwargs: dict) -> int | None:
-    """The winner's row width, or None if this key must keep using the tuner.
-
-    A searched winner is recorded in the tuner's cache; an unsearched call
-    leaves that cache empty and takes ``rmsnorm_default_config``, so both are
-    resolved here. None covers a winner carrying compiler options and any
-    change in FlyDSL's tuner internals: the caller then keeps the tuner path,
-    which is slower but always runs the config the search picked.
-    """
-    try:
-        config = _rmsnorm_fwd_tuner.cache.get(
-            _rmsnorm_fwd_tuner._make_key(tuner_args, tuner_kwargs)
-        )
-        if config is None:
-            config = rmsnorm_default_config(*tuner_args, **tuner_kwargs)
-        if config.compiler_opts():
-            return None
-        return int(config.kwargs["threads_per_row"])
-    except (AttributeError, KeyError, TypeError, ValueError):
-        return None
-
-
 def _launch_rmsnorm_fwd_autotuned(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -396,112 +383,11 @@ def _launch_rmsnorm_fwd_autotuned(
     per_head: bool,
     num_heads: int,
 ) -> None:
-    """Launch the tuner's winner, going through the tuner only once per key.
-
-    The tuner re-resolves every argument into a JIT cache key on each call,
-    which costs ~200us of host time -- more than the kernel itself at every
-    shape this backend accepts, so a warm tuned call was slower than the
-    untuned one it is meant to improve on. The winner is a ``threads_per_row``,
-    so once it is known the launch is an ordinary cached build.
-
-    A winner carrying compiler options (``waves_per_eu`` and friends) cannot be
-    rebuilt through ``build_rmsnorm_module``, which takes only the row config.
-    Those keep going through the tuner rather than silently running a kernel
-    the search did not pick.
-    """
+    """Launch through the tuner's ABI/config/device-aware CompiledFunction cache."""
     m, n = x.shape[0], x.shape[-1]
-    dtype_str = _dtype_to_str(x.dtype)
-    output_dtype_str = _dtype_to_str(out.dtype)
-    weight_dtype_str = _dtype_to_str(weight.dtype)
-    bias_dtype_str = _dtype_to_str(bias.dtype)
-    residual_dtype_str = _dtype_to_str(residual.dtype)
-    residual_out_dtype_str = _dtype_to_str(residual_out.dtype)
-
-    # Same shape as the untuned path's key, plus ``m``, which the tuner keys on
-    # and this therefore has to as well. The architecture is not a term: the
-    # device index already determines it, and resolving it costs host time this
-    # path is trying not to spend.
-    key = (
-        x.device.index,
-        m,
-        n,
-        dtype_str,
-        output_dtype_str,
-        weight_dtype_str,
-        bias_dtype_str,
-        residual_dtype_str,
-        residual_out_dtype_str,
-        has_weight,
-        has_bias,
-        has_residual,
-        store_residual,
-        store_rstd,
-        per_head,
-        num_heads,
-    )
-
+    arch = _validated_autotune_arch(x.device)
     with torch.cuda.device(x.device):
-        stream = _current_raw_stream(x.device)
-        launcher = _FWD_TUNED_CACHE.get(key)
-        if launcher is None:
-            arch = _validate_arch(x.device)
-            tuner_args = (
-                x,
-                weight,
-                bias,
-                residual,
-                out,
-                residual_out,
-                rstd,
-                m,
-                eps,
-                weight_offset,
-            )
-            tuner_kwargs = dict(
-                n=n,
-                input_dtype_str=dtype_str,
-                output_dtype_str=output_dtype_str,
-                weight_dtype_str=weight_dtype_str,
-                bias_dtype_str=bias_dtype_str,
-                residual_dtype_str=residual_dtype_str,
-                residual_out_dtype_str=residual_out_dtype_str,
-                has_weight=has_weight,
-                has_bias=has_bias,
-                has_residual=has_residual,
-                store_residual=store_residual,
-                store_rstd=store_rstd,
-                per_head=per_head,
-                num_heads=num_heads,
-                arch=arch,
-                schema_version=RMSNORM_AUTOTUNE_SCHEMA_VERSION,
-            )
-            _rmsnorm_fwd_tuner(*tuner_args, **tuner_kwargs, stream=stream)
-            threads = _tuned_threads_per_row(tuner_args, tuner_kwargs)
-            if threads is None:
-                return
-            _FWD_TUNED_CACHE[key] = build_rmsnorm_module(
-                n,
-                dtype_str,
-                output_dtype_str,
-                weight_dtype_str=weight_dtype_str,
-                bias_dtype_str=bias_dtype_str,
-                residual_dtype_str=residual_dtype_str,
-                residual_out_dtype_str=residual_out_dtype_str,
-                has_weight=has_weight,
-                has_bias=has_bias,
-                has_residual=has_residual,
-                store_residual=store_residual,
-                store_rstd=store_rstd,
-                per_head=per_head,
-                num_heads=num_heads,
-                arch=arch,
-                row_config=RmsNormRowConfig.with_num_threads(
-                    n, dtype_to_elem_bits(dtype_str), threads
-                ),
-            )
-            return
-        run_compiled(
-            launcher,
+        _rmsnorm_fwd_tuner(
             x,
             weight,
             bias,
@@ -512,7 +398,23 @@ def _launch_rmsnorm_fwd_autotuned(
             m,
             eps,
             weight_offset,
-            stream,
+            n=n,
+            input_dtype_str=_dtype_to_str(x.dtype),
+            output_dtype_str=_dtype_to_str(out.dtype),
+            weight_dtype_str=_dtype_to_str(weight.dtype),
+            bias_dtype_str=_dtype_to_str(bias.dtype),
+            residual_dtype_str=_dtype_to_str(residual.dtype),
+            residual_out_dtype_str=_dtype_to_str(residual_out.dtype),
+            has_weight=has_weight,
+            has_bias=has_bias,
+            has_residual=has_residual,
+            store_residual=store_residual,
+            store_rstd=store_rstd,
+            per_head=per_head,
+            num_heads=num_heads,
+            arch=arch,
+            schema_version=RMSNORM_AUTOTUNE_SCHEMA_VERSION,
+            stream=_current_raw_stream(x.device),
         )
 
 

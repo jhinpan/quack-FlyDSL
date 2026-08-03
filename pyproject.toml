@@ -18,7 +18,7 @@ dependencies = [
 cu13 = ["nvidia-cutlass-dsl[cu13]==4.6.1"]
 heuristics = ["nvidia-matmul-heuristics"]
 jax = ["jax", "jax-tvm-ffi"]
-flydsl = ["flydsl>=0.2.4,<0.4"]
+flydsl = ["flydsl>=0.3,<0.4"]
 bench = ["pandas", "tyro"]
 dev = [
     "pre-commit",
