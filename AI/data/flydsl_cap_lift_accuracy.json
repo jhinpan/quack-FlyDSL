@@ -23,8 +23,8 @@
   "shipped_max_n": 8192,
   "environment": {
     "repo": "/tmp/wt-cl4",
-    "commit": "dbe25f8f5e3c73ff34406984c7469731f2752677",
-    "tree": "8ac4601b6fd7d6cecc3c93a7d571a011c49f369b",
+    "commit": "ceb49cdda1d8474cd5be013744f01c222bf6475c",
+    "tree": "98056fd8f2e58ab003f54782eaf1b4f741d58b9c",
     "interpreter": "/opt/venv/bin/python",
     "python": "3.10.12",
     "torch": "2.9.1+rocm7.2.0.git7e1940d4",
@@ -43,7 +43,7 @@
       "quack/flydsl/rmsnorm_common.py": "2816788170fd841cf0c8d7b45cb2243f6926dc0b9e23497aff707d741463c797"
     }
   },
-  "probe_sha256": "657a95d3561cf5fb24250eea073bdb760e7c7ceae34bc235d371850e88be066a",
+  "probe_sha256": "7c1d38ab695bfdb4531d2a0c7cc474b949447e03053c6f7e5d364783cec3c8af",
   "rows": [
     {
       "N": 4096,
