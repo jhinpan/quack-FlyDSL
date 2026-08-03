@@ -10,16 +10,15 @@ from pathlib import Path
 import pytest
 import torch
 
-
 if torch.version.hip is None:
     pytest.skip("FlyDSL RMSNorm requires a ROCm PyTorch build", allow_module_level=True)
 
 pytest.importorskip("flydsl")
 
-import quack.rmsnorm_flydsl as rmsnorm_flydsl_impl  # noqa: E402
-import quack.flydsl.rmsnorm_autotune as rmsnorm_autotune_impl  # noqa: E402
-from quack.flydsl.rmsnorm_config import next_power_of_two  # noqa: E402
-from quack.rmsnorm_flydsl import rmsnorm, rmsnorm_autotuned  # noqa: E402
+import quack.flydsl.rmsnorm_autotune as rmsnorm_autotune_impl
+import quack.rmsnorm_flydsl as rmsnorm_flydsl_impl
+from quack.flydsl.rmsnorm_config import next_power_of_two
+from quack.rmsnorm_flydsl import rmsnorm, rmsnorm_autotuned
 
 
 def _reference(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
@@ -1675,6 +1674,25 @@ def test_autotuned_fast_callables_are_device_local():
     assert by_device[("cuda", 0)]._keepalive is not by_device[("cuda", 1)]._keepalive
 
 
+def test_autotuned_runtime_change_cannot_reuse_a_loaded_callable(monkeypatch):
+    """A context miss must reach FlyDSL's compile/runtime pairing check."""
+    _clear_caches()
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    monkeypatch.delenv("FLYDSL_RUNTIME_KIND", raising=False)
+    tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
+    x = torch.randn((2, 64), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(64, device=x.device, dtype=torch.float32)
+
+    actual = rmsnorm_autotuned(x, weight)
+    _assert_close(actual, _reference(x, weight, 1e-6))
+    assert len(tuner._compiled_cache) == 1
+
+    monkeypatch.setenv("FLYDSL_RUNTIME_KIND", "invalid-runtime")
+    with pytest.raises(RuntimeError, match="requires device runtime kind"):
+        rmsnorm_autotuned(x, weight)
+    assert len(tuner._compiled_cache) == 1
+
+
 def test_compile_target_must_match_the_device(monkeypatch):
     """FlyDSL's own target is the authority, not the ARCH environment."""
     _clear_caches()
@@ -1683,12 +1701,34 @@ def test_compile_target_must_match_the_device(monkeypatch):
         rmsnorm_flydsl_impl._validate_arch(torch.device("cuda", 0))
 
 
-def test_autotuned_arch_cache_revalidates_target_environment(monkeypatch):
+@pytest.mark.parametrize("env_name", ["FLYDSL_GPU_ARCH", "HSA_OVERRIDE_GFX_VERSION"])
+def test_runtime_helper_arch_must_match_the_device(monkeypatch, env_name):
+    _clear_caches()
+    monkeypatch.delenv("FLYDSL_GPU_ARCH", raising=False)
+    monkeypatch.delenv("HSA_OVERRIDE_GFX_VERSION", raising=False)
+    monkeypatch.setenv(env_name, "gfx90a")
+    monkeypatch.setattr(rmsnorm_flydsl_impl, "_flydsl_compile_target", lambda: ("rocm", "gfx950"))
+
+    with pytest.raises(ValueError, match="runtime helpers"):
+        rmsnorm_flydsl_impl._validate_arch(torch.device("cuda", 0))
+
+
+@pytest.mark.parametrize(
+    "env_name",
+    [
+        "FLYDSL_COMPILE_BACKEND",
+        "ARCH",
+        "FLYDSL_GPU_ARCH",
+        "HSA_OVERRIDE_GFX_VERSION",
+    ],
+)
+def test_autotuned_arch_cache_revalidates_target_environment(monkeypatch, env_name):
     _clear_caches()
     device = torch.device("cuda", 0)
+    monkeypatch.setattr(rmsnorm_flydsl_impl, "_flydsl_compile_target", lambda: ("rocm", "gfx950"))
     assert rmsnorm_flydsl_impl._validated_autotune_arch(device) == "gfx950"
 
-    monkeypatch.setenv("ARCH", "gfx90a")
+    monkeypatch.setenv(env_name, "changed")
     monkeypatch.setattr(rmsnorm_flydsl_impl, "_flydsl_compile_target", lambda: ("rocm", "gfx90a"))
     with pytest.raises(ValueError, match="mixed architectures"):
         rmsnorm_flydsl_impl._validated_autotune_arch(device)
@@ -2211,7 +2251,7 @@ def test_our_copy_predicate_is_a_subset_of_upstreams():
     safe. The direction that matters is the other one, and it is exact: no view
     that upstream copies may be kept here.
     """
-    upstream_keeps = lambda t: t.stride(-1) == 1  # noqa: E731 -- quack/rmsnorm.py
+    upstream_keeps = lambda t: t.stride(-1) == 1
     base = torch.randn(1 << 16, device="cuda", dtype=torch.bfloat16)
     kept_by_us_only = []
     for m, n in itertools.product((1, 2, 4, 16, 64), (8, 16, 64, 256)):
@@ -2227,9 +2267,8 @@ def test_our_copy_predicate_is_a_subset_of_upstreams():
         ]
         for view in candidates:
             ours_keeps = rmsnorm_flydsl_impl._packed_rows(view).data_ptr() == view.data_ptr()
-            if ours_keeps and not upstream_keeps(view):
-                if not view.is_contiguous():
-                    kept_by_us_only.append((tuple(view.shape), view.stride()))
+            if ours_keeps and not upstream_keeps(view) and not view.is_contiguous():
+                kept_by_us_only.append((tuple(view.shape), view.stride()))
     assert not kept_by_us_only, kept_by_us_only
 
 

@@ -11,8 +11,8 @@ import warnings
 from contextlib import nullcontext
 from dataclasses import dataclass
 
-import torch
 import flydsl.compiler as flyc
+import torch
 from flydsl.autotune import (
     Autotuner,
     Config,
@@ -21,8 +21,8 @@ from flydsl.autotune import (
     _toolchain_fingerprint,
     _tuning_enabled,
 )
-from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.compiler.jit_function import CompiledFunction
+from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import Constexpr
 from flydsl.utils import env
 
@@ -33,7 +33,6 @@ from .rmsnorm_config import (
     batch_short_rows,
 )
 from .rmsnorm_kernel import rmsnorm_direct
-
 
 RMSNORM_AUTOTUNE_SCHEMA_VERSION = 3
 _WAVES_PER_EU = (None, 1, 2, 4)
@@ -277,7 +276,7 @@ def _cache_authority(device: torch.device) -> _CacheAuthority:
             triton_bytes = seed.numel() * seed.element_size()
         else:
             seed = None
-    except Exception:
+    except Exception:  # noqa: BLE001 - an optional third-party probe must fail closed
         # Triton is not a runtime dependency of this opt-in backend. gfx950 is
         # the only supported ROCm target, so its benchmark driver's 256 MiB
         # policy remains the conservative fallback when the probe is absent.
@@ -821,8 +820,23 @@ class RmsNormAutotuner(Autotuner):
             self._active_call.hot_key = None
             self._active_call.rotation_plan = None
 
+    @staticmethod
+    def _process_context_key():
+        """Environment axes that must partition winners and loaded callables."""
+        return (
+            ("runtime_kind", os.environ.get("FLYDSL_RUNTIME_KIND", "")),
+            ("artifact_dir", os.environ.get("FLYDSL_AUTOTUNE_CONFIG_DIR", "")),
+        )
+
+    def _contextual_decision_key(self, args, kwargs):
+        # FlyDSL serializes this tuple through JSON. Keep the added context as a
+        # string so a disk round-trip cannot turn a nested tuple into an
+        # unhashable list.
+        context = str(("_process_context_", self._process_context_key()))
+        return (*super()._make_key(args, kwargs), context)
+
     def _make_key(self, args, kwargs):
-        key = super()._make_key(args, kwargs)
+        key = self._contextual_decision_key(args, kwargs)
         # Autotuner.__call__ passes these same tuple/dict objects to _bench_one
         # and _run_config. Keep only their ids so the thread-local does not retain
         # the caller's (potentially multi-GiB) tensors after an exception.
@@ -833,7 +847,7 @@ class RmsNormAutotuner(Autotuner):
         active = getattr(self._active_call, "value", None)
         if active is not None and active[:2] == (id(args), id(kwargs)):
             return active[2]
-        return super()._make_key(args, kwargs)
+        return self._contextual_decision_key(args, kwargs)
 
     def _device_key(self, args, kwargs):
         device = self._call_device(args, kwargs)
@@ -862,9 +876,8 @@ class RmsNormAutotuner(Autotuner):
             ("env", _env_fingerprint()),
             ("toolchain", self._toolchain_key),
             ("device_fingerprint", os.environ.get("FLYDSL_GPU_ARCH", "")),
-            ("runtime_kind", os.environ.get("FLYDSL_RUNTIME_KIND", "")),
             ("compile_hints", _typed_identity(effective_hints)),
-            ("artifact_dir", os.environ.get("FLYDSL_AUTOTUNE_CONFIG_DIR", "")),
+            ("process_context", self._process_context_key()),
         )
 
     def _generic_hot_key(self, args, kwargs):
@@ -890,9 +903,8 @@ class RmsNormAutotuner(Autotuner):
             ("env", _env_fingerprint()),
             ("toolchain", self._toolchain_key),
             ("device_fingerprint", _device_fingerprint()),
-            ("runtime_kind", os.environ.get("FLYDSL_RUNTIME_KIND", "")),
             ("compile_hints", _typed_identity(effective_hints)),
-            ("artifact_dir", os.environ.get("FLYDSL_AUTOTUNE_CONFIG_DIR", "")),
+            ("process_context", self._process_context_key()),
         )
 
     @staticmethod
@@ -959,7 +971,7 @@ class RmsNormAutotuner(Autotuner):
         values.update(kwargs)
         values.update(config.all_kwargs())
         return tuple(
-            values[name] if name in values else parameter.default
+            values.get(name, parameter.default)
             for name, parameter in self._signature.parameters.items()
         )
 
@@ -983,7 +995,7 @@ class RmsNormAutotuner(Autotuner):
         if compiled is not None:
             return compiled, self._positional_arguments(config, args, kwargs), False
 
-        merged, positional, device_key, fast_key = self._prepare_call(config, args, kwargs)
+        _merged, positional, device_key, fast_key = self._prepare_call(config, args, kwargs)
         compiled = self._compiled_cache.get(fast_key)
         if compiled is not None:
             self._compiled_lookup[lookup_key] = compiled
