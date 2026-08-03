@@ -17,7 +17,8 @@ if torch.version.hip is None:
 pytest.importorskip("flydsl")
 
 import quack.rmsnorm_flydsl as rmsnorm_flydsl_impl  # noqa: E402
-from quack.flydsl.rmsnorm_config import next_power_of_two  # noqa: E402
+from quack.flydsl.rmsnorm_autotune import rmsnorm_search_configs  # noqa: E402
+from quack.flydsl.rmsnorm_config import RmsNormRowConfig, next_power_of_two  # noqa: E402
 from quack.rmsnorm_flydsl import rmsnorm, rmsnorm_autotuned  # noqa: E402
 
 
@@ -133,6 +134,15 @@ def _assert_fused_residual_grad_close(actual: torch.Tensor, expected: torch.Tens
         ((2, 4096), torch.float16, torch.bfloat16, 1e-6),
         ((2, 4096), torch.float32, torch.bfloat16, 1e-6),
         ((2, 4096), torch.float32, torch.float16, 1e-6),
+        # Wide rows use bounded-state runtime loops and reload from gmem after
+        # the reduction rather than retaining the whole row in VGPRs.
+        ((4, 16384), torch.bfloat16, torch.float32, 1e-6),
+        ((4, 57344), torch.bfloat16, torch.float32, 1e-6),
+        ((2, 262136), torch.bfloat16, torch.float32, 1e-6),
+        ((4, 262144), torch.bfloat16, torch.float32, 1e-6),
+        ((4, 32768), torch.float32, torch.float32, 1e-6),
+        ((2, 262144), torch.float16, torch.bfloat16, 1e-6),
+        ((2, 262144), torch.float32, torch.float32, 1e-6),
     ],
 )
 def test_forward_matches_fp32_reference(shape, dtype, weight_dtype, eps):
@@ -180,8 +190,13 @@ def test_forward_empty_m_returns_empty_without_launching():
         (torch.ones(8), 5.0, TypeError, "weight must be a torch.Tensor or None"),
         (torch.tensor(1.0), torch.ones(1), ValueError, "at least one dimension"),
         (torch.ones(2, 8), torch.ones(7), ValueError, "weight shape"),
-        (torch.empty(2, 0), torch.empty(0), ValueError, "between 1 and 8192"),
-        (torch.ones(1, 8193), torch.ones(8193), ValueError, "between 1 and 8192"),
+        (torch.empty(2, 0), torch.empty(0), ValueError, "between 1 and 262144"),
+        (
+            torch.ones(1, 262152),
+            torch.ones(262152),
+            ValueError,
+            "between 1 and 262144",
+        ),
         (
             torch.ones(2, 8, dtype=torch.float64),
             torch.ones(8, dtype=torch.float64),
@@ -251,6 +266,15 @@ def test_public_contract_rejects_mixed_devices():
         ((512, 2048), torch.float32, torch.float32),
         # Column count that is not a whole number of blocks.
         ((512, 3000), torch.bfloat16, torch.float32),
+        # The wide path separates the row correction from bounded column
+        # tiles, while retaining the same deterministic parameter reduction.
+        ((8, 32768), torch.bfloat16, torch.float32),
+        ((4, 57344), torch.bfloat16, torch.float32),
+        ((2, 262136), torch.bfloat16, torch.float32),
+        ((4, 262144), torch.bfloat16, torch.float32),
+        ((4, 32768), torch.float32, torch.float32),
+        ((2, 262144), torch.float16, torch.bfloat16),
+        ((2, 262144), torch.float32, torch.float32),
     ],
 )
 def test_backward_matches_fp32_reference(shape, dtype, weight_dtype):
@@ -269,6 +293,81 @@ def test_backward_matches_fp32_reference(shape, dtype, weight_dtype):
     _assert_close(actual, out_ref)
     _assert_grad_close(x.grad, dx_ref)
     _assert_grad_close(weight.grad, dweight_ref)
+
+
+@pytest.mark.parametrize("per_head", [False, True])
+def test_wide_residual_prenorm_backward_matches_fp32_reference(per_head):
+    torch.manual_seed(22)
+    n = 32768
+    shape = (2, 2, n) if per_head else (2, n)
+    parameter_shape = (2, n) if per_head else (n,)
+    x = torch.randn(shape, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    residual = torch.randn_like(x, requires_grad=True)
+    weight = torch.randn(parameter_shape, device="cuda", dtype=torch.float32, requires_grad=True)
+    bias = torch.randn(parameter_shape, device="cuda", dtype=torch.float32, requires_grad=True)
+
+    actual, residual_out = rmsnorm(
+        x,
+        weight,
+        bias=bias,
+        residual=residual,
+        out_dtype=torch.float16,
+        residual_dtype=torch.float32,
+        prenorm=True,
+    )
+    dout = torch.randn_like(actual)
+    dresidual_out = torch.randn_like(residual_out)
+    actual_grads = torch.autograd.grad(
+        (actual, residual_out),
+        (x, residual, weight, bias),
+        grad_outputs=(dout, dresidual_out),
+    )
+
+    x_ref = x.detach().float().requires_grad_(True)
+    residual_ref = residual.detach().float().requires_grad_(True)
+    weight_ref = weight.detach().float().requires_grad_(True)
+    bias_ref = bias.detach().float().requires_grad_(True)
+    expected, expected_residual = _full_reference(
+        x_ref,
+        weight_ref,
+        bias_ref,
+        residual_ref,
+        out_dtype=torch.float16,
+        residual_dtype=torch.float32,
+    )
+    expected_grads = torch.autograd.grad(
+        (expected, expected_residual),
+        (x_ref, residual_ref, weight_ref, bias_ref),
+        grad_outputs=(dout.float(), dresidual_out),
+    )
+
+    _assert_close(actual, expected)
+    _assert_close(residual_out, expected_residual)
+    for got, want in zip(actual_grads, expected_grads):
+        _assert_fused_residual_grad_close(got, want.to(got.dtype))
+
+
+def test_wide_parameter_only_backward_skips_input_gradient_path():
+    torch.manual_seed(23)
+    n = 32768
+    x = torch.randn((8, n), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(n, device="cuda", dtype=torch.float32, requires_grad=True)
+    bias = torch.randn(n, device="cuda", dtype=torch.float32, requires_grad=True)
+    dout = torch.randn_like(x)
+
+    actual = rmsnorm(x, weight, bias=bias)
+    dweight, dbias = torch.autograd.grad(actual, (weight, bias), dout)
+
+    weight_ref = weight.detach().float().requires_grad_(True)
+    bias_ref = bias.detach().float().requires_grad_(True)
+    expected, _ = _full_reference(x.float(), weight_ref, bias_ref)
+    dweight_ref, dbias_ref = torch.autograd.grad(
+        expected,
+        (weight_ref, bias_ref),
+        dout.float(),
+    )
+    _assert_grad_close(dweight, dweight_ref)
+    _assert_grad_close(dbias, dbias_ref)
 
 
 @pytest.mark.parametrize(
@@ -510,11 +609,12 @@ def test_mixed_input_and_weight_dtypes_use_generic_path():
     _assert_grad_close(weight.grad, weight_ref.grad)
 
 
-def test_selective_gradients_are_respected():
-    x = torch.randn((4, 760), device="cuda", dtype=torch.float16)
-    weight = torch.randn(760, device="cuda", dtype=torch.float32)
+@pytest.mark.parametrize("n", [760, 32768])
+def test_selective_gradients_are_respected(n):
+    x = torch.randn((4, n), device="cuda", dtype=torch.float16)
+    weight = torch.randn(n, device="cuda", dtype=torch.float32)
     bias = torch.randn(
-        760,
+        n,
         device="cuda",
         dtype=torch.float32,
         requires_grad=True,
@@ -718,14 +818,14 @@ def test_staged_per_head_backward_supports_selective_parameter_grads(requested):
 
 
 @pytest.mark.parametrize("per_head", [False, True])
-def test_backward_with_no_parameter_grads(per_head):
+@pytest.mark.parametrize("n", [760, 32768])
+def test_backward_with_no_parameter_grads(per_head, n):
     """Frozen parameters used to be the atomic kernel's other job.
 
     Nothing reduces, so the persistent kernel covers the rows and the parameter
     reduce is not launched at all.
     """
     torch.manual_seed(11)
-    n = 760
     shape = (64, 2, n) if per_head else (64, n)
     parameter_shape = (2, n) if per_head else (n,)
     x = torch.randn(shape, device="cuda", dtype=torch.bfloat16, requires_grad=True)
@@ -748,11 +848,12 @@ def test_workspace_descriptors_are_row_scoped():
     assert source.count("row_buffer(") >= 4
 
 
-def test_deterministic_backward_is_reproducible():
+@pytest.mark.parametrize("n", [760, 32768])
+def test_deterministic_backward_is_reproducible(n):
     torch.manual_seed(16)
-    x = torch.randn((64, 760), device="cuda", dtype=torch.float16)
-    weight = torch.randn(760, device="cuda", dtype=torch.float32)
-    bias = torch.randn(760, device="cuda", dtype=torch.float32)
+    x = torch.randn((64, n), device="cuda", dtype=torch.float16)
+    weight = torch.randn(n, device="cuda", dtype=torch.float32)
+    bias = torch.randn(n, device="cuda", dtype=torch.float32)
     dout = torch.randn_like(x)
     results = []
 
@@ -862,6 +963,9 @@ def test_custom_ops_are_unique_mutation_only_and_fake_safe():
             dweight,
             dbias,
             0.0,
+            True,
+            True,
+            True,
             True,
             True,
             True,
@@ -997,6 +1101,28 @@ def test_forward_cache_identity_is_shape_and_dtype_only():
     call(144, torch.float16, 1e-6)
     call(136, torch.bfloat16, 1e-6)
     assert len(rmsnorm_flydsl_impl._FWD_CACHE) == 3
+
+
+def test_wide_autotune_candidates_all_use_the_reload_path():
+    configs = rmsnorm_search_configs(n=262144, input_dtype_str="bf16")
+    assert {config.kwargs["threads_per_row"] for config in configs} == {64, 128, 256}
+    for candidate in configs:
+        row = RmsNormRowConfig.with_num_threads(
+            262144,
+            16,
+            candidate.kwargs["threads_per_row"],
+        )
+        assert row.reload_from == "gmem"
+
+
+def test_autotuned_wide_forward_matches_reference(tmp_path, monkeypatch):
+    _clear_caches()
+    tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
+    monkeypatch.setattr(tuner, "_cache_file", tmp_path / "winner.json")
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    x = torch.randn((4, 32768), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(32768, device="cuda", dtype=torch.float32)
+    _assert_close(rmsnorm_autotuned(x, weight), _reference(x, weight, 1e-6))
 
 
 def test_default_and_autotuned_forward_use_independent_caches(tmp_path, monkeypatch):
@@ -1172,6 +1298,24 @@ def test_fullgraph_with_dynamic_shapes():
         out.sum().backward()
         _assert_close(out, _reference(x, weight, 1e-5))
         assert x.grad is not None
+
+
+def test_fullgraph_with_dynamic_rows_uses_the_wide_kernels():
+    _clear_caches()
+    torch._dynamo.reset()
+    n = 32768
+    compiled = torch.compile(rmsnorm, fullgraph=True, dynamic=True)
+    weight = torch.randn(n, device="cuda", dtype=torch.float32, requires_grad=True)
+    for rows in (2, 4, 8):
+        x = torch.randn((rows, n), device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        dout = torch.randn_like(x)
+        out = compiled(x, weight, eps=1e-5)
+        dx, dweight = torch.autograd.grad(out, (x, weight), dout)
+
+        out_ref, dx_ref, dweight_ref = _reference_with_grads(x, weight, dout, 1e-5)
+        _assert_close(out, out_ref)
+        _assert_grad_close(dx, dx_ref)
+        _assert_grad_close(dweight, dweight_ref)
 
 
 def test_autotuned_fullgraph_with_dynamic_rows(tmp_path, monkeypatch):

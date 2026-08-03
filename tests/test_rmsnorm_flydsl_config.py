@@ -16,6 +16,7 @@ from quack.flydsl.rmsnorm_config import (
     MAX_NUM_THREADS,
     MIN_NUM_THREADS,
     N_ALIGNMENT,
+    REGISTER_CACHE_ELEMS,
     WAVE_SIZE,
     RmsNormRowConfig,
     batch_short_rows,
@@ -27,10 +28,10 @@ DTYPE_WIDTHS = (16, 32)
 # The row lengths the backend accepts: multiples of N_ALIGNMENT up to MAX_N.
 # 192, 256, 760, 1024, 1128 and 4096 are the entries of quack's own RMSNorm test
 # ladder that fit; 3584, 4608, 5120 and 7168 are hidden sizes real models use;
-# the rest are the geometry boundaries -- a row of one vector, a row narrower
-# than a wavefront, the batching crossover, and the widest row a thread can hold
-# between the two passes. Nothing here is coprime with a 128-bit access, because
-# the adapter refuses those rather than serving them with a narrower one.
+# the rest are geometry boundaries -- one vector, the batching crossover, the
+# register-cache boundary, the old spill cliff, and the public maximum. Nothing
+# here is coprime with a 128-bit access, because the adapter refuses those
+# rather than serving them with a narrower one.
 HIDDEN_SIZES = (
     8,
     16,
@@ -54,6 +55,13 @@ HIDDEN_SIZES = (
     6144,
     7168,
     8192,
+    16384,
+    32768,
+    49152,
+    57344,
+    65536,
+    131072,
+    262144,
 )
 # The persistent backward accepts a wider block than the one-block-per-row
 # forward because it also has to keep the machine busy across rows.
@@ -104,9 +112,11 @@ def test_every_row_gets_a_coverable_block(N, dtype_width):
     assert (c.num_tiles - 1) * c.num_threads * c.vecsize < N
     assert c.needs_predicate is not (c.num_vecs == c.num_tiles * c.num_threads)
 
-    # The forward keeps the whole row in registers between its two passes,
-    # which is what caps N.
-    assert c.elems_per_thread <= 32
+    if c.reload_from is None:
+        assert c.elems_per_thread <= REGISTER_CACHE_ELEMS
+    else:
+        assert c.reload_from == "gmem"
+        assert c.elems_per_thread > REGISTER_CACHE_ELEMS
 
 
 def test_small_rows_do_not_reserve_a_whole_wide_block():
@@ -118,6 +128,18 @@ def test_small_rows_do_not_reserve_a_whole_wide_block():
 def test_wide_rows_saturate_the_block_and_add_tiles():
     c = config(8192, 16)
     assert (c.num_threads, c.num_tiles, c.needs_predicate) == (MAX_NUM_THREADS, 4, False)
+
+
+@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
+def test_rows_reload_once_the_register_fragment_budget_is_exceeded(dtype_width):
+    assert config(8192, dtype_width).reload_from is None
+    assert config(16384, dtype_width).reload_from == "gmem"
+
+
+@pytest.mark.parametrize("dtype_width", DTYPE_WIDTHS)
+def test_staged_backward_switches_to_bounded_wide_tiles(dtype_width):
+    assert config(16384, dtype_width, STAGED_MAX_THREADS).reload_from is None
+    assert config(32768, dtype_width, STAGED_MAX_THREADS).reload_from == "gmem"
 
 
 @pytest.mark.parametrize(

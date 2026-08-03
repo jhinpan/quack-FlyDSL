@@ -96,6 +96,10 @@ def build_rmsnorm_module(
     vecsize = config.vecsize
     num_vecs = config.num_vecs
     last_tile = config.num_tiles - 1
+    reload_from_gmem = config.reload_from == "gmem"
+    runtime_wide_loop = reload_from_gmem
+    wide_full_tiles = num_vecs // threads_per_row
+    wide_tail_vecs = num_vecs % threads_per_row
     # Lanes the row reduction shuffles over, and how many of those groups it
     # has to stitch together through LDS. A group wider than a wavefront only
     # happens when the row has a block to itself.
@@ -236,46 +240,139 @@ def build_rmsnorm_module(
             rstd_div = fx.logical_divide(rstd_buffer, fx.make_layout(1, 1))
             f32_copy = buffer_copy_atom(32, 32)
 
-        # The normalized value is held in registers between the two passes, so
-        # the row is read once. It is the residual sum when one is fused, which
-        # is also what the second pass and residual_out both need.
+        # Narrow rows keep their values across the reduction. Wide rows reload
+        # them for the epilogue: one extra global read is much cheaper than
+        # spilling an unbounded row fragment to private memory.
         thread_sumsq = fx.Float32(0.0)
         row_values = []
-        for tile_i in range_constexpr(config.num_tiles):
-            # Only the final tile can run off the end of the row.
-            partial = config.needs_predicate and tile_i == last_tile
-            index = lane + tile_i * threads_per_row
-            safe_index = index
-            if const_expr(partial):
-                in_row = index < num_vecs
+        if const_expr(runtime_wide_loop):
+            # A device loop keeps code size and temporary VGPRs independent of N.
+            for tile_i in range(0, wide_full_tiles):
+                index = lane + tile_i * threads_per_row
+                value = load_dtype_vec(
+                    input_copy,
+                    input_dtype,
+                    input_bits,
+                    input_div,
+                    index,
+                    vecsize,
+                )
+                if const_expr(has_residual):
+                    value = value + load_dtype_vec(
+                        residual_copy,
+                        residual_dtype,
+                        residual_bits,
+                        residual_div,
+                        index,
+                        vecsize,
+                    )
+                if const_expr(store_residual):
+                    store_dtype_vec(
+                        residual_out_copy,
+                        residual_out_dtype,
+                        residual_out_bits,
+                        to_store_dtype(
+                            residual_out_dtype_str,
+                            residual_out_dtype,
+                            use_hw_cvt_bf16,
+                            value,
+                            vecsize,
+                        ),
+                        residual_out_div,
+                        index,
+                        vecsize,
+                    )
+                contribution = (value * value).reduce(ReductionOp.ADD, fastmath=fast_math)
+                thread_sumsq = thread_sumsq + contribution
+            if const_expr(wide_tail_vecs > 0):
+                index = lane + wide_full_tiles * threads_per_row
+                in_row = lane < wide_tail_vecs
                 safe_index = in_row.select(index, 0)
-            value = load_dtype_vec(
-                input_copy,
-                input_dtype,
-                input_bits,
-                input_div,
-                safe_index,
-                vecsize,
-            )
-            if const_expr(has_residual):
-                value = value + load_dtype_vec(
-                    residual_copy,
-                    residual_dtype,
-                    residual_bits,
-                    residual_div,
+                value = load_dtype_vec(
+                    input_copy,
+                    input_dtype,
+                    input_bits,
+                    input_div,
                     safe_index,
                     vecsize,
                 )
-            if const_expr(store_residual):
-                stored = to_store_dtype(
-                    residual_out_dtype_str,
-                    residual_out_dtype,
-                    use_hw_cvt_bf16,
-                    value,
+                if const_expr(has_residual):
+                    value = value + load_dtype_vec(
+                        residual_copy,
+                        residual_dtype,
+                        residual_bits,
+                        residual_div,
+                        safe_index,
+                        vecsize,
+                    )
+                if const_expr(store_residual):
+                    if in_row:
+                        store_dtype_vec(
+                            residual_out_copy,
+                            residual_out_dtype,
+                            residual_out_bits,
+                            to_store_dtype(
+                                residual_out_dtype_str,
+                                residual_out_dtype,
+                                use_hw_cvt_bf16,
+                                value,
+                                vecsize,
+                            ),
+                            residual_out_div,
+                            index,
+                            vecsize,
+                        )
+                contribution = (value * value).reduce(ReductionOp.ADD, fastmath=fast_math)
+                thread_sumsq = thread_sumsq + in_row.select(
+                    contribution,
+                    fx.Float32(0.0),
+                )
+        else:
+            for tile_i in range_constexpr(config.num_tiles):
+                # Only the final tile can run off the end of the row.
+                partial = config.needs_predicate and tile_i == last_tile
+                index = lane + tile_i * threads_per_row
+                safe_index = index
+                if const_expr(partial):
+                    in_row = index < num_vecs
+                    safe_index = in_row.select(index, 0)
+                value = load_dtype_vec(
+                    input_copy,
+                    input_dtype,
+                    input_bits,
+                    input_div,
+                    safe_index,
                     vecsize,
                 )
-                if const_expr(partial):
-                    if in_row:
+                if const_expr(has_residual):
+                    value = value + load_dtype_vec(
+                        residual_copy,
+                        residual_dtype,
+                        residual_bits,
+                        residual_div,
+                        safe_index,
+                        vecsize,
+                    )
+                if const_expr(store_residual):
+                    stored = to_store_dtype(
+                        residual_out_dtype_str,
+                        residual_out_dtype,
+                        use_hw_cvt_bf16,
+                        value,
+                        vecsize,
+                    )
+                    if const_expr(partial):
+                        if in_row:
+                            store_dtype_vec(
+                                residual_out_copy,
+                                residual_out_dtype,
+                                residual_out_bits,
+                                stored,
+                                residual_out_div,
+                                index,
+                                vecsize,
+                            )
+                    else:
                         store_dtype_vec(
                             residual_out_copy,
                             residual_out_dtype,
@@ -285,21 +382,12 @@ def build_rmsnorm_module(
                             index,
                             vecsize,
                         )
-                else:
-                    store_dtype_vec(
-                        residual_out_copy,
-                        residual_out_dtype,
-                        residual_out_bits,
-                        stored,
-                        residual_out_div,
-                        index,
-                        vecsize,
-                    )
-            row_values.append(value)
-            contribution = (value * value).reduce(ReductionOp.ADD, fastmath=fast_math)
-            if const_expr(partial):
-                contribution = in_row.select(contribution, fx.Float32(0.0))
-            thread_sumsq = thread_sumsq + contribution
+                if const_expr(not reload_from_gmem):
+                    row_values.append(value)
+                contribution = (value * value).reduce(ReductionOp.ADD, fastmath=fast_math)
+                if const_expr(partial):
+                    contribution = in_row.select(contribution, fx.Float32(0.0))
+                thread_sumsq = thread_sumsq + contribution
 
         sum_sq = row_reduce_add(thread_sumsq)
         rrms = fmath.rsqrt(sum_sq / float(n) + eps, fastmath=fast_math)
@@ -314,42 +402,185 @@ def build_rmsnorm_module(
                     rrms,
                 )
 
-        for tile_i in range_constexpr(config.num_tiles):
-            partial = config.needs_predicate and tile_i == last_tile
-            index = lane + tile_i * threads_per_row
-            safe_index = index
-            if const_expr(partial):
-                in_row = index < num_vecs
+        if const_expr(runtime_wide_loop):
+            for tile_i in range(0, wide_full_tiles):
+                index = lane + tile_i * threads_per_row
+                value = load_dtype_vec(
+                    input_copy,
+                    input_dtype,
+                    input_bits,
+                    input_div,
+                    index,
+                    vecsize,
+                )
+                if const_expr(has_residual):
+                    value = value + load_dtype_vec(
+                        residual_copy,
+                        residual_dtype,
+                        residual_bits,
+                        residual_div,
+                        index,
+                        vecsize,
+                    )
+                result = value * rrms
+                if const_expr(has_weight):
+                    weights = load_dtype_vec(
+                        weight_copy,
+                        weight_dtype,
+                        weight_bits,
+                        weight_div,
+                        index,
+                        vecsize,
+                    )
+                    result = result * (weights + weight_offset)
+                if const_expr(has_bias):
+                    result = result + load_dtype_vec(
+                        bias_copy,
+                        bias_dtype,
+                        bias_bits,
+                        bias_div,
+                        index,
+                        vecsize,
+                    )
+                store_dtype_vec(
+                    output_copy,
+                    output_dtype,
+                    output_bits,
+                    to_store_dtype(
+                        output_dtype_str,
+                        output_dtype,
+                        use_hw_cvt_bf16,
+                        result,
+                        vecsize,
+                    ),
+                    output_div,
+                    index,
+                    vecsize,
+                )
+            if const_expr(wide_tail_vecs > 0):
+                index = lane + wide_full_tiles * threads_per_row
+                in_row = lane < wide_tail_vecs
                 safe_index = in_row.select(index, 0)
-            result = row_values[tile_i] * rrms
-            if const_expr(has_weight):
-                weights = load_dtype_vec(
-                    weight_copy,
-                    weight_dtype,
-                    weight_bits,
-                    weight_div,
+                value = load_dtype_vec(
+                    input_copy,
+                    input_dtype,
+                    input_bits,
+                    input_div,
                     safe_index,
                     vecsize,
                 )
-                result = result * (weights + weight_offset)
-            if const_expr(has_bias):
-                result = result + load_dtype_vec(
-                    bias_copy,
-                    bias_dtype,
-                    bias_bits,
-                    bias_div,
-                    safe_index,
-                    vecsize,
-                )
-            output_value = to_store_dtype(
-                output_dtype_str,
-                output_dtype,
-                use_hw_cvt_bf16,
-                result,
-                vecsize,
-            )
-            if const_expr(partial):
+                if const_expr(has_residual):
+                    value = value + load_dtype_vec(
+                        residual_copy,
+                        residual_dtype,
+                        residual_bits,
+                        residual_div,
+                        safe_index,
+                        vecsize,
+                    )
+                result = value * rrms
+                if const_expr(has_weight):
+                    weights = load_dtype_vec(
+                        weight_copy,
+                        weight_dtype,
+                        weight_bits,
+                        weight_div,
+                        safe_index,
+                        vecsize,
+                    )
+                    result = result * (weights + weight_offset)
+                if const_expr(has_bias):
+                    result = result + load_dtype_vec(
+                        bias_copy,
+                        bias_dtype,
+                        bias_bits,
+                        bias_div,
+                        safe_index,
+                        vecsize,
+                    )
                 if in_row:
+                    store_dtype_vec(
+                        output_copy,
+                        output_dtype,
+                        output_bits,
+                        to_store_dtype(
+                            output_dtype_str,
+                            output_dtype,
+                            use_hw_cvt_bf16,
+                            result,
+                            vecsize,
+                        ),
+                        output_div,
+                        index,
+                        vecsize,
+                    )
+        else:
+            for tile_i in range_constexpr(config.num_tiles):
+                partial = config.needs_predicate and tile_i == last_tile
+                index = lane + tile_i * threads_per_row
+                safe_index = index
+                if const_expr(partial):
+                    in_row = index < num_vecs
+                    safe_index = in_row.select(index, 0)
+                if const_expr(reload_from_gmem):
+                    value = load_dtype_vec(
+                        input_copy,
+                        input_dtype,
+                        input_bits,
+                        input_div,
+                        safe_index,
+                        vecsize,
+                    )
+                    if const_expr(has_residual):
+                        value = value + load_dtype_vec(
+                            residual_copy,
+                            residual_dtype,
+                            residual_bits,
+                            residual_div,
+                            safe_index,
+                            vecsize,
+                        )
+                else:
+                    value = row_values[tile_i]
+                result = value * rrms
+                if const_expr(has_weight):
+                    weights = load_dtype_vec(
+                        weight_copy,
+                        weight_dtype,
+                        weight_bits,
+                        weight_div,
+                        safe_index,
+                        vecsize,
+                    )
+                    result = result * (weights + weight_offset)
+                if const_expr(has_bias):
+                    result = result + load_dtype_vec(
+                        bias_copy,
+                        bias_dtype,
+                        bias_bits,
+                        bias_div,
+                        safe_index,
+                        vecsize,
+                    )
+                output_value = to_store_dtype(
+                    output_dtype_str,
+                    output_dtype,
+                    use_hw_cvt_bf16,
+                    result,
+                    vecsize,
+                )
+                if const_expr(partial):
+                    if in_row:
+                        store_dtype_vec(
+                            output_copy,
+                            output_dtype,
+                            output_bits,
+                            output_value,
+                            output_div,
+                            index,
+                            vecsize,
+                        )
+                else:
                     store_dtype_vec(
                         output_copy,
                         output_dtype,
@@ -359,16 +590,6 @@ def build_rmsnorm_module(
                         index,
                         vecsize,
                     )
-            else:
-                store_dtype_vec(
-                    output_copy,
-                    output_dtype,
-                    output_bits,
-                    output_value,
-                    output_div,
-                    index,
-                    vecsize,
-                )
 
     @flyc.jit
     def launch_rmsnorm(
