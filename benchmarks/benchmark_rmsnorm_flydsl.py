@@ -3,8 +3,12 @@
 """Benchmark rmsnorm fwd / bwd for the FlyDSL ROCm backend.
 
 The CuTe backend's benchmark is benchmarks/benchmark_rmsnorm.py; this is the
-same harness pointed at the FlyDSL backend, so the two read the same way.
-Shapes stop at N=8192 because that is the backend's MAX_N.
+same harness and shape ladder pointed at the FlyDSL backend.
+
+This perf-report sweep is for quick iteration. Use
+``benchmarks/repro_pr7_wide.py`` for the wide-row headline: it adds
+steady-state warmup, alternating provider order, raw samples, provenance, and
+an opening/closing bandwidth canary.
 """
 
 import argparse
@@ -25,30 +29,20 @@ from quack.rmsnorm_flydsl import rmsnorm
 _functorch_config.donated_buffer = False
 
 
-# Three groups, each answering a different question. Every sweep runs all of
-# them so a run is comparable to any other run.
-#
-#   1. Fixed N, sweeping M: the launch-bound end, where the host path rather
-#      than the kernel sets the time.
-#   2. M=4096: the band that is neither launch-bound nor bandwidth-saturated.
-#      3000 is there because it is not a power of two yet is still a multiple
-#      of N_ALIGNMENT (gcd(3000, 8) == 8), so it is the only shape here that
-#      exercises the predicated final tile.
-#   3. Fixed M, sweeping N: the bandwidth-bound end. These six are exactly the
-#      shapes of benchmarks/benchmark_rmsnorm.py that this backend can serve;
-#      its other five ask for N from 16384 to 262144, above MAX_N.
+# Keep this list exactly aligned with benchmarks/benchmark_rmsnorm.py so ROCm
+# and CUDA benchmark reports have the same rows.
 MN_PAIRS = [
-    (1, 4096),
-    (256, 4096),
-    (512, 4096),
-    (4096, 3000),
-    (4096, 4096),
     (32768, 256),
     (32768, 512),
     (32768, 1024),
     (32768, 2048),
     (32768, 4096),
     (32768, 8192),
+    (32768, 16384),
+    (32768, 32768),
+    (32768, 65536),
+    (16384, 131072),
+    (8192, 262144),
 ]
 
 DTYPE_MAP = {

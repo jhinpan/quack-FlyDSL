@@ -1,0 +1,176 @@
+{
+  "calls_per_sample": 4,
+  "closing_bandwidth": {
+    "best_probe": "write",
+    "calls_per_sample": 8,
+    "median_gbps": 6806.340218230299,
+    "probe_mib": 512,
+    "probes": {
+      "copy": {
+        "logical_gbps": 5363.642226562567,
+        "max_us": 201.6763687133789,
+        "median_us": 200.18893480300903,
+        "min_us": 198.88649880886078,
+        "p10_us": 199.2994859814644,
+        "p90_us": 201.33350044488907
+      },
+      "two_read_one_write": {
+        "logical_gbps": 5812.293750889533,
+        "max_us": 279.75213527679443,
+        "median_us": 277.1044969558716,
+        "min_us": 276.46198868751526,
+        "p10_us": 276.57400369644165,
+        "p90_us": 278.14950346946716
+      },
+      "write": {
+        "logical_gbps": 6806.340218230299,
+        "max_us": 80.35550266504288,
+        "median_us": 78.87805998325348,
+        "min_us": 77.9506266117096,
+        "p10_us": 78.30011248588562,
+        "p90_us": 79.96512651443481
+      }
+    }
+  },
+  "contention_canary": {
+    "closing_over_opening": 0.9985745974670048,
+    "quiet": true
+  },
+  "dtype": "bfloat16",
+  "environment": {
+    "arch": "gfx950",
+    "flydsl": "0.3.0.dev765",
+    "free_memory_bytes_at_start": 293708234752,
+    "git_commit": "920a841749704635e15cb906611bf80afadbc533",
+    "git_diff_scope": [
+      "pyproject.toml",
+      "quack",
+      "benchmarks",
+      "tests"
+    ],
+    "git_diff_sha256": "2e9003429f2910ef56cb1357581be6158d4f5fc5b0562a1cbfff6c4ffad5a8ff",
+    "git_dirty_paths": [
+      "AI/flydsl_rmsnorm_notes.md",
+      "AI/pr7_wide_repro/README.md",
+      "benchmarks/benchmark_rmsnorm_flydsl.py",
+      "benchmarks/repro_pr7_wide.py",
+      "pyproject.toml",
+      "quack/flydsl/rmsnorm_autotune.py",
+      "quack/flydsl/rmsnorm_bwd_kernel.py",
+      "quack/flydsl/rmsnorm_config.py",
+      "quack/flydsl/rmsnorm_kernel.py",
+      "quack/rmsnorm_flydsl.py",
+      "tests/test_rmsnorm_flydsl.py",
+      "tests/test_rmsnorm_flydsl_config.py",
+      "AI/pr7_wide_repro/local_bwd.json",
+      "AI/pr7_wide_repro/local_fwd.json",
+      "AI/pr7_wide_repro/remote_bwd.json",
+      "AI/pr7_wide_repro/remote_fwd.json"
+    ],
+    "gpu": "AMD Instinct MI355X",
+    "hip": "7.2.26015-fc0010cf6a",
+    "hostname": "mia1-p02-g23",
+    "python": "3.10.12",
+    "quack_module": "/root/wt-pr7-review-20260803/quack/rmsnorm_flydsl.py",
+    "script": "/root/wt-pr7-review-20260803/benchmarks/repro_pr7_wide.py",
+    "script_sha256": "0ef978f9b63f9de0cdb0baa91836b524aae0e97833e6f462394c4a51c5e054e2",
+    "torch": "2.9.1+rocm7.2.0.git7e1940d4",
+    "total_memory_bytes": 309220868096,
+    "triton": "3.6.0+git42270451",
+    "visibility": {
+      "CUDA_VISIBLE_DEVICES": "0",
+      "HIP_VISIBLE_DEVICES": "0",
+      "ROCR_VISIBLE_DEVICES": null
+    }
+  },
+  "opening_bandwidth": {
+    "best_probe": "write",
+    "calls_per_sample": 8,
+    "median_gbps": 6816.055841491798,
+    "probe_mib": 512,
+    "probes": {
+      "copy": {
+        "logical_gbps": 5367.2600312346785,
+        "max_us": 202.79650390148163,
+        "median_us": 200.05399733781815,
+        "min_us": 198.68150353431702,
+        "p10_us": 199.15937185287476,
+        "p90_us": 200.91150403022766
+      },
+      "two_read_one_write": {
+        "logical_gbps": 5809.357546421021,
+        "max_us": 279.0519893169403,
+        "median_us": 277.24455296993256,
+        "min_us": 275.4969894886017,
+        "p10_us": 275.72160959243774,
+        "p90_us": 278.4989923238754
+      },
+      "write": {
+        "logical_gbps": 6816.055841491798,
+        "max_us": 80.65550029277802,
+        "median_us": 78.7656269967556,
+        "min_us": 77.56062597036362,
+        "p10_us": 78.2101258635521,
+        "p90_us": 80.59160932898521
+      }
+    }
+  },
+  "operation": "fwd",
+  "providers": {
+    "flydsl": {
+      "max_us": 2460.268020629883,
+      "median_us": 2446.4681148529053,
+      "min_us": 2439.8276805877686,
+      "p10_us": 2441.5626764297485,
+      "p90_us": 2450.480079650879
+    },
+    "torch_compile": {
+      "max_us": 2395.9174156188965,
+      "median_us": 2391.252636909485,
+      "min_us": 2377.317190170288,
+      "p10_us": 2380.735397338867,
+      "p90_us": 2395.153522491455
+    }
+  },
+  "rotation_buffers": 2,
+  "rounds": 12,
+  "samples_us": {
+    "flydsl": [
+      2460.268020629883,
+      2446.4681148529053,
+      2445.758104324341,
+      2441.2176609039307,
+      2439.8276805877686,
+      2448.498010635376,
+      2444.7081089019775,
+      2450.5081176757812,
+      2446.4681148529053,
+      2447.6380348205566,
+      2444.6678161621094,
+      2450.227737426758
+    ],
+    "torch_compile": [
+      2393.4977054595947,
+      2380.0973892211914,
+      2391.167640686035,
+      2377.317190170288,
+      2391.3376331329346,
+      2395.9174156188965,
+      2395.28751373291,
+      2386.477470397949,
+      2393.9476013183594,
+      2388.4875774383545,
+      2388.7274265289307,
+      2392.2173976898193
+    ]
+  },
+  "settle_seconds": 3.0,
+  "settled_calls": 1296,
+  "shape": [
+    8192,
+    262144
+  ],
+  "status": "passed",
+  "torch_over_flydsl": 0.9774305344066418,
+  "weight_dtype": "float32"
+}

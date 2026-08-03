@@ -1,8 +1,10 @@
 # FlyDSL RMSNorm backend notes
 
 Findings from building the opt-in ROCm RMSNorm backend (`quack/flydsl/`,
-`quack/rmsnorm_flydsl.py`). Measured on MI355X / gfx950 with FlyDSL 0.2.4 and
-torch 2.9.1+rocm7.2.0 unless stated otherwise.
+`quack/rmsnorm_flydsl.py`). Most historical measurements below used MI355X /
+gfx950, FlyDSL 0.2.4, and torch 2.9.1+rocm7.2.0. The current backend requires
+FlyDSL 0.3 or newer; the controlled wide-row reproduction uses
+0.3.0.dev765 and names its complete environment.
 
 ## Quack RMSNorm API coverage
 
@@ -123,7 +125,7 @@ the old `flydsl<0.3` pin. The released 0.3 API is now required
 `CompiledFunction` fast callable and the thread-local `CompilationContext`
 hint overlay.
 
-Unlike the rest of this file, the numbers above were taken on flydsl
+The numbers above were taken on FlyDSL
 0.3.0.dev765, with the suite passing there as well.
 
 ## Launch geometry cannot be computed in traced Python
@@ -554,11 +556,11 @@ collection with `ModuleNotFoundError: No module named 'cuda'`, because the
 cutedsl tests import `cuda.bindings`. That is also why the cutedsl head-to-head
 cannot be run on this machine.
 
-## Against torch.compile on the same part
+## Pre-wide diagnostic sweep against torch.compile
 
-`benchmarks/benchmark_rmsnorm_flydsl.py`, bf16 activations with fp32 weight on
-MI355X, correctness gated per cell before anything is timed. Speedup is
-torch.compile's time over ours, so above 1.0 is ours:
+Before the benchmark adopted the full CuTe shape ladder, this diagnostic sweep
+used bf16 activations with fp32 weight on MI355X. Every cell was correctness
+gated before timing. Speedup is torch.compile's time over ours:
 
 | M x N | moved | fwd | bwd |
 | --- | --- | --- | --- |
@@ -574,14 +576,14 @@ torch.compile's time over ours, so above 1.0 is ours:
 | 32768 x 4096 | 512 MiB | 0.98x | 1.48x |
 | 32768 x 8192 | 1536 MiB | 0.94x | 1.66x |
 
-Three groups, each answering a different question: fixed `N` sweeping `M` is
+The three diagnostic groups answered different questions: fixed `N` sweeping `M` is
 the launch-bound end, `M=4096` is the band that is neither launch-bound nor
-saturated, and fixed `M=32768` sweeping `N` is the bandwidth-bound end. Those
-last six are exactly the shapes of `benchmarks/benchmark_rmsnorm.py` that this
-backend can serve; its other five ask for `N` from 16384 to 262144, above
-`MAX_N`. `4096x3000` is the only shape here that is not a power of two while
-still being a multiple of `N_ALIGNMENT` (`gcd(3000, 8) == 8`), so it is the only
-one that exercises the predicated final tile.
+saturated, and fixed `M=32768` sweeping `N` is the bandwidth-bound end.
+`4096x3000` is the only shape here that is not a power of two while still being
+a multiple of `N_ALIGNMENT` (`gcd(3000, 8) == 8`), so it exercises the
+predicated final tile. The current benchmark instead matches all eleven CuTe
+shapes exactly; its widest target cell is reevaluated in the wide-row section
+below.
 
 Backward cells below `M=32768` are under the autograd host floor and should not
 be read as kernel results -- `4096x4096` reads 0.62x here and 1.08x in the run
@@ -794,37 +796,58 @@ Two corrections behind these numbers, both of which moved the conclusion:
    here. The cross-vendor comparison is not measurable on this host at all: the
    CuTe backend cannot be imported on ROCm.
 
-## `MAX_N = 8192` is a register bound, and it sits near 49152, not 8192
+## Wide rows stream instead of spilling
 
-`rmsnorm_config.MAX_N` rejects any row wider than 8192. Monkeypatching
-`quack.rmsnorm_flydsl.MAX_N` -- the module binds the name at import, so patching
-`rmsnorm_config.MAX_N` alone does nothing -- shows it is not a correctness
-bound: the forward runs to N = 262144 and the backward to 65536 at bf16 accuracy
-indistinguishable from the shapes under the cap.
+`MAX_N` is now 262144. The old 8192 cap matched the largest row whose whole
+per-thread fragment fit the 32-element register-cache budget, but the kernel
+continued caching after the cap was lifted. At N=262144 bf16 that meant 1024
+fp32 values per forward thread and 512 values plus persistent parameter
+accumulators per backward thread.
 
-An earlier version of this section concluded from "nothing spills" that the cap
-was policy rather than a register bound. That inference was wrong. Dumping the
-ISA (`FLYDSL_DUMP_IR=1`, bf16 forward, m=4096) puts the cliff exactly on the
-256-VGPR occupancy boundary:
+`rocprofv3` confirms that every optimized N=262144 kernel uses zero scratch:
 
-| N | VGPRs | scratch | GB/s |
-| --- | --- | --- | --- |
-| 8192 | 60 | 0 | 3383 |
-| 32768 | 196 | 0 | 3950 |
-| 49152 | 253 | 0 | 4117 |
-| 57344 | **290** | 0 | **2177** |
-| 65536 | 329 | 0 | 2273 |
+| kernel | VGPR | scratch/thread |
+| --- | ---: | ---: |
+| forward | 12 | 0 B |
+| backward correction | 32 | 0 B |
+| backward partial | 28 | 0 B |
+| parameter reduce | 24 | 0 B |
 
-Scratch is zero at every width, so "nothing spills" is literally true and says
-nothing: crossing 256 VGPRs halves waves per SIMD, and throughput halves with
-it. It is a register bound expressed as occupancy loss rather than spilling.
+Forward rows above the budget now compute `sum_sq` in a device loop and reload
+the activation for the epilogue. Backward first streams one row per block to
+write its scalar correction, then a column-tiled persistent kernel computes dx
+and bounded dweight/dbias partials; the existing deterministic parameter reduce
+is unchanged. There are no fp32 atomics.
 
-The cap stays at 8192, which leaves 4x headroom to that boundary and is a
-deliberately conservative choice rather than the measured limit. Raising it to
-around 49152 would cover the hidden sizes this backend currently refuses
-(12288, 16384) and needs test coverage at those widths first. cutedsl gates only
-at `N > 128k with dtype >= 32 bits` and escapes the register budget above 8k
-with `reload_from="smem"`, which this backend has no analogue for.
+The original PR run reported 2.526/2.916 ms forward and 4.131/5.719 ms backward
+for FlyDSL/torch.compile at `8192 x 262144`, but it recorded neither raw
+samples, provider-order control, a steady-state warmup, nor a bandwidth
+contention canary. The forward speedup does not survive a controlled rerun.
+
+`benchmarks/repro_pr7_wide.py` alternates provider order, settles clocks for
+three seconds, rotates two 4 GiB inputs, correctness-gates each provider, and
+measures 512 MiB bandwidth probes before and after. With the exact same torch,
+HIP, FlyDSL, and Triton builds on two MI355X nodes:
+
+| node | op | FlyDSL | torch.compile | torch / FlyDSL | BW canary |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `mia1-p02-g23` | fwd | 2.446 ms | 2.391 ms | 0.977x | 0.999 |
+| `smci355-ccs-aus-n08-09` | fwd | 2.578 ms | 2.426 ms | 0.941x | 0.996 |
+| `mia1-p02-g23` | bwd | 3.922 ms | 5.177 ms | 1.320x | 0.994 |
+| `smci355-ccs-aus-n08-09` | bwd | 4.155 ms | 5.402 ms | 1.300x | 1.003 |
+
+The original PR7 commit and the proposed PR5 integration are indistinguishable
+on the remote node: forward is 2.575/2.431 ms at `4413997` and
+2.574-2.578/2.426-2.429 ms after integration. The nodes are healthy as well:
+their best opening/closing bandwidth probes are 6.82/6.81 TB/s and
+6.51/6.48 TB/s with under 0.6% drift,
+and the remote node had no KFD processes on any GPU.
+
+So the reproducible conclusion is narrower: backward is about 1.30x faster,
+while forward is 2.3%-5.9% slower than torch.compile at the target cell. The
+logical GB/s remains provider-independent rather than physical traffic because
+the wide FlyDSL forward deliberately performs an extra streaming read. Raw
+results, exact commands, and provenance are in `AI/pr7_wide_repro/`.
 
 ## Where this backend stands against the cutedsl one
 
@@ -862,16 +885,15 @@ Only the top-level entry matches. Three consequences a caller feels:
 
 | input | cutedsl | FlyDSL |
 | --- | --- | --- |
-| row width | any `N`, to 262144 in its own benchmark | **`N <= 8192`** |
+| row width | any `N`, to 262144 in its own benchmark | `N <= 262144` |
 | row alignment | any `N` (gcd vectorization, predicated tail) | **multiple of 8, or 4 for fp32** |
 | architecture | SM80..SM100 | **gfx950 only** |
 | activation/weight dtypes | fp16/bf16/fp32 and more | fp16/bf16/fp32, any pairing |
 | `eps` | unvalidated | must be finite and positive |
 
-The width and alignment limits are the real adoption blockers, not layernorm.
-`N = 12288` and `N = 16384` are ordinary hidden sizes and both are refused;
-so is any `N` that is not a multiple of 8. Neither limit appeared in the old
-table.
+The wide-row path now covers the full benchmark ladder, including ordinary
+12288/16384 hidden sizes. Alignment remains stricter than cutedsl: any `N` that
+is not a multiple of 8 is still refused.
 
 ### 3. Implementation mechanisms
 
