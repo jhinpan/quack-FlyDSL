@@ -40,10 +40,22 @@ import platform
 import subprocess
 import sys
 
-# tests/test_rmsnorm_flydsl.py:94 -- this suite's own bf16 tolerance, applied
-# as assert_close applies it: |a - b| <= atol + rtol * |b|. Used for the
-# forward output and both gradients, so one criterion covers the whole row.
-_RTOL = _ATOL = 3e-2
+# The suite does not have "a bf16 tolerance"; it has two, and they differ.
+# ``_assert_close`` (tests/test_rmsnorm_flydsl.py:58-62) checks the forward
+# output at rtol=atol=2e-2. ``_assert_grad_close`` (:77-81) checks gradients at
+# 3e-2. Both are applied as assert_close applies them:
+# ``|a - b| <= atol + rtol * |b|``.
+#
+# The previous version used 3e-2 for all three tensors, which is 50% too loose
+# on the forward output, and cited :94 as its source -- that is
+# ``_assert_fused_residual_grad_close``, the helper for gradients recomputed
+# from a rounded residual, which is neither of the two that apply here and
+# whose own docstring says the no-residual tests deliberately do not borrow it.
+# So the constant was wrong for one tensor and the citation named a third
+# helper. @CrossVendor caught it by reading the suite rather than my summary of
+# it. One number standing in for a set that has two, again.
+_FWD_RTOL = _FWD_ATOL = 2e-2
+_GRAD_RTOL = _GRAD_ATOL = 3e-2
 
 _HASHED_SOURCES = (
     "quack/rmsnorm_flydsl.py",
@@ -111,7 +123,7 @@ def ref(x, w, eps):
     return (x32 * torch.rsqrt(x32.square().mean(-1, keepdim=True) + eps) * w.float()).to(x.dtype)
 
 
-def _worst_samples(torch, actual, expected, k=8):
+def _worst_samples(torch, actual, expected, rtol, atol, k=8):
     """Paired records at the k worst elements, enough to recompute the verdict.
 
     @CrossVendor: the previous ``samples`` field was the first eight forward
@@ -133,7 +145,7 @@ def _worst_samples(torch, actual, expected, k=8):
     """
     a, b = actual.float().flatten(), expected.float().flatten()
     diff = (a - b).abs()
-    thr = _ATOL + _RTOL * b.abs()
+    thr = atol + rtol * b.abs()
     by_margin = torch.argsort(diff - thr, descending=True)[:k].tolist()
     by_abs = torch.argsort(diff, descending=True)[:k].tolist()
     idx = list(dict.fromkeys(by_margin + by_abs))
@@ -171,14 +183,14 @@ def _row(fd, torch, n, m, dtype, eps, shipped):
         # never examined -- this file's recurring defect, in the field I had
         # just added to fix the previous instance of it. @CrossVendor caught it
         # in the committed bytes.
-        fwd_thr = _ATOL + _RTOL * exp.float().abs()
+        fwd_thr = _FWD_ATOL + _FWD_RTOL * exp.float().abs()
         rec.update(
             status="ok",
             mean_rel_err=(d / exp.float().abs().clamp_min(1e-6)).mean().item(),
             max_abs_err=d.max().item(),
             n_out_outside_combined=int((d > fwd_thr).sum().item()),
             finite=bool(torch.isfinite(got).all().item()),
-            samples_out_worst=_worst_samples(torch, got, exp),
+            samples_out_worst=_worst_samples(torch, got, exp, _FWD_RTOL, _FWD_ATOL),
         )
 
         # Backward too: @CrossVendor's H100 wide row covered fwd+bwd, and a
@@ -190,7 +202,8 @@ def _row(fd, torch, n, m, dtype, eps, shipped):
         got.backward(g)
         # The verdict is the suite's own combined criterion,
         # ``|a - b| <= atol + rtol * |b|``, which is what assert_close applies
-        # and what tests/test_rmsnorm_flydsl.py:94 means by rtol=atol=3e-2.
+        # at each tensor's own tolerance: 2e-2 for the forward output
+        # (_assert_close), 3e-2 for the gradients (_assert_grad_close).
         #
         # Two wrong single-number verdicts came before this one, in opposite
         # directions. Bare max_abs_err_dw = 0.125 looked like a breach; the dw
@@ -207,8 +220,8 @@ def _row(fd, torch, n, m, dtype, eps, shipped):
         dxr, dwr = xr.grad.float(), wr.grad.float()
         dxd = (x.grad.float() - dxr).abs()
         dwd = (w.grad.float() - dwr).abs()
-        n_dx_out = int((dxd > _ATOL + _RTOL * dxr.abs()).sum().item())
-        n_dw_out = int((dwd > _ATOL + _RTOL * dwr.abs()).sum().item())
+        n_dx_out = int((dxd > _GRAD_ATOL + _GRAD_RTOL * dxr.abs()).sum().item())
+        n_dw_out = int((dwd > _GRAD_ATOL + _GRAD_RTOL * dwr.abs()).sum().item())
         rec.update(
             bwd_status="ok",
             max_abs_err_dx=dxd.max().item(),
@@ -219,8 +232,8 @@ def _row(fd, torch, n, m, dtype, eps, shipped):
             dw_ref_absmax=dwr.abs().max().item(),
             n_dx_outside_combined=n_dx_out,
             n_dw_outside_combined=n_dw_out,
-            samples_dx_worst=_worst_samples(torch, x.grad, dxr),
-            samples_dw_worst=_worst_samples(torch, w.grad, dwr),
+            samples_dx_worst=_worst_samples(torch, x.grad, dxr, _GRAD_RTOL, _GRAD_ATOL),
+            samples_dw_worst=_worst_samples(torch, w.grad, dwr, _GRAD_RTOL, _GRAD_ATOL),
             bwd_finite=bool(torch.isfinite(x.grad).all().item())
             and bool(torch.isfinite(w.grad).all().item()),
         )
@@ -264,11 +277,22 @@ def main():
         "what": "FlyDSL fwd+bwd accuracy with MAX_N lifted, vs the same kernel under the cap",
         "kind": "functional/correctness probe, not a benchmark",
         "tolerance": {
-            "rtol": _RTOL,
-            "atol": _ATOL,
             "criterion": "abs(a - b) <= atol + rtol * abs(b), as assert_close applies it",
-            "applied_to": ["out", "dx", "dw"],
-            "source": "tests/test_rmsnorm_flydsl.py:94, this suite's own bf16 tolerance",
+            "out": {
+                "rtol": _FWD_RTOL,
+                "atol": _FWD_ATOL,
+                "source": "tests/test_rmsnorm_flydsl.py:58-62, _assert_close, bf16 branch",
+            },
+            "dx": {
+                "rtol": _GRAD_RTOL,
+                "atol": _GRAD_ATOL,
+                "source": "tests/test_rmsnorm_flydsl.py:77-81, _assert_grad_close, bf16 branch",
+            },
+            "dw": {
+                "rtol": _GRAD_RTOL,
+                "atol": _GRAD_ATOL,
+                "source": "tests/test_rmsnorm_flydsl.py:77-81, _assert_grad_close, bf16 branch",
+            },
         },
         "dtype": "bfloat16",
         "shipped_max_n": shipped,
