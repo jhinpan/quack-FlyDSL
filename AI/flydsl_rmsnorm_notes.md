@@ -2525,19 +2525,25 @@ bf16, `m*N` held at 2^24, against an fp32 reference, with `MAX_N` patched to
 `AI/probe_flydsl_cap_lift_accuracy.py`, artifact
 `AI/data/flydsl_cap_lift_accuracy.json`:
 
-| N | over cap | fwd | mean rel err | bwd | elements outside suite tol (out/dx/dw) |
-| --- | --- | --- | --- | --- | --- |
-| 4096 | no | ok | 1.9e-8 | ok | 0 / 0 / 0 |
-| 8192 | no | ok | 2.2e-8 | ok | 0 / 0 / 0 |
-| 16384 | yes | ok | 2.5e-8 | ok | 0 / 0 / 0 |
-| 32768 | yes | ok | 2.7e-8 | ok | 0 / 0 / 0 |
-| 65536 | yes | ok | 1.0e-8 | ok | 0 / 0 / 0 |
-| 131072 | yes | ok | 2.8e-8 | ok | 0 / 0 / 0 |
-| 262144 | yes | ok | 7.5e-8 | ok | 0 / 0 / 0 |
+Each tensor is judged at *its own* suite tolerance -- `out` at `rtol=atol=2e-2`
+(`_assert_close`), `dx` and `dw` at `3e-2` (`_assert_grad_close`) -- under
+`assert_close`'s own criterion `|a-b| <= atol + rtol*|b|`:
+
+| N | over cap | fwd | mean rel err | bwd | outside tol (out/dx/dw) | worst margin |
+| --- | --- | --- | --- | --- | --- | --- |
+| 4096 | no | ok | 1.9e-8 | ok | 0 / 0 / 0 | −0.0200 |
+| 8192 | no | ok | 2.2e-8 | ok | 0 / 0 / 0 | −0.0200 |
+| 16384 | yes | ok | 2.5e-8 | ok | 0 / 0 / 0 | −0.0200 |
+| 32768 | yes | ok | 2.7e-8 | ok | 0 / 0 / 0 | −0.0200 |
+| 65536 | yes | ok | 1.0e-8 | ok | 0 / 0 / 0 | −0.0200 |
+| 131072 | yes | ok | 2.8e-8 | ok | 0 / 0 / 0 | −0.0200 |
+| 262144 | yes | ok | 7.5e-8 | ok | 0 / 0 / 0 | −0.0200 |
 
 Flat across a 64x range with no discontinuity at the cap, forward and
-backward. So the FlyDSL half of the policy-cap claim is now measured rather
-than asserted.
+backward. The last column is the tensor-wide worst `diff - threshold` over all
+three tensors, so passing is not marginal: the nearest element to failing is a
+full `atol` inside. So the FlyDSL half of the policy-cap claim is now measured
+rather than asserted.
 
 **The first version of this artifact was not evidence, and @CrossVendor said
 so.** He held two older MI355X sidecars to a provenance standard -- no
@@ -2594,10 +2600,44 @@ different reported numbers. Every retained sample now recomputes its own
 threshold and verdict, and each `max_abs_err*` headline is backed by a sample
 in the file, so the artifact can be checked without rerunning it.
 
-Four instances of one defect class inside a single 200-line probe, each found
-by someone else or by disagreement between two versions of my own arithmetic.
-That is the argument for the artifact carrying its own recomputable evidence
-rather than a verdict anyone has to trust.
+**A fourth time, in the tolerance constant itself.** @CrossVendor went back to
+the suite rather than to my summary of it and found it does not have "a bf16
+tolerance" -- it has two. `_assert_close` (`tests/test_rmsnorm_flydsl.py:58-62`)
+checks the forward output at `rtol=atol=2e-2`; `_assert_grad_close` (`:77-81`)
+checks gradients at `3e-2`. The probe used `3e-2` for all three tensors, 50%
+too loose on the forward output, and cited `:94` as its source -- that is
+`_assert_fused_residual_grad_close`, a third helper for gradients recomputed
+from a rounded residual, whose own docstring says the no-residual tests
+deliberately do not borrow it. So the constant was wrong for one tensor and
+the citation named a helper that never applies to these shapes. Tolerance is
+now threaded per tensor through the forward threshold, the `dx`/`dw`
+outside-counts and both sample orderings, and the JSON carries `rtol`, `atol`
+and a source line separately for `out`, `dx` and `dw`.
+
+Re-measured under the *tighter* forward tolerance, every row still passes with
+zero elements outside on all three tensors -- but that had to be re-derived,
+not assumed. The margin is not close: the worst `diff - threshold` over all
+seven shapes and all three tensors is **−0.02**, i.e. the nearest element to
+failing is a full `atol` inside.
+
+**And a fifth, inside the field added to disclose a hazard in the fourth.**
+Retaining "the eight worst by margin" is misleading when elements tie at the
+same margin, so I added `margin_tied_at_worst` to count the tie set. It
+counted ties at `margin.min()` while `argsort(descending=True)` retains the
+*max* end -- so it reported `1`, read as "this is a genuine worst case," for
+exactly the tensors whose rows are arbitrary tie members. Corrected to count
+at the end the samples come from. The measured counts are 17-46 for `out`, 2-9
+for `dx`, 1 for `dw`: the `dw` rows are genuine extrema, the rest are
+representatives of a few dozen. My docstring had asserted "millions" before
+measuring; most near-zero references are not exactly zero, so their thresholds
+differ in the last bits and they do not tie.
+
+Six instances of one defect class inside a single 200-line probe -- twice in
+the very field added to fix the previous instance -- each found by someone
+else, by disagreement between two versions of my own arithmetic, or by the
+data contradicting the prose beside it. That is the argument for the artifact
+carrying its own recomputable evidence rather than a verdict anyone has to
+trust.
 
 So the honest statement of row 10, after five wrong ones:
 
