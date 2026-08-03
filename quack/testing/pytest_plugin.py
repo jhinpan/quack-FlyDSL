@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import pytest
 
-
 # Saved originals so ``pytest_unconfigure`` can restore pytest internals we
 # monkey-patched in ``pytest_configure``. Set to ``None`` when the
 # corresponding patch was skipped (e.g. pytest internals didn't match what
@@ -188,7 +187,9 @@ def _disable_unused_accelerator_lazy_call() -> None:
     """
     import torch
 
-    nop = lambda callable, **kwargs: None  # noqa: E731
+    def nop(_callable, **_kwargs):
+        return None
+
     if not torch.xpu.is_available():
         torch.xpu._lazy_call = nop
         torch.xpu.random._lazy_call = nop  # captured via `from . import _lazy_call`
@@ -608,8 +609,10 @@ def pytest_sessionfinish(session, exitstatus):
         return
     tr = config.pluginmanager.get_plugin("terminalreporter")
     lines = [
-        f"async-compile INTEGRITY ERROR: {len(missing)} collected test(s) produced no "
-        "report (deferred tests lost to a worker crash?):"
+        (
+            f"async-compile INTEGRITY ERROR: {len(missing)} collected test(s) produced no "
+            "report (deferred tests lost to a worker crash?):"
+        )
     ] + [f"  {nodeid}" for nodeid in sorted(missing)[:20]]
     for line in lines:
         (tr.write_line if tr else print)(line)

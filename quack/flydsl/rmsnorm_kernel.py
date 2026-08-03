@@ -306,7 +306,8 @@ def build_rmsnorm_module(
 
         sum_sq = row_reduce_add(thread_sumsq)
         rrms = fmath.rsqrt(sum_sq / float(n) + eps, fastmath=fast_math)
-        if const_expr(store_rstd):
+        # Keep the compile-time branch separate from the traced lane predicate.
+        if const_expr(store_rstd):  # noqa: SIM102
             if lane == 0:
                 store_scalar(
                     f32_copy,
@@ -373,6 +374,7 @@ def build_rmsnorm_module(
                     vecsize,
                 )
 
+    # FlyDSL requires a typed stream default in the traced signature.
     @flyc.jit
     def launch_rmsnorm(
         input_tensor: fx.Tensor,
@@ -385,7 +387,7 @@ def build_rmsnorm_module(
         m: fx.Int32,
         eps: fx.Float32,
         weight_offset: fx.Float32,
-        stream: fx.Stream = fx.Stream(None),
+        stream: fx.Stream = fx.Stream(None),  # noqa: B008
     ):
         num_programs = m * fx.Int32(num_heads)
         rmsnorm_kernel(
@@ -441,7 +443,7 @@ def rmsnorm_direct(
     arch: fx.Constexpr[str],
     schema_version: fx.Constexpr[int],
     threads_per_row: fx.Constexpr[int],
-    stream: fx.Stream = fx.Stream(None),
+    stream: fx.Stream = fx.Stream(None),  # noqa: B008 - required by FlyDSL's traced ABI
 ):
     """Specialize the existing forward builder through autotunable Constexpr inputs."""
     row_config = RmsNormRowConfig.with_num_threads(

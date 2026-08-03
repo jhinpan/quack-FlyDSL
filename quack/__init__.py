@@ -1,11 +1,13 @@
-__version__ = "0.6.1"
+# ruff: noqa: I001, RUF022
+
+import os
 
 import torch
 
+__version__ = "0.6.1"
+
 
 if torch.version.hip is None:
-    import os
-
     import quack.dsl as _quack_dsl  # noqa: F401
 
     if os.environ.get("CUTE_DSL_PTXAS_PATH", None) is not None:
@@ -18,11 +20,12 @@ if torch.version.hip is None:
 
     # Pythonic CuTe tensor indexing (`:` / `...` sugar) is installed as a side effect
     # of importing `quack.dsl`, which imports `quack.dsl.cute_tensor_indexing` and
-    # monkey-patches CuTe's tensor classes process-wide.
-    from quack.rmsnorm import rmsnorm  # noqa: E402
-    from quack.softmax import softmax  # noqa: E402
-    from quack.cross_entropy import cross_entropy  # noqa: E402
-    from quack.rounding import RoundingMode  # noqa: E402
+    # monkey-patches CuTe's tensor classes process-wide. The import and __all__
+    # order is a tested part of this eager CUDA bootstrap.
+    from quack.rmsnorm import rmsnorm
+    from quack.softmax import softmax
+    from quack.cross_entropy import cross_entropy
+    from quack.rounding import RoundingMode
 
     __all__ = [
         "rmsnorm",

@@ -14,7 +14,6 @@ Pure arithmetic: no FlyDSL, no torch.
 import math
 from dataclasses import dataclass
 
-
 ACCESS_BITS = 128
 # Wavefront width of every architecture this backend supports. The single
 # authority: the reductions in rmsnorm_common unroll over it and the launch

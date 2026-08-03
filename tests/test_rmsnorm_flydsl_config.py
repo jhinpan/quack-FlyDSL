@@ -22,7 +22,6 @@ from quack.flydsl.rmsnorm_config import (
     multi_row_block_rows,
 )
 
-
 DTYPE_WIDTHS = (16, 32)
 # The row lengths the backend accepts: multiples of N_ALIGNMENT up to MAX_N.
 # 192, 256, 760, 1024, 1128 and 4096 are the entries of quack's own RMSNorm test

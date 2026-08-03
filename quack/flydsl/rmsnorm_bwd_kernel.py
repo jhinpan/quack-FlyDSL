@@ -519,7 +519,8 @@ def build_rmsnorm_bwd_two_stage_module(
             fx.memref_store(dbias_total, shared_partial, dbias_shared_offset + tid)
         gpu.barrier()
 
-        if partial_lane == 0:
+        # Keep the lane predicate separate from the dynamic bounds check.
+        if partial_lane == 0:  # noqa: SIM102
             if parameter_index < parameter_numel:
                 if const_expr(compute_dweight):
                     total = fx.Float32(0.0)
@@ -570,7 +571,7 @@ def build_rmsnorm_bwd_two_stage_module(
         workspace_flat: fx.Tensor,
         m: fx.Int32,
         weight_offset: fx.Float32,
-        stream: fx.Stream = fx.Stream(None),
+        stream: fx.Stream = fx.Stream(None),  # noqa: B008 - required by FlyDSL's traced ABI
     ):
         rmsnorm_bwd_partial_kernel(
             source_tensor,

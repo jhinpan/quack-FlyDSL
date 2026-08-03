@@ -12,12 +12,12 @@ import os
 
 os.environ.setdefault("TORCH_COMPILE_DYNAMIC", "0")
 
-import torch  # noqa: E402
-import torch._functorch.config as _functorch_config  # noqa: E402
-from triton.testing import Benchmark, do_bench, perf_report  # noqa: E402
+import torch
+import torch._functorch.config as _functorch_config
+from triton.testing import Benchmark, do_bench, perf_report
 
-from quack.bench.bench_utils import run_and_print  # noqa: E402
-from quack.rmsnorm_flydsl import rmsnorm  # noqa: E402
+from quack.bench.bench_utils import run_and_print
+from quack.rmsnorm_flydsl import rmsnorm
 
 # Inductor's donated-buffer optimization is incompatible with retain_graph=True
 # (used so we benchmark only bwd, not fwd+bwd). Disable it for the torch.compile
