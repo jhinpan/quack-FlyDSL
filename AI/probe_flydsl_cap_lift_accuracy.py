@@ -142,14 +142,23 @@ def _worst_samples(torch, actual, expected, rtol, atol, k=8):
     entirely -- a large difference beside a large reference has a comfortable
     margin. Reporting only the first would leave a headline number
     uncheckable from the JSON, which is the whole complaint being answered.
+    Caveat that the records carry themselves: at these shapes most elements
+    round to zero in both tensors, so ``diff - thr`` ties at exactly ``-atol``
+    across millions of them and ``argsort`` returns eight arbitrary members of
+    that tie set. Those rows are checkable but not reproducible -- a rerun may
+    name eight different indices with identical numbers. ``margin_tied_at_min``
+    counts the tie set so a reader can see that, and ``worst_margin`` is the
+    tensor-wide extremum, which is a fact about the tensor rather than about
+    which representative argsort happened to pick.
     """
     a, b = actual.float().flatten(), expected.float().flatten()
     diff = (a - b).abs()
     thr = atol + rtol * b.abs()
-    by_margin = torch.argsort(diff - thr, descending=True)[:k].tolist()
+    margin = diff - thr
+    by_margin = torch.argsort(margin, descending=True)[:k].tolist()
     by_abs = torch.argsort(diff, descending=True)[:k].tolist()
     idx = list(dict.fromkeys(by_margin + by_abs))
-    return [
+    records = [
         {
             "index": int(i),
             "actual": float(a[i]),
@@ -163,6 +172,11 @@ def _worst_samples(torch, actual, expected, rtol, atol, k=8):
         }
         for i in idx
     ]
+    return records, {
+        "worst_margin": float(margin.max()),
+        "margin_tied_at_min": int((margin <= margin.min() + 1e-9).sum()),
+        "n_elements": int(a.numel()),
+    }
 
 
 def _row(fd, torch, n, m, dtype, eps, shipped):
@@ -184,13 +198,15 @@ def _row(fd, torch, n, m, dtype, eps, shipped):
         # just added to fix the previous instance of it. @CrossVendor caught it
         # in the committed bytes.
         fwd_thr = _FWD_ATOL + _FWD_RTOL * exp.float().abs()
+        s_out, g_out = _worst_samples(torch, got, exp, _FWD_RTOL, _FWD_ATOL)
         rec.update(
             status="ok",
             mean_rel_err=(d / exp.float().abs().clamp_min(1e-6)).mean().item(),
             max_abs_err=d.max().item(),
             n_out_outside_combined=int((d > fwd_thr).sum().item()),
             finite=bool(torch.isfinite(got).all().item()),
-            samples_out_worst=_worst_samples(torch, got, exp, _FWD_RTOL, _FWD_ATOL),
+            samples_out_worst=s_out,
+            margin_out=g_out,
         )
 
         # Backward too: @CrossVendor's H100 wide row covered fwd+bwd, and a
@@ -220,6 +236,8 @@ def _row(fd, torch, n, m, dtype, eps, shipped):
         dxr, dwr = xr.grad.float(), wr.grad.float()
         dxd = (x.grad.float() - dxr).abs()
         dwd = (w.grad.float() - dwr).abs()
+        s_dx, g_dx = _worst_samples(torch, x.grad, dxr, _GRAD_RTOL, _GRAD_ATOL)
+        s_dw, g_dw = _worst_samples(torch, w.grad, dwr, _GRAD_RTOL, _GRAD_ATOL)
         n_dx_out = int((dxd > _GRAD_ATOL + _GRAD_RTOL * dxr.abs()).sum().item())
         n_dw_out = int((dwd > _GRAD_ATOL + _GRAD_RTOL * dwr.abs()).sum().item())
         rec.update(
@@ -232,8 +250,10 @@ def _row(fd, torch, n, m, dtype, eps, shipped):
             dw_ref_absmax=dwr.abs().max().item(),
             n_dx_outside_combined=n_dx_out,
             n_dw_outside_combined=n_dw_out,
-            samples_dx_worst=_worst_samples(torch, x.grad, dxr, _GRAD_RTOL, _GRAD_ATOL),
-            samples_dw_worst=_worst_samples(torch, w.grad, dwr, _GRAD_RTOL, _GRAD_ATOL),
+            samples_dx_worst=s_dx,
+            margin_dx=g_dx,
+            samples_dw_worst=s_dw,
+            margin_dw=g_dw,
             bwd_finite=bool(torch.isfinite(x.grad).all().item())
             and bool(torch.isfinite(w.grad).all().item()),
         )
