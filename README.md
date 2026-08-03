@@ -28,6 +28,10 @@ pip install 'quack-kernels[jax]'
 - CUDA toolkit 12.9+
 - Python 3.12
 
+There is also an opt-in ROCm RMSNorm backend built on FlyDSL, for MI355X
+(gfx950). See [ROCm / FlyDSL](#rocm--flydsl-) below; it has its own extra and a
+separate import path.
+
 ## Kernels 🐥
 
 - 🦆 RMSNorm forward + backward
@@ -49,6 +53,42 @@ JAX bindings are also available for some kernels (see [docs/jax.md](docs/jax.md)
 ```
 from quack.softmax_jax import softmax
 ```
+
+## ROCm / FlyDSL 🐥
+
+RMSNorm forward and backward also run on AMD MI355X (gfx950) through a separate
+backend built on [FlyDSL](https://github.com/ROCm/FlyDSL). It is opt-in and does
+not change the CUDA path.
+
+```
+pip install 'quack-kernels[flydsl]'
+```
+
+The CuTe kernels need `cutlass`, which is CUDA-only, so `from quack import
+rmsnorm` does not work on a ROCm host. Import the backend explicitly:
+
+```
+from quack.rmsnorm_flydsl import rmsnorm
+```
+
+`rmsnorm()` takes the same arguments as `quack.rmsnorm`.
+
+**Use it in eager code.** Under `torch.compile` the kernel is an opaque custom
+op, so Inductor cannot fuse RMSNorm into neighbouring kernels the way it fuses
+plain PyTorch. Measured on a transformer block with two RMSNorms around two
+matmuls, this backend is 1.35x faster than eager PyTorch and 1.57x slower than
+compiled PyTorch.
+
+What this backend does not do yet:
+
+- rows wider than 8192, or any row length that is not a multiple of 8 (4 for
+  fp32) — use `torch.nn.functional.rms_norm` for those
+- gfx950 only; other architectures are rejected rather than assumed to work
+- layernorm, and the lower-level `rmsnorm_fwd` / `rmsnorm_bwd` entry points
+
+Forward autotuning is available through `quack.rmsnorm_flydsl.rmsnorm_autotuned`
+and searches only when `FLYDSL_AUTOTUNE=1` is set. Design notes and measured
+results are in [AI/flydsl_rmsnorm_notes.md](AI/flydsl_rmsnorm_notes.md).
 
 ## Documentations
 
