@@ -142,13 +142,18 @@ def _worst_samples(torch, actual, expected, rtol, atol, k=8):
     entirely -- a large difference beside a large reference has a comfortable
     margin. Reporting only the first would leave a headline number
     uncheckable from the JSON, which is the whole complaint being answered.
-    Caveat that the records carry themselves: at these shapes most elements
-    round to zero in both tensors, so ``diff - thr`` ties at exactly ``-atol``
-    across millions of them and ``argsort`` returns arbitrary members of that
-    tie set. Those rows are checkable but not reproducible -- a rerun may name
-    different indices with identical numbers. ``margin_tied_at_worst`` counts
-    the tie set at the margin actually retained, so a reader can tell a genuine
-    worst case (count 1) from one representative of millions (count large).
+    Caveat that the records carry themselves: elements whose reference rounds
+    to zero all sit at ``margin == -atol``, so ``argsort`` returns arbitrary
+    members of that tie set and a rerun may name different indices with
+    identical numbers. ``margin_tied_at_worst`` counts the tie set at the
+    margin actually retained, so a reader can tell a genuine worst case
+    (count 1) from one representative of many (count large). Measured here:
+    17-46 tied for ``out``, 2-9 for ``dx``, 1 for ``dw`` -- so the ``dw`` rows
+    are genuine extrema and the others are representatives of a few dozen.
+    Not the millions I assumed before measuring: most near-zero references are
+    not exactly zero, so their thresholds differ in the last bits and they do
+    not tie. The tie sets are small, which is why the count is worth printing
+    rather than asserting.
 
     That counter was itself wrong on first writing: it counted ties at
     ``margin.min()`` while ``argsort(descending=True)`` retains the *max* end,
