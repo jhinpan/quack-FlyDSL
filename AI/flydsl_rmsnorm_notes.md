@@ -513,7 +513,7 @@ harness does not have.
 
 ## Measuring this backend
 
-The suite figure for this revision is **642 passed, 3 skipped, 1 xfailed** when
+The suite figure for this revision is **643 passed, 3 skipped, 1 xfailed** when
 one idle GPU is visible. The three skips require multiple visible devices; the
 xfail is `test_simulated_cuda_flydsl_import_survives_a_broken_cutedsl_chain`,
 which pins a real limitation rather than a passing behaviour (see the import
