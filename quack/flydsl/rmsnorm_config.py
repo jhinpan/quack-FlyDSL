@@ -31,19 +31,14 @@ MAX_NUM_THREADS = 256
 # tuner does see M, so it is allowed the wider block.
 MAX_TUNED_NUM_THREADS = 512
 SUPPORTED_DTYPE_WIDTHS = (16, 32)
+# The register-cached forward is tuned around this live-fragment ceiling. Wider
+# rows deliberately trade a second global read for bounded VGPR use.
+REGISTER_CACHE_ELEMS = 32
 
-# Widest row this backend accepts. A thread keeps ``num_tiles * vecsize``
-# elements live between the two forward passes, so wider rows cost registers,
-# and the ISA shows where that stops being free: bf16 forward compiles to 60
-# VGPRs at 8192 and 253 at 49152, then 290 at 57344 where throughput halves
-# (4117 -> 2177 GB/s). Nothing spills at any width -- the cliff is the 256-VGPR
-# occupancy boundary, not scratch.
-#
-# So this is a register bound, but it sits near 49152 rather than here. 8192 is
-# a deliberately conservative cap with 4x headroom, not the measured limit;
-# raising it needs test coverage at the wider shapes. See
-# AI/flydsl_rmsnorm_notes.md.
-MAX_N = 8192
+# Widest row this backend accepts. Rows above the register-cache budget use
+# streaming runtime loops and a second global read instead of retaining an
+# unbounded fragment in VGPRs.
+MAX_N = 262144
 
 # A row must be a whole number of 128-bit accesses at the narrowest element the
 # backend supports. That is what makes every row start naturally aligned and
@@ -80,8 +75,13 @@ class RmsNormRowConfig:
 
     @property
     def elems_per_thread(self) -> int:
-        """Row elements each thread holds live between the two forward passes."""
+        """Row elements assigned to each thread across all tiles."""
         return self.num_tiles * self.vecsize
+
+    @property
+    def reload_from(self) -> str | None:
+        """Where the epilogue gets its input after the row reduction."""
+        return "gmem" if self.elems_per_thread > REGISTER_CACHE_ELEMS else None
 
     @classmethod
     def from_analytical_heuristic(
@@ -193,6 +193,7 @@ __all__ = [
     "MAX_N",
     "MAX_TUNED_NUM_THREADS",
     "N_ALIGNMENT",
+    "REGISTER_CACHE_ELEMS",
     "WAVE_SIZE",
     "RmsNormRowConfig",
     "batch_short_rows",

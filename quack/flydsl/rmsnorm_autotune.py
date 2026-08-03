@@ -66,13 +66,17 @@ def _row_candidates(n: int, dtype_width: int) -> list[int]:
     for threads in sorted(candidates):
         if threads < 1 or threads > ceiling or threads & (threads - 1):
             continue
-        config = RmsNormRowConfig.with_num_threads(n, dtype_width, threads, max_num_threads=ceiling)
-        # Upper bound is the register budget. The lower bound is that every
-        # lane gets at least one vector: a block wider than the row has vectors
-        # idles the surplus for the whole kernel, and the tuner's own timing
-        # does not reliably reject that -- offered 512 at N=1024, where 384 of
-        # the 512 lanes have nothing to load, it picked it and ran 0.70x.
-        if config.elems_per_thread <= 32 and config.num_vecs >= threads:
+        config = RmsNormRowConfig.with_num_threads(
+            n,
+            dtype_width,
+            threads,
+            max_num_threads=ceiling,
+        )
+        # Wide candidates use the builder's gmem-reload path, so their total
+        # row assignment no longer has to fit in registers. Still reject
+        # blocks wider than the row's vector count because their idle lanes
+        # can fool the tuner into selecting a much slower configuration.
+        if config.num_vecs >= threads:
             legal.append(threads)
     return legal
 
