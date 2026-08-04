@@ -30,7 +30,7 @@ pip install 'quack-kernels[jax]'
 
 There is also an opt-in ROCm RMSNorm backend built on FlyDSL, for MI355X
 (gfx950). See [ROCm / FlyDSL](#rocm--flydsl-) below; it has its own extra and a
-separate import path.
+shared `from quack import rmsnorm` entry point.
 
 ## Kernels 🐥
 
@@ -56,22 +56,24 @@ from quack.softmax_jax import softmax
 
 ## ROCm / FlyDSL 🐥
 
-RMSNorm forward and backward also run on AMD MI355X (gfx950) through a separate
-backend built on [FlyDSL](https://github.com/ROCm/FlyDSL). It is opt-in and does
-not change the CUDA path.
+RMSNorm forward and backward also run on AMD MI355X (gfx950) through a backend
+built on [FlyDSL](https://github.com/ROCm/FlyDSL). It is opt-in and does not
+change the CUDA path.
 
 ```
 pip install 'quack-kernels[flydsl]'
 ```
 
-The CuTe kernels need `cutlass`, which is CUDA-only, so `from quack import
-rmsnorm` does not work on a ROCm host. Import the backend explicitly:
+The same public import selects CuTe on a CUDA build and FlyDSL on a ROCm build:
 
 ```
-from quack.rmsnorm_flydsl import rmsnorm
+from quack import rmsnorm
 ```
 
-`rmsnorm()` takes the same arguments as `quack.rmsnorm`.
+Importing `quack` alone does not load FlyDSL; the backend is resolved when
+`rmsnorm` is first accessed. Selection is strict: unsupported inputs or
+architectures raise an actionable error rather than silently falling back to a
+different implementation.
 
 **Use it in eager code.** Under `torch.compile` the kernel is an opaque custom
 op, so Inductor cannot fuse RMSNorm into neighbouring kernels the way it fuses
@@ -81,15 +83,15 @@ compiled PyTorch.
 
 What this backend does not do yet:
 
-- rows wider than 8192, or any row length that is not a multiple of 8 (4 for
-  fp32) — use `torch.nn.functional.rms_norm` for those
+- rows wider than 262144, or any row length that is not a multiple of 8 — use
+  `torch.nn.functional.rms_norm` for those
 - gfx950 only; other architectures are rejected rather than assumed to work
 - layernorm, and the lower-level `rmsnorm_fwd` / `rmsnorm_bwd` entry points
 
-Forward and backward autotuning are available through
-`quack.rmsnorm_flydsl.rmsnorm_autotuned` and search only when
-`FLYDSL_AUTOTUNE=1` is set. Design notes and measured results are in
-[AI/flydsl_rmsnorm_notes.md](AI/flydsl_rmsnorm_notes.md).
+The FlyDSL-specific advanced entry point
+`quack.rmsnorm_flydsl.rmsnorm_autotuned` provides forward and backward
+autotuning and searches only when `FLYDSL_AUTOTUNE=1` is set. Design notes and
+measured results are in [AI/flydsl_rmsnorm_notes.md](AI/flydsl_rmsnorm_notes.md).
 
 ## Documentations
 

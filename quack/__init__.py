@@ -34,20 +34,30 @@ if torch.version.hip is None:
         "RoundingMode",
     ]
 else:
-    # The CuTe kernels need cutlass, which is CUDA-only. ROCm users reach the
-    # FlyDSL backend explicitly through quack.rmsnorm_flydsl; exporting nothing
-    # keeps `from quack import *` from re-exporting the torch imported above.
-    __all__ = []
+    # The CuTe kernels need cutlass, which is CUDA-only. Resolve RMSNorm lazily
+    # so importing quack remains valid without the optional FlyDSL dependency.
+    __all__ = ["rmsnorm"]
 
-    _CUDA_ONLY = ("rmsnorm", "softmax", "cross_entropy", "RoundingMode")
+    _CUDA_ONLY = ("softmax", "cross_entropy", "RoundingMode")
 
     def __getattr__(name):
-        # Without this, `from quack import rmsnorm` on ROCm falls through to
-        # importing the quack.rmsnorm submodule and surfaces as
-        # "No module named 'cuda'", which names neither the cause nor the fix.
+        if name == "rmsnorm":
+            try:
+                from quack.rmsnorm_flydsl import rmsnorm as _rmsnorm
+            except ModuleNotFoundError as exc:
+                if exc.name != "flydsl":
+                    raise
+                raise ModuleNotFoundError(
+                    "quack.rmsnorm uses the FlyDSL backend on ROCm; install it with "
+                    "\"pip install 'quack-kernels[flydsl]'\"",
+                    name="flydsl",
+                ) from exc
+            # Return the backend function itself, rather than wrapping every
+            # call, and cache it so its identity remains stable.
+            globals()["rmsnorm"] = _rmsnorm
+            return _rmsnorm
         if name in _CUDA_ONLY:
             raise AttributeError(
-                f"quack.{name} is a CuTe kernel and needs CUDA; this is a ROCm build. "
-                "The FlyDSL RMSNorm backend is at quack.rmsnorm_flydsl."
+                f"quack.{name} is a CuTe kernel and needs CUDA; this is a ROCm build."
             )
         raise AttributeError(f"module 'quack' has no attribute '{name}'")

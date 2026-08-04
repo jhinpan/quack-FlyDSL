@@ -15,6 +15,7 @@ if torch.version.hip is None:
 
 pytest.importorskip("flydsl")
 
+import quack
 import quack.flydsl.rmsnorm_autotune as rmsnorm_autotune_impl
 import quack.flydsl.rmsnorm_bwd_autotune as rmsnorm_bwd_autotune_impl
 import quack.rmsnorm_flydsl as rmsnorm_flydsl_impl
@@ -2265,10 +2266,12 @@ def _upstream_rmsnorm_signature() -> tuple[list[str], dict[str, str]]:
     raise AssertionError("quack/rmsnorm.py no longer defines a top-level rmsnorm")
 
 
-def test_public_signature_matches_upstream_rmsnorm():
-    """The backend must be substitutable for quack.rmsnorm, not a lookalike."""
+def test_public_package_export_matches_the_upstream_rmsnorm_contract():
+    """The package must export the real, substitutable FlyDSL function."""
     names, defaults = _upstream_rmsnorm_signature()
-    ours = inspect.signature(rmsnorm).parameters
+    assert quack.rmsnorm is rmsnorm
+    assert quack.rmsnorm is quack.rmsnorm
+    ours = inspect.signature(quack.rmsnorm).parameters
     assert list(ours) == names
     for name, default in defaults.items():
         assert repr(ours[name].default) == default, name

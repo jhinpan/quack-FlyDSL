@@ -1,9 +1,11 @@
 # Copyright (c) 2026, Tri Dao.
 
-"""Explicit ROCm/FlyDSL RMSNorm backend.
+"""ROCm/FlyDSL RMSNorm backend.
 
-This module is intentionally opt-in. Importing ``quack`` does not import
-FlyDSL, and this backend does not alter Quack's existing CUDA/CuTe dispatch.
+On ROCm, the package-level ``quack.rmsnorm`` export resolves lazily to this
+module's ``rmsnorm`` function. Importing ``quack`` alone does not import FlyDSL,
+and this backend does not alter Quack's existing CUDA/CuTe dispatch. The
+``rmsnorm_autotuned`` entry point remains FlyDSL-specific.
 """
 
 import math

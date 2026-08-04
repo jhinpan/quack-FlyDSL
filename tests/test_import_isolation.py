@@ -78,8 +78,157 @@ def test_real_rocm_import_skips_cuda_bootstrap_without_initializing_context():
         import quack
 
         assert quack.__version__
+        assert quack.__all__ == ["rmsnorm"]
+        assert "quack.rmsnorm_flydsl" not in sys.modules
+        assert not any(name == "flydsl" or name.startswith("flydsl.") for name in sys.modules)
         assert not any(name == "cutlass" or name.startswith("cutlass.") for name in sys.modules)
         assert not torch.cuda.is_initialized()
+        """
+    )
+
+
+def test_simulated_rocm_lazily_exports_the_flydsl_rmsnorm():
+    _run_python(
+        """
+        import importlib.abc
+        import importlib.util
+        import sys
+
+        import torch
+
+
+        events = []
+        exports = {}
+
+
+        class FlydslRmsnormLoader(importlib.abc.Loader):
+            def create_module(self, spec):
+                return None
+
+            def exec_module(self, module):
+                events.append(f"import_{module.__name__.removeprefix('quack.')}")
+
+                def rmsnorm(*args, **kwargs):
+                    return args, kwargs
+
+                module.rmsnorm = rmsnorm
+                exports["rmsnorm"] = rmsnorm
+
+
+        class FlydslRmsnormFinder(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "quack.rmsnorm_flydsl":
+                    return importlib.util.spec_from_loader(fullname, FlydslRmsnormLoader())
+                return None
+
+
+        torch.version.hip = "simulated-rocm"
+        sys.meta_path.insert(0, FlydslRmsnormFinder())
+
+        import quack
+
+        assert quack.__all__ == ["rmsnorm"]
+        assert events == []
+        assert "quack.rmsnorm" not in sys.modules
+        assert "quack.rmsnorm_flydsl" not in sys.modules
+
+        first = quack.rmsnorm
+
+        assert events == ["import_rmsnorm_flydsl"]
+        assert first is exports["rmsnorm"]
+        assert quack.rmsnorm is first
+        assert "quack.rmsnorm" not in sys.modules
+
+        from quack import rmsnorm
+
+        assert rmsnorm is first
+        assert events == ["import_rmsnorm_flydsl"]
+        """
+    )
+
+
+def test_simulated_rocm_missing_flydsl_names_the_install_extra():
+    _run_python(
+        """
+        import importlib.abc
+        import importlib.util
+        import sys
+
+        import torch
+
+
+        class MissingFlydslLoader(importlib.abc.Loader):
+            def create_module(self, spec):
+                return None
+
+            def exec_module(self, module):
+                raise ModuleNotFoundError("No module named 'flydsl'", name="flydsl")
+
+
+        class MissingFlydslFinder(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "quack.rmsnorm_flydsl":
+                    return importlib.util.spec_from_loader(fullname, MissingFlydslLoader())
+                return None
+
+
+        torch.version.hip = "simulated-rocm"
+        sys.meta_path.insert(0, MissingFlydslFinder())
+
+        import quack
+
+        try:
+            from quack import rmsnorm
+        except ModuleNotFoundError as exc:
+            assert exc.name == "flydsl"
+            assert "quack-kernels[flydsl]" in str(exc)
+            assert "rmsnorm" not in quack.__dict__
+        else:
+            raise AssertionError("missing FlyDSL unexpectedly produced an RMSNorm export")
+        """
+    )
+
+
+def test_simulated_rocm_does_not_relabel_an_internal_import_failure():
+    _run_python(
+        """
+        import importlib.abc
+        import importlib.util
+        import sys
+
+        import torch
+
+
+        class BrokenBackendLoader(importlib.abc.Loader):
+            def create_module(self, spec):
+                return None
+
+            def exec_module(self, module):
+                raise ModuleNotFoundError(
+                    "No module named 'backend_internal_dependency'",
+                    name="backend_internal_dependency",
+                )
+
+
+        class BrokenBackendFinder(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "quack.rmsnorm_flydsl":
+                    return importlib.util.spec_from_loader(fullname, BrokenBackendLoader())
+                return None
+
+
+        torch.version.hip = "simulated-rocm"
+        sys.meta_path.insert(0, BrokenBackendFinder())
+
+        import quack
+
+        try:
+            from quack import rmsnorm
+        except ModuleNotFoundError as exc:
+            assert exc.name == "backend_internal_dependency"
+            assert "quack-kernels[flydsl]" not in str(exc)
+        else:
+            raise AssertionError("an internal backend import failure was swallowed")
         """
     )
 
