@@ -347,10 +347,10 @@ def _launch_rmsnorm_fwd(
     residual_out_dtype_str = _dtype_to_str(residual_out.dtype)
     apply_weight_offset = weight_offset != 0.0
     measured_threads = (
-        {8192: 512, 32768: 1024}[n]
+        {1024: 64, 2048: 64, 8192: 512, 32768: 1024}[n]
         if (
             m == 32768
-            and n in (8192, 32768)
+            and n in (1024, 2048, 8192, 32768)
             and dtype_str == output_dtype_str == "bf16"
             and weight_dtype_str == "f32"
             and has_weight
