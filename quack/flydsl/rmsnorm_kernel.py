@@ -58,6 +58,8 @@ def build_rmsnorm_module(
     arch: str | None = None,
     row_config: RmsNormRowConfig | None = None,
     apply_weight_offset: bool = True,
+    persistent_rows: bool = False,
+    persistent_programs: int = 0,
 ):
     """Build the RMSNorm forward, specialized by shape, dtypes and feature flags.
 
@@ -116,12 +118,40 @@ def build_rmsnorm_module(
     non_temporal_output = plain_bf16_f32 and n in (256, 512, 8192)
     wide_full_tiles = num_vecs // threads_per_row
     wide_tail_vecs = num_vecs % threads_per_row
+    if persistent_rows:
+        if persistent_programs <= 0:
+            raise ValueError("persistent_programs must be positive in persistent-row mode")
+        if (
+            batched
+            or input_dtype_str != "bf16"
+            or output_dtype_str != "bf16"
+            or weight_dtype_str != "f32"
+            or not has_weight
+            or has_bias
+            or has_residual
+            or store_residual
+            or store_rstd
+            or per_head
+            or num_heads != 1
+            or apply_weight_offset
+            or reload_from_gmem
+            or config.needs_predicate
+        ):
+            raise ValueError(
+                "persistent-row mode currently requires aligned BF16 input/output, "
+                "FP32 weight, and plain inference feature flags"
+            )
     # Lanes the row reduction shuffles over, and how many of those groups it
     # has to stitch together through LDS. A group wider than a wavefront only
     # happens when the row has a block to itself.
     reduce_lanes = min(threads_per_row, WARP_SIZE)
     red_slots = max(1, threads_per_row // WARP_SIZE)
-    shared_storage = make_reduction_storage(red_slots)
+    # Persistent rows alternate two tiny LDS reduction buffers. That lets the
+    # next row start without racing waves that are still consuming the prior
+    # result, and avoids a third block barrier per row.
+    red_buffers = 2 if persistent_rows and red_slots > 1 else 1
+    red_storage_slots = red_slots * red_buffers
+    shared_storage = make_reduction_storage(red_storage_slots)
 
     # Elements each access carries, per operand. Only a 32-bit operand under a
     # full 16-bit activation vector needs more than one access to cover the span.
@@ -172,7 +202,7 @@ def build_rmsnorm_module(
         fast_math = arith.FastMathFlags.fast
 
         storage = fx.SharedAllocator().allocate(shared_storage).peek()
-        reduction = storage.s_red.view(fx.make_layout(red_slots, 1))
+        reduction = storage.s_red.view(fx.make_layout(red_storage_slots, 1))
 
         def group_reduce_add(value):
             """Sum across the lanes covering one row, within a wavefront."""
@@ -183,29 +213,30 @@ def build_rmsnorm_module(
                 fast_math,
             )
 
-        def row_reduce_add(value):
+        def row_reduce_add(value, red_buffer=0):
             if const_expr(red_slots == 1):
                 return group_reduce_add(value)
             # More than one wavefront per row means the row owns the block, so
             # the slots are its own waves and the barrier is not shared.
             wave_lane = tid % WARP_SIZE
             wave = tid // WARP_SIZE
+            red_base = fx.Int32(red_buffer) * fx.Int32(red_slots)
             reduced = group_reduce_add(value)
             if wave_lane == 0:
-                fx.memref_store(reduced, reduction, wave)
+                fx.memref_store(reduced, reduction, red_base + wave)
             gpu.barrier()
             if wave == 0:
                 in_range = wave_lane < red_slots
                 safe_lane = in_range.select(wave_lane, 0)
                 partial = in_range.select(
-                    fx.memref_load(reduction, safe_lane),
+                    fx.memref_load(reduction, red_base + safe_lane),
                     fx.Float32(0.0),
                 )
                 partial = group_reduce_add(partial)
                 if wave_lane == 0:
-                    fx.memref_store(partial, reduction, 0)
+                    fx.memref_store(partial, reduction, red_base)
             gpu.barrier()
-            return fx.memref_load(reduction, 0)
+            return fx.memref_load(reduction, red_base)
 
         def row_div(tensor, elem_bits, per_access):
             """One row (or one row/head slice) split into whole accesses."""
@@ -265,6 +296,111 @@ def build_rmsnorm_module(
             )
             rstd_div = fx.logical_divide(rstd_buffer, fx.make_layout(1, 1))
             f32_copy = buffer_copy_atom(32, 32)
+
+        if const_expr(persistent_rows):
+            # This is the same generic feature kernel under a compile-time
+            # launch mode, not a second kernel. The restricted host selector
+            # above keeps unsupported feature combinations on the unchanged
+            # one-row fallback.
+            weight_local = []
+            initial_input = []
+            for tile_i in range_constexpr(config.num_tiles):
+                index = lane + tile_i * threads_per_row
+                weight_local.append(
+                    load_dtype_vec(
+                        weight_copy,
+                        weight_dtype,
+                        weight_bits,
+                        weight_div,
+                        index,
+                        vecsize,
+                    )
+                )
+                initial_input.append(
+                    load_vec(
+                        input_copy,
+                        vecsize,
+                        input_dtype,
+                        input_div,
+                        index,
+                    )
+                )
+
+            for persistent_row, prefetched_input in range(
+                fx.Int32(program),
+                num_programs,
+                fx.Int32(persistent_programs),
+                init=initial_input,
+            ):
+                thread_sumsq = fx.Float32(0.0)
+                for tile_i in range_constexpr(config.num_tiles):
+                    value = prefetched_input[tile_i].to(fx.Float32)
+                    thread_sumsq = thread_sumsq + (value * value).reduce(
+                        ReductionOp.ADD,
+                        fastmath=fast_math,
+                    )
+
+                sum_sq = row_reduce_add(
+                    thread_sumsq,
+                    (fx.Int32(persistent_row) // fx.Int32(persistent_programs))
+                    % fx.Int32(red_buffers),
+                )
+                rrms = fmath.rsqrt(sum_sq / float(n) + eps, fastmath=fast_math)
+
+                # Issue the following row after the reduction barriers and
+                # before this row's epilogue. Carrying the fragment through
+                # the loop SSA lets those loads overlap the multiply/store
+                # work without a barrier forcing their vmcnt to zero.
+                next_row = fx.Int32(persistent_row) + fx.Int32(persistent_programs)
+                next_valid = next_row < num_programs
+                next_input_div = fx.logical_divide(
+                    row_buffer(
+                        input_tensor,
+                        next_row,
+                        input_bits,
+                        n,
+                        next_valid,
+                    ),
+                    fx.make_layout(input_per_access, 1),
+                )
+                next_input = []
+                for tile_i in range_constexpr(config.num_tiles):
+                    index = lane + tile_i * threads_per_row
+                    next_value = prefetched_input[tile_i]
+                    if next_valid:
+                        next_value = load_vec(
+                            input_copy,
+                            vecsize,
+                            input_dtype,
+                            next_input_div,
+                            index,
+                        )
+                    next_input.append(next_value)
+
+                persistent_output_div = fx.logical_divide(
+                    row_buffer(output_tensor, persistent_row, output_bits, n),
+                    fx.make_layout(output_per_access, 1),
+                )
+                for tile_i in range_constexpr(config.num_tiles):
+                    index = lane + tile_i * threads_per_row
+                    result = prefetched_input[tile_i].to(fx.Float32) * rrms * weight_local[tile_i]
+                    store_dtype_vec(
+                        output_copy,
+                        output_dtype,
+                        output_bits,
+                        to_store_dtype(
+                            output_dtype_str,
+                            output_dtype,
+                            use_hw_cvt_bf16,
+                            result,
+                            vecsize,
+                        ),
+                        persistent_output_div,
+                        index,
+                        vecsize,
+                    )
+                _persistent_results = yield next_input
+            return
 
         # Narrow rows keep their values across the reduction. Wide rows reload
         # them for the epilogue: one extra global read is much cheaper than
@@ -667,7 +803,11 @@ def build_rmsnorm_module(
             weight_offset,
         ).launch(
             grid=(
-                (num_programs + fx.Int32(rows_per_block - 1)) // fx.Int32(rows_per_block),
+                (
+                    fx.Int32(persistent_programs)
+                    if persistent_rows
+                    else (num_programs + fx.Int32(rows_per_block - 1)) // fx.Int32(rows_per_block)
+                ),
                 1,
                 1,
             ),

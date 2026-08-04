@@ -1024,6 +1024,7 @@ def _clear_caches():
     rmsnorm_flydsl_impl._BWD_CACHE.clear()
     rmsnorm_flydsl_impl._FWD_AUTOTUNED_FAST_CACHE.clear()
     rmsnorm_flydsl_impl._BWD_AUTOTUNED_FAST_CACHE.clear()
+    rmsnorm_flydsl_impl._FWD_CU_COUNT_CACHE.clear()
     rmsnorm_flydsl_impl._BWD_CU_COUNT_CACHE.clear()
     rmsnorm_flydsl_impl._DEVICE_ARCH_CACHE.clear()
     rmsnorm_flydsl_impl._AUTOTUNE_ARCH_CACHE.clear()
@@ -2583,6 +2584,60 @@ def test_software_bf16_rounding_matches_the_hardware_convert():
 
     torch.testing.assert_close(rounded["gfx942"], rounded["gfx950"], rtol=0, atol=0)
     _assert_close(rounded["gfx942"], _reference(x, weight, 1e-6))
+
+
+def test_persistent_forward_carries_prefetched_rows_correctly():
+    """The compile-time persistent mode must cover every grid-stride row."""
+    from quack.flydsl.rmsnorm_common import run_compiled
+    from quack.flydsl.rmsnorm_kernel import build_rmsnorm_module
+
+    torch.manual_seed(31)
+    m, n, num_programs = 64, 4096, 16
+    x = torch.randn((m, n), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(n, device="cuda", dtype=torch.float32)
+    out = torch.empty_like(x)
+    absent = torch.empty(0, device="cuda", dtype=torch.bfloat16)
+    rstd = torch.empty(0, device="cuda", dtype=torch.float32)
+    launcher = build_rmsnorm_module(
+        n,
+        "bf16",
+        "bf16",
+        weight_dtype_str="f32",
+        bias_dtype_str="bf16",
+        residual_dtype_str="bf16",
+        residual_out_dtype_str="bf16",
+        has_weight=True,
+        has_bias=False,
+        has_residual=False,
+        store_residual=False,
+        store_rstd=False,
+        per_head=False,
+        num_heads=1,
+        row_config=RmsNormRowConfig.with_num_threads(
+            n,
+            16,
+            512,
+            max_num_threads=MAX_TUNED_NUM_THREADS,
+        ),
+        apply_weight_offset=False,
+        persistent_rows=True,
+        persistent_programs=num_programs,
+    )
+    run_compiled(
+        launcher,
+        x,
+        weight,
+        absent,
+        x,
+        out,
+        absent,
+        rstd,
+        m,
+        1e-6,
+        0.0,
+        torch.cuda.current_stream().cuda_stream,
+    )
+    _assert_close(out, _reference(x, weight, 1e-6))
 
 
 def test_operands_larger_than_one_buffer_descriptor():

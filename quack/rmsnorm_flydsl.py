@@ -44,6 +44,9 @@ _SUPPORTED_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 # gfx942 is wave64 and should work, but until it executes on real hardware it
 # is not claimed here.
 _SUPPORTED_ARCHES = frozenset({"gfx950"})
+# Measured on MI355X for the large-batch, plain BF16/FP32 inference cells.
+# Values are (threads per row, persistent programs per CU).
+_FWD_PERSISTENT_CONFIGS = {4096: (512, 56), 8192: (512, 56)}
 # Row counts cross the Int32 kernel ABI here; reject before FlyDSL's argument
 # packing raises a struct.error from inside the dispatch.
 _MAX_ROWS = 2**31 - 1
@@ -51,6 +54,7 @@ _FWD_CACHE: dict[tuple, object] = {}
 _BWD_CACHE: dict[tuple, object] = {}
 _FWD_AUTOTUNED_FAST_CACHE: dict[tuple, tuple] = {}
 _BWD_AUTOTUNED_FAST_CACHE: dict[tuple, tuple] = {}
+_FWD_CU_COUNT_CACHE: dict[torch.device, int] = {}
 _BWD_CU_COUNT_CACHE: dict[torch.device, int] = {}
 _DEVICE_ARCH_CACHE: dict[int, str] = {}
 _AUTOTUNE_ARCH_CACHE: dict[tuple, str] = {}
@@ -346,22 +350,38 @@ def _launch_rmsnorm_fwd(
     residual_dtype_str = _dtype_to_str(residual.dtype)
     residual_out_dtype_str = _dtype_to_str(residual_out.dtype)
     apply_weight_offset = weight_offset != 0.0
-    measured_threads = (
-        {1024: 64, 2048: 64, 8192: 512, 32768: 1024}[n]
-        if (
-            m == 32768
-            and n in (1024, 2048, 8192, 32768)
-            and dtype_str == output_dtype_str == "bf16"
-            and weight_dtype_str == "f32"
-            and has_weight
-            and not has_bias
-            and not has_residual
-            and not store_residual
-            and not per_head
-            and weight_offset == 0.0
-        )
+    measured_plain = (
+        m == 32768
+        and dtype_str == output_dtype_str == "bf16"
+        and weight_dtype_str == "f32"
+        and has_weight
+        and not has_bias
+        and not has_residual
+        and not store_residual
+        and not per_head
+        and num_heads == 1
+        and not apply_weight_offset
+    )
+    persistent_config = (
+        _FWD_PERSISTENT_CONFIGS.get(n)
+        if measured_plain and not store_rstd
         else None
     )
+    persistent_programs = None
+    if persistent_config is not None:
+        measured_threads, persistent_multiplier = persistent_config
+        num_cus = _FWD_CU_COUNT_CACHE.get(x.device)
+        if num_cus is None:
+            num_cus = torch.cuda.get_device_properties(x.device).multi_processor_count
+            if not torch.compiler.is_compiling():
+                _FWD_CU_COUNT_CACHE[x.device] = num_cus
+        persistent_programs = min(m, num_cus * persistent_multiplier)
+    else:
+        measured_threads = (
+            {1024: 64, 2048: 64, 8192: 512, 32768: 1024}[n]
+            if measured_plain and n in (1024, 2048, 8192, 32768)
+            else None
+        )
     row_config = (
         RmsNormRowConfig.with_num_threads(
             n,
@@ -391,6 +411,7 @@ def _launch_rmsnorm_fwd(
             per_head,
             num_heads,
             measured_threads,
+            persistent_programs,
             apply_weight_offset,
         )
         launcher = _FWD_CACHE.get(key)
@@ -417,6 +438,8 @@ def _launch_rmsnorm_fwd(
                     arch=arch,
                     row_config=row_config,
                     apply_weight_offset=apply_weight_offset,
+                    persistent_rows=persistent_programs is not None,
+                    persistent_programs=persistent_programs or 0,
                 ),
             )
         run_compiled(
