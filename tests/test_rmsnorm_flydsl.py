@@ -114,8 +114,13 @@ def _assert_fused_residual_grad_close(actual: torch.Tensor, expected: torch.Tens
     [
         ((3, 120), torch.float16, torch.float16, 1e-6),
         ((2, 1024), torch.bfloat16, torch.float32, 1e-5),
+        # The profiled inference specializations: a 32-lane DPP reduction and
+        # the non-temporal store/load policies used by the larger rows.
+        ((4, 256), torch.bfloat16, torch.float32, 1e-6),
+        ((4, 512), torch.bfloat16, torch.float32, 1e-6),
         ((4, 4096), torch.float16, torch.float16, 1e-6),
         ((2, 4096), torch.bfloat16, torch.float32, 1e-5),
+        ((4, 8192), torch.bfloat16, torch.float32, 1e-6),
         ((3, 3584), torch.float16, torch.float32, 1e-6),
         ((2, 3584), torch.bfloat16, torch.bfloat16, 1e-5),
         ((2, 4096), torch.float32, torch.float32, 1e-6),

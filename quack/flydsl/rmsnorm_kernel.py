@@ -101,6 +101,19 @@ def build_rmsnorm_module(
     last_tile = config.num_tiles - 1
     reload_from_gmem = config.reload_from == "gmem"
     runtime_wide_loop = reload_from_gmem
+    plain_bf16_f32 = (
+        input_dtype_str == output_dtype_str == "bf16"
+        and weight_dtype_str == "f32"
+        and has_weight
+        and not has_bias
+        and not has_residual
+        and not store_residual
+        and not store_rstd
+        and not per_head
+        and not apply_weight_offset
+    )
+    non_temporal_input = plain_bf16_f32 and n in (4096, 8192)
+    non_temporal_output = plain_bf16_f32 and n in (256, 512, 8192)
     wide_full_tiles = num_vecs // threads_per_row
     wide_tail_vecs = num_vecs % threads_per_row
     # Lanes the row reduction shuffles over, and how many of those groups it
@@ -214,8 +227,16 @@ def build_rmsnorm_module(
 
         input_div = row_div(input_tensor, input_bits, input_per_access)
         output_div = row_div(output_tensor, output_bits, output_per_access)
-        input_copy = buffer_copy_atom(input_per_access * input_bits, input_bits)
-        output_copy = buffer_copy_atom(output_per_access * output_bits, output_bits)
+        input_copy = buffer_copy_atom(
+            input_per_access * input_bits,
+            input_bits,
+            cache_modifier=2 if non_temporal_input else 0,
+        )
+        output_copy = buffer_copy_atom(
+            output_per_access * output_bits,
+            output_bits,
+            cache_modifier=2 if non_temporal_output else 0,
+        )
         if const_expr(has_residual):
             residual_div = row_div(residual_tensor, residual_bits, residual_per_access)
             residual_copy = buffer_copy_atom(residual_per_access * residual_bits, residual_bits)

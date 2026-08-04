@@ -83,18 +83,19 @@ _BUFFER_COPY_OPS = {
 }
 
 
-def buffer_copy_atom(access_bits: int, elem_bits: int):
+def buffer_copy_atom(access_bits: int, elem_bits: int, cache_modifier: int = 0):
     """Copy atom that moves ``access_bits`` at a time.
 
     The width follows from the vector size the config picked, so a row that is
     not a whole number of 128-bit vectors uses the widest access that does
-    divide it rather than dropping to scalar.
+    divide it rather than dropping to scalar. ``cache_modifier=2`` selects the
+    CDNA non-temporal form; zero keeps the ordinary cached access.
     """
     try:
         copy_op = _BUFFER_COPY_OPS[access_bits]
     except KeyError:
         raise ValueError(f"no buffer copy for a {access_bits}-bit access") from None
-    return fx.make_copy_atom(copy_op(), elem_bits)
+    return fx.make_copy_atom(copy_op(cache_modifier), elem_bits)
 
 
 def vector_access_plan(vecsize: int, dtype_width: int) -> tuple[int, int]:
@@ -163,12 +164,49 @@ def make_reduction_storage(red_slots: int):
     return SharedStorage
 
 
+def _dpp_shuffle_xor(value, offset: int):
+    """Exchange an fp32 value within each 16-lane DPP row."""
+    raw = value.ir_value()
+    result_type = raw.type
+    # Row shifts need complementary bank masks to implement XOR rather than a
+    # one-way shift. Quad permutations cover the final two butterfly stages.
+    if offset == 8:
+        peer = fx.rocdl.update_dpp(result_type, raw, raw, 0x118, 0xF, 0xC, False)
+        peer = fx.rocdl.update_dpp(result_type, peer, raw, 0x108, 0xF, 0x3, False)
+    elif offset == 4:
+        peer = fx.rocdl.update_dpp(result_type, raw, raw, 0x114, 0xF, 0xA, False)
+        peer = fx.rocdl.update_dpp(result_type, peer, raw, 0x104, 0xF, 0x5, False)
+    elif offset == 2:
+        peer = fx.rocdl.update_dpp(result_type, raw, raw, 0x4E, 0xF, 0xF, False)
+    elif offset == 1:
+        peer = fx.rocdl.update_dpp(result_type, raw, raw, 0xB1, 0xF, 0xF, False)
+    else:
+        raise ValueError(f"unsupported DPP XOR offset: {offset}")
+    return fx.Float32(peer)
+
+
+def _ds_swizzle_xor(value, offset: int):
+    """Exchange the two 16-lane halves of each 32-lane group."""
+    bits = value.bitcast(fx.Uint32)
+    # AMD's SWAP encoding is ``group_size << 10 | 0x1f``.
+    peer = fx.rocdl.ds_swizzle(
+        bits.ir_value().type,
+        bits.ir_value(),
+        fx.Int32((offset << 10) | 0x1F).ir_value(),
+    )
+    return fx.Uint32(peer).bitcast(fx.Float32)
+
+
 def shuffle_reduce_add(value, lanes: int, shuffle_width, fast_math):
     """Add ``value`` across a compile-time-sized lane group."""
     result = value
     for shift_exp in range_constexpr(int(math.log2(lanes))):
         offset = lanes // (2 << shift_exp)
-        peer = result.shuffle_xor(offset, shuffle_width)
+        peer = (
+            (_dpp_shuffle_xor(result, offset) if offset <= 8 else _ds_swizzle_xor(result, offset))
+            if lanes == 32
+            else result.shuffle_xor(offset, shuffle_width)
+        )
         result = result.addf(peer, fastmath=fast_math)
     return result
 
