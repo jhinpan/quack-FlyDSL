@@ -12,7 +12,7 @@ from cutlass.cute.runtime import make_ptr
 from quack.compile_utils import make_fake_tensor as fake_tensor
 from quack.compile_utils import div_for_dtype, fake_batched  # noqa: F401  (re-exported)
 from quack.gemm_config import SplitKMode
-from quack.cute_dsl_utils import torch2cute_dtype_map
+from quack.cute_dsl_utils import get_compile_target_capacity, torch2cute_dtype_map
 from quack.tile_scheduler import AgSchedulerArguments, TileSchedulerOptions
 from quack.varlen_utils import VarlenArguments
 
@@ -109,20 +109,14 @@ def validate_blockscaled_sf(
     assert not varlen_k or num_batches is not None, "varlen_k requires num_batches"
     assert SFB is not None, "SFA and SFB must be provided together"
     assert device_capacity[0] in [10, 11, 12], "Blockscaled GEMM requires SM100/SM110/SM120"
-    if device_capacity[0] == 12:
-        # SM120 warp-MMA blockscaled: same-dtype MXFP8 (MmaMXF8Op), or any
-        # kind::mxf8f6f4 pair with independent a/b dtypes — fp8/fp6/fp4 mixes
-        # incl. e4m3 x e5m2 (sub-byte sides ride padded 16U4_ALIGN8B /
-        # 16U6_ALIGN16B tensormaps + ldsm.b4x16_p64/b6x16_p32 unpack).
-        # Same-dtype fp4 (kind::mxf4 / mxf4nvf4) and varlen_k's m-major A are
-        # not implemented.
-        pair_bits = (fmt_a.elem_bits, fmt_b.elem_bits)
-        assert pair_bits != (4, 4), (
-            f"SM120 blockscaled GEMM does not implement same-dtype fp4 "
-            f"(kind::mxf4 / mxf4nvf4); pair fp4 with an fp8/fp6 format, "
-            f"got {fmt_a.name} x {fmt_b.name}"
-        )
-        assert not varlen_k, "SM120 blockscaled GEMM does not support varlen_k (needs m-major A)"
+    # SM120 warp-MMA blockscaled: same-dtype MXFP8 (MmaMXF8Op), same-dtype
+    # fp4 (packed kind::mxf4 / mxf4nvf4), or any kind::mxf8f6f4 pair with
+    # independent a/b dtypes — fp8/fp6/fp4 mixes incl. e4m3 x e5m2
+    # (sub-byte sides of mixed pairs ride padded 16U4_ALIGN8B /
+    # 16U6_ALIGN16B tensormaps + ldsm.b4x16_p64/b6x16_p32 unpack).
+    # MN-major operands (incl. varlen_k's m-major A / n-major B) are fp8-only
+    # on SM120: both sides ride the transposing b8 ldmatrix (m16n16.trans.b8);
+    # B needs a hand-built TV layout (GemmSm120._nmajor_b_tiled_copy).
     # Per-instruction the scale config is shared: every legal pair has matching
     # scale dtype and vec size (nvfp4 only pairs with itself; all other formats
     # are e8m0 / vec 32).
@@ -697,13 +691,27 @@ def compile_gemm_kernel(
         sm8x_kwargs["arch"] = device_capacity[0] * 10 + device_capacity[1]
         GemmCls = partial(GemmCls, **sm8x_kwargs)
     elif device_capacity[0] in [9, 12]:
-        if device_capacity[0] == 12 and sf_vec_size is not None:
-            # SM120 blockscaled (real SFA/SFB); SM90 has no blockscaled path.
-            # MMA element types ride along when they differ from storage
-            # dtypes (packed fp6 crosses the FFI boundary as raw bytes).
-            split_k_kwargs["sf_vec_size"] = sf_vec_size
-            split_k_kwargs["a_mma_dtype"] = a_mma_dtype
-            split_k_kwargs["b_mma_dtype"] = b_mma_dtype
+        if device_capacity[0] == 12:
+            if sf_vec_size is not None:
+                # SM120 blockscaled (real SFA/SFB); SM90 has no blockscaled
+                # path. MMA element types ride along when they differ from
+                # storage dtypes (packed fp6 crosses the FFI boundary as raw
+                # bytes).
+                split_k_kwargs["sf_vec_size"] = sf_vec_size
+                split_k_kwargs["a_mma_dtype"] = a_mma_dtype
+                split_k_kwargs["b_mma_dtype"] = b_mma_dtype
+            # SM120's dynamic persistence is CLC (cluster launch control, same
+            # Blackwell feature as sm100's) — no tile-count semaphore needed.
+            # Pingpong included: it consumes CLC responses one-at-a-time
+            # (128x128 pingpong + CLC is the best-measured mxfp8 config, see
+            # AI/sm120_blockscaled_gemm_worklog.md).
+            # Gate on the COMPILE TARGET, not the dispatch arch: CLC
+            # instructions are sm_100+, so the H100 CI proxy legs
+            # (QUACK_ARCH=120 compiled for sm_90a) must fall back to the
+            # static persistent scheduler or NVVM rejects the kernel.
+            split_k_kwargs["use_clc_persistence"] = (
+                is_dynamic_persistent and persistent and get_compile_target_capacity()[0] >= 10
+            )
         GemmCls = partial(GemmCls, pingpong=pingpong, is_persistent=persistent, **split_k_kwargs)
     elif device_capacity[0] in [10, 11]:
         GemmCls = partial(

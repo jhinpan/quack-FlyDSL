@@ -109,6 +109,13 @@ class GemmSm90(GemmTmaBase):
     """
 
     arch = 90
+    # Base (pre-refinement) C-load stage depth in _compute_stages: SM90's TMA
+    # epilogue dispatch policy StagesC = min(EpiTiles, 4). SM120 overrides to
+    # 2 (its CUTLASS builder uses StagesC = StagesD = min(EpiTiles, 2) — the
+    # 100 KB smem budget can't afford 4 upfront C stages without dropping an
+    # AB stage); the leftover refinement below still deepens C when smem is
+    # free.
+    epi_c_stage_base = 4
     EpilogueArguments = GemmTmaBase.EpilogueArguments
     EpilogueParams = GemmTmaBase.EpilogueParams
 
@@ -1802,6 +1809,24 @@ class GemmSm90(GemmTmaBase):
         # (((2,2,2),1), MMA_M / epi_M, MMA_N / epi_N, (epi_M, epi_N))
         return tiled_copy_r2s.retile(tRS_rAcc)
 
+    def epi_r2s_pair_xor(self) -> bool:
+        # 32-bit D with n-major layout: the wgmma acc pairs are contiguous in
+        # smem and both the SW128 (epi_tile_n % 32 == 0) and SW64
+        # (epi_tile_n == 16, i.e. tile_n % 32 == 16 like 112/176) swizzle
+        # atoms make STS.64 uniformly 2-way bank conflicted; the pair-XOR
+        # STS.32 split is conflict-free under both (ncu-verified, no spills).
+        # epi_tile_n == 8 (SW32) is not verified, keep the default store.
+        # Gated off when C is present: the fp32-C epilogue sits exactly at the
+        # setmaxnreg cap and the split's few extra registers spill to local
+        # (measured ~150MB STL, a net loss; same for a mirrored LDS split).
+        return (
+            self.d_dtype is not None
+            and self.d_dtype.width == 32
+            and (self.d_layout is None or self.d_layout.is_n_major_c())
+            and self.epi_tile[1] % 16 == 0
+            and self.c_dtype is None
+        )
+
     def epilog_smem_copy_atom(self, tiled_mma: cute.TiledMma) -> cute.TiledCopy:
         copy_atom_C = cute.make_copy_atom(
             warp.StMatrix8x8x16bOp(
@@ -1931,7 +1956,19 @@ class GemmSm90(GemmTmaBase):
         :rtype: Tuple[int, int]
         """
 
-        epi_stage = 4 if epi_tile[1] <= 16 else 2
+        # Stage split mirrors CUTLASS's sm90 TMA epilogue dispatch policy
+        # (sm90_get_tma_dispatch_policy): StagesD = min(EpiTiles, 2),
+        # StagesC = min(EpiTiles, 4). C loads are latency-critical
+        # (consumer_wait sits on the epilogue's serial path; at epi_c_stage=2
+        # it measured ~15% of warp time on C-heavy epilogues like dgated at
+        # 65536x2048x768), while D stores are fire-and-forget through the TMA
+        # store pipeline and L2 absorbs them (producer_acquire waits measured
+        # near-zero even at epi_stage=2). Narrow epi tiles keep the deeper
+        # 4-stage D (per-stage bytes are small).
+        epi_tiles = (cta_tile_shape_mnk[0] * cta_tile_shape_mnk[1]) // cute.size(
+            cute.shape(epi_tile)
+        )
+        epi_stage = min(epi_tiles, 4 if epi_tile[1] <= 16 else 2)
         epi_smem_bytes = cls.epi_smem_bytes(
             epilogue_args, cta_tile_shape_mnk, epi_tile, warp_shape_mnk
         )
@@ -1941,7 +1978,7 @@ class GemmSm90(GemmTmaBase):
         epi_bytes_per_stage = d_bytes_per_stage + epi_smem_bytes.d_stage
         epi_bytes = epi_smem_bytes.unstaged + epi_bytes_per_stage * epi_stage
         epi_c_stage = (
-            0 if c_dtype is None and not has_tile_load else (4 if epi_tile[1] <= 16 else 2)
+            0 if c_dtype is None and not has_tile_load else min(epi_tiles, cls.epi_c_stage_base)
         )
         if c_dtype is not None:
             epi_bytes += epi_tile_elems * c_dtype.width // 8 * epi_c_stage
@@ -1982,11 +2019,23 @@ class GemmSm90(GemmTmaBase):
         )
         ab_stage = remaining_bytes // ab_bytes_per_stage
 
-        # Refine epilogue stages:
-        # Calculate remaining smem after allocating for A/B stages and reserved bytes
-        # Add remaining unused smem to epilogue
+        # Refine epilogue stages with the smem left below one more A/B stage,
+        # C first (one extra C stage measured ~2.6% on dgated at
+        # 65536x2048x768, leftover-to-D never won an interleaved A/B), capped
+        # at min(5, epi_tiles) — the epilogue only prefetches C within the
+        # current tile, so deeper than epi_tiles is dead smem. The rest goes
+        # to D stages.
+        leftover = remaining_bytes - ab_bytes_per_stage * ab_stage
+        c_bytes_per_stage = (
+            epi_tile_elems * c_dtype.width // 8 if c_dtype is not None else 0
+        ) + epi_smem_bytes.c_stage
+        if epi_c_stage > 0 and c_bytes_per_stage > 0:
+            add = min(leftover // c_bytes_per_stage, min(5, epi_tiles) - epi_c_stage)
+            if add > 0:
+                epi_c_stage += add
+                leftover -= add * c_bytes_per_stage
         if epi_bytes_per_stage > 0:
-            epi_stage += (remaining_bytes - ab_bytes_per_stage * ab_stage) // epi_bytes_per_stage
+            epi_stage += leftover // epi_bytes_per_stage
         return ab_stage, epi_stage, epi_c_stage
 
     @staticmethod

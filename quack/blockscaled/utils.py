@@ -24,6 +24,7 @@ from quack.blockscaled.operand import (
 from quack.blockscaled.quantize import (  # noqa: F401  (pure-torch helpers re-exported)
     FP4_E2M1FN_VALUES,
     QUANTIZERS,
+    _COMPILE_KW,
     _fp4_unpacked_to_value,
     dequant_operand,
     pack_scale_2d_to_blocked_contig,
@@ -253,10 +254,9 @@ BLOCKSCALED_FORMATS = {
 
 # compiled (static shapes) so the swizzle fuses into a couple of kernels instead
 # of an eager pad/permute/contiguous chain; see the dynamic=False and
-# recompile_limit notes in quantize.py (per-wrapper limit: config is thread-local)
-_pack_scale_compiled = torch.compile(
-    pack_scale_2d_to_blocked_contig, dynamic=False, recompile_limit=64
-)
+# recompile_limit notes in quantize.py (per-wrapper limit where torch supports
+# it, global-config fallback on torch < 2.13)
+_pack_scale_compiled = torch.compile(pack_scale_2d_to_blocked_contig, **_COMPILE_KW)
 
 
 def blockscaled_quantize(
@@ -584,8 +584,8 @@ def create_blockscaled_varlen_k_operands(
     Returns (a_ref_list, b_ref_list, qa, qb, a_sc_contig, b_sc_contig, cu_seqlens_k):
       a_ref_list: list of per-expert (m, k_i) fp32 dequantized A.
       b_ref_list: list of per-expert (n, k_i) fp32 dequantized B.
-      qa:  (m, total_k) K-major fp8 (stride (total_k, 1)).
-      qb:  (n, total_k) K-major fp8 (stride (total_k, 1)).
+      qa:  (m, total_k) M-major fp8 (stride (1, m)).
+      qb:  (n, total_k) N-major fp8 (stride (1, n)).
       a_sc_contig: (1, rm, total_padded_rk, 32, 4, 4) K-padded SFA (tile-aligned per batch).
       b_sc_contig: (1, rn, total_padded_rk, 32, 4, 4) K-padded SFB (tile-aligned per batch).
       cu_seqlens_k: (num_experts+1,) int32.
