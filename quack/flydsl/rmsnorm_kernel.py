@@ -20,6 +20,7 @@ from .rmsnorm_common import (
     dtype_to_elem_type,
     has_hw_bf16_convert,
     load_dtype_vec,
+    load_vec,
     make_reduction_storage,
     require_wave64,
     row_buffer,
@@ -56,6 +57,7 @@ def build_rmsnorm_module(
     num_heads: int,
     arch: str | None = None,
     row_config: RmsNormRowConfig | None = None,
+    apply_weight_offset: bool = True,
 ):
     """Build the RMSNorm forward, specialized by shape, dtypes and feature flags.
 
@@ -248,6 +250,7 @@ def build_rmsnorm_module(
         # spilling an unbounded row fragment to private memory.
         thread_sumsq = fx.Float32(0.0)
         row_values = []
+        native_row_values = []
         if const_expr(runtime_wide_loop):
             # A device loop keeps code size and temporary VGPRs independent of N.
             for tile_i in range(wide_full_tiles):
@@ -339,14 +342,14 @@ def build_rmsnorm_module(
                 if const_expr(partial):
                     in_row = index < num_vecs
                     safe_index = in_row.select(index, 0)
-                value = load_dtype_vec(
+                native_value = load_vec(
                     input_copy,
+                    vecsize,
                     input_dtype,
-                    input_bits,
                     input_div,
                     safe_index,
-                    vecsize,
                 )
+                value = native_value.to(fx.Float32)
                 if const_expr(has_residual):
                     value = value + load_dtype_vec(
                         residual_copy,
@@ -386,8 +389,18 @@ def build_rmsnorm_module(
                             vecsize,
                         )
                 if const_expr(not reload_from_gmem):
-                    row_values.append(value)
-                contribution = (value * value).reduce(ReductionOp.ADD, fastmath=fast_math)
+                    if const_expr(has_residual):
+                        row_values.append(value)
+                    else:
+                        # Keep the source in its storage dtype across the
+                        # reduction. The feature builder still owns this path,
+                        # but the no-residual specialization does not double
+                        # BF16's live register footprint before FP32 math.
+                        native_row_values.append(native_value)
+                contribution = (value * value).reduce(
+                    ReductionOp.ADD,
+                    fastmath=fast_math,
+                )
                 if const_expr(partial):
                     contribution = in_row.select(contribution, fx.Float32(0.0))
                 thread_sumsq = thread_sumsq + contribution
@@ -436,7 +449,9 @@ def build_rmsnorm_module(
                         index,
                         vecsize,
                     )
-                    result = result * (weights + weight_offset)
+                    if const_expr(apply_weight_offset):
+                        weights = weights + weight_offset
+                    result = result * weights
                 if const_expr(has_bias):
                     result = result + load_dtype_vec(
                         bias_copy,
@@ -492,7 +507,9 @@ def build_rmsnorm_module(
                         safe_index,
                         vecsize,
                     )
-                    result = result * (weights + weight_offset)
+                    if const_expr(apply_weight_offset):
+                        weights = weights + weight_offset
+                    result = result * weights
                 if const_expr(has_bias):
                     result = result + load_dtype_vec(
                         bias_copy,
@@ -545,7 +562,10 @@ def build_rmsnorm_module(
                             vecsize,
                         )
                 else:
-                    value = row_values[tile_i]
+                    if const_expr(has_residual):
+                        value = row_values[tile_i]
+                    else:
+                        value = native_row_values[tile_i].to(fx.Float32)
                 result = value * rrms
                 if const_expr(has_weight):
                     weights = load_dtype_vec(
@@ -556,7 +576,9 @@ def build_rmsnorm_module(
                         safe_index,
                         vecsize,
                     )
-                    result = result * (weights + weight_offset)
+                    if const_expr(apply_weight_offset):
+                        weights = weights + weight_offset
+                    result = result * weights
                 if const_expr(has_bias):
                     result = result + load_dtype_vec(
                         bias_copy,

@@ -139,6 +139,8 @@ def _parameter_reduce_cols_candidates(values, num_programs: int) -> list[int]:
         heuristic,
         min(PARAMETER_REDUCE_THREADS, heuristic * 2),
     }
+    if int(values["n"]) <= _SMALL_N_MAX:
+        candidates.update((1, 2, 4, 8, 16, 32, 64))
     return sorted(candidates)
 
 

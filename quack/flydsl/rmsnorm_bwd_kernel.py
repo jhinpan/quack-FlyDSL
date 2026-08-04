@@ -1008,62 +1008,210 @@ def build_rmsnorm_bwd_two_stage_module(
                 )
                 dbias_total = dbias_total + partial_valid.select(value, fx.Float32(0.0))
 
-        if const_expr(compute_dweight):
-            fx.memref_store(dweight_total, shared_partial, tid)
-        if const_expr(compute_dbias):
-            fx.memref_store(dbias_total, shared_partial, dbias_shared_offset + tid)
-        gpu.barrier()
-
-        # A balanced tree gives every specialized geometry one fixed summation
-        # order. The barrier between levels also prevents reassociation across
-        # the tree; no gradient atomic participates in the result.
-        for reduce_step in range_constexpr(parameter_reduce_steps):
-            stride = parameter_reduce_row_lanes // (2 << reduce_step)
-            if partial_lane < stride:
-                peer_tid = (partial_lane + stride) * parameter_reduce_cols + column_lane
-                if const_expr(compute_dweight):
-                    total = fx.memref_load(shared_partial, tid) + fx.memref_load(
+        if const_expr(parameter_reduce_cols == 1):
+            # One block owns one output column at N=256. Reduce within each
+            # wave in registers, then combine only four wave totals through
+            # LDS. This preserves a fixed tree while replacing eight
+            # workgroup-wide barriers with one.
+            lane = tid % WARP_SIZE
+            wave = tid // WARP_SIZE
+            fast_math = arith.FastMathFlags.fast
+            if const_expr(compute_dweight):
+                reduced_dweight = shuffle_reduce_add(
+                    dweight_total,
+                    WARP_SIZE,
+                    WARP_SIZE,
+                    fast_math,
+                )
+                if lane == 0:
+                    fx.memref_store(reduced_dweight, shared_partial, wave)
+            if const_expr(compute_dbias):
+                reduced_dbias = shuffle_reduce_add(
+                    dbias_total,
+                    WARP_SIZE,
+                    WARP_SIZE,
+                    fast_math,
+                )
+                if lane == 0:
+                    fx.memref_store(
+                        reduced_dbias,
                         shared_partial,
-                        peer_tid,
+                        dbias_shared_offset + wave,
                     )
-                    fx.memref_store(total, shared_partial, tid)
-                if const_expr(compute_dbias):
-                    total = fx.memref_load(
-                        shared_partial,
-                        dbias_shared_offset + tid,
-                    ) + fx.memref_load(
-                        shared_partial,
-                        dbias_shared_offset + peer_tid,
-                    )
-                    fx.memref_store(total, shared_partial, dbias_shared_offset + tid)
             gpu.barrier()
 
-        # Keep the lane predicate separate from the dynamic bounds check.
-        if partial_lane == 0:  # noqa: SIM102
-            if parameter_index < parameter_numel:
+            if wave == 0:
+                in_range = lane < PARAMETER_REDUCE_THREADS // WARP_SIZE
+                safe_lane = in_range.select(lane, 0)
                 if const_expr(compute_dweight):
-                    total = fx.memref_load(shared_partial, column_lane)
-                    store_scalar(
-                        dweight_copy,
-                        dweight_elem_dtype,
-                        dweight_elem_dtype,
-                        dweight_div,
-                        output_index,
-                        total if weight_dtype_str == "f32" else total.to(dweight_elem_dtype),
+                    partial = in_range.select(
+                        fx.memref_load(shared_partial, safe_lane),
+                        fx.Float32(0.0),
                     )
+                    total = shuffle_reduce_add(partial, WARP_SIZE, WARP_SIZE, fast_math)
+                    if lane == 0:
+                        store_scalar(
+                            dweight_copy,
+                            dweight_elem_dtype,
+                            dweight_elem_dtype,
+                            dweight_div,
+                            output_index,
+                            total if weight_dtype_str == "f32" else total.to(dweight_elem_dtype),
+                        )
                 if const_expr(compute_dbias):
-                    total = fx.memref_load(
+                    partial = in_range.select(
+                        fx.memref_load(
+                            shared_partial,
+                            dbias_shared_offset + safe_lane,
+                        ),
+                        fx.Float32(0.0),
+                    )
+                    total = shuffle_reduce_add(partial, WARP_SIZE, WARP_SIZE, fast_math)
+                    if lane == 0:
+                        store_scalar(
+                            dbias_copy,
+                            dbias_elem_dtype,
+                            dbias_elem_dtype,
+                            dbias_div,
+                            output_index,
+                            total if dbias_dtype_str == "f32" else total.to(dbias_elem_dtype),
+                        )
+        elif const_expr(parameter_reduce_cols == 8 and parameter_reduce_row_lanes == 32):
+            # Eight adjacent columns make each workspace transaction coalesced.
+            # Within a wave, equal columns are eight lanes apart; reduce those
+            # eight row lanes with shuffles, then combine the four wave totals
+            # through one LDS rendezvous.
+            wave_lane = tid % WARP_SIZE
+            wave = tid // WARP_SIZE
+            fast_math = arith.FastMathFlags.fast
+
+            if const_expr(compute_dweight):
+                reduced_dweight = dweight_total
+                for offset in (32, 16, 8):
+                    reduced_dweight = reduced_dweight.addf(
+                        reduced_dweight.shuffle_xor(offset, WARP_SIZE),
+                        fastmath=fast_math,
+                    )
+                if wave_lane < parameter_reduce_cols:
+                    fx.memref_store(
+                        reduced_dweight,
                         shared_partial,
-                        dbias_shared_offset + column_lane,
+                        wave * parameter_reduce_cols + wave_lane,
                     )
-                    store_scalar(
-                        dbias_copy,
-                        dbias_elem_dtype,
-                        dbias_elem_dtype,
-                        dbias_div,
-                        output_index,
-                        total if dbias_dtype_str == "f32" else total.to(dbias_elem_dtype),
+            if const_expr(compute_dbias):
+                reduced_dbias = dbias_total
+                for offset in (32, 16, 8):
+                    reduced_dbias = reduced_dbias.addf(
+                        reduced_dbias.shuffle_xor(offset, WARP_SIZE),
+                        fastmath=fast_math,
                     )
+                if wave_lane < parameter_reduce_cols:
+                    fx.memref_store(
+                        reduced_dbias,
+                        shared_partial,
+                        dbias_shared_offset + wave * parameter_reduce_cols + wave_lane,
+                    )
+            gpu.barrier()
+
+            if wave == 0:
+                active = wave_lane < (PARAMETER_REDUCE_THREADS // WARP_SIZE) * 8
+                safe_lane = active.select(wave_lane, 0)
+                if const_expr(compute_dweight):
+                    total = active.select(
+                        fx.memref_load(shared_partial, safe_lane),
+                        fx.Float32(0.0),
+                    )
+                    for offset in (16, 8):
+                        total = total.addf(
+                            total.shuffle_xor(offset, WARP_SIZE),
+                            fastmath=fast_math,
+                        )
+                    if wave_lane < parameter_reduce_cols:
+                        store_scalar(
+                            dweight_copy,
+                            dweight_elem_dtype,
+                            dweight_elem_dtype,
+                            dweight_div,
+                            output_index,
+                            total if weight_dtype_str == "f32" else total.to(dweight_elem_dtype),
+                        )
+                if const_expr(compute_dbias):
+                    total = active.select(
+                        fx.memref_load(
+                            shared_partial,
+                            dbias_shared_offset + safe_lane,
+                        ),
+                        fx.Float32(0.0),
+                    )
+                    for offset in (16, 8):
+                        total = total.addf(
+                            total.shuffle_xor(offset, WARP_SIZE),
+                            fastmath=fast_math,
+                        )
+                    if wave_lane < parameter_reduce_cols:
+                        store_scalar(
+                            dbias_copy,
+                            dbias_elem_dtype,
+                            dbias_elem_dtype,
+                            dbias_div,
+                            output_index,
+                            total if dbias_dtype_str == "f32" else total.to(dbias_elem_dtype),
+                        )
+        else:
+            if const_expr(compute_dweight):
+                fx.memref_store(dweight_total, shared_partial, tid)
+            if const_expr(compute_dbias):
+                fx.memref_store(dbias_total, shared_partial, dbias_shared_offset + tid)
+            gpu.barrier()
+
+            # A balanced tree gives every specialized geometry one fixed
+            # summation order. No gradient atomic participates in the result.
+            for reduce_step in range_constexpr(parameter_reduce_steps):
+                stride = parameter_reduce_row_lanes // (2 << reduce_step)
+                if partial_lane < stride:
+                    peer_tid = (partial_lane + stride) * parameter_reduce_cols + column_lane
+                    if const_expr(compute_dweight):
+                        total = fx.memref_load(shared_partial, tid) + fx.memref_load(
+                            shared_partial,
+                            peer_tid,
+                        )
+                        fx.memref_store(total, shared_partial, tid)
+                    if const_expr(compute_dbias):
+                        total = fx.memref_load(
+                            shared_partial,
+                            dbias_shared_offset + tid,
+                        ) + fx.memref_load(
+                            shared_partial,
+                            dbias_shared_offset + peer_tid,
+                        )
+                        fx.memref_store(total, shared_partial, dbias_shared_offset + tid)
+                gpu.barrier()
+
+            if partial_lane == 0:  # noqa: SIM102 - traced lane predicate
+                if parameter_index < parameter_numel:
+                    if const_expr(compute_dweight):
+                        total = fx.memref_load(shared_partial, column_lane)
+                        store_scalar(
+                            dweight_copy,
+                            dweight_elem_dtype,
+                            dweight_elem_dtype,
+                            dweight_div,
+                            output_index,
+                            total if weight_dtype_str == "f32" else total.to(dweight_elem_dtype),
+                        )
+                    if const_expr(compute_dbias):
+                        total = fx.memref_load(
+                            shared_partial,
+                            dbias_shared_offset + column_lane,
+                        )
+                        store_scalar(
+                            dbias_copy,
+                            dbias_elem_dtype,
+                            dbias_elem_dtype,
+                            dbias_div,
+                            output_index,
+                            total if dbias_dtype_str == "f32" else total.to(dbias_elem_dtype),
+                        )
 
     reduce_grid = (parameter_numel + parameter_reduce_cols - 1) // parameter_reduce_cols
     reduces_parameters = compute_dweight or compute_dbias
