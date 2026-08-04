@@ -28,7 +28,13 @@ from quack.flydsl.rmsnorm_bwd_kernel import (
     rmsnorm_bwd_two_stage_config,
 )
 from quack.flydsl.rmsnorm_common import EPS, FLYDSL_BUILD_LOCK, run_compiled
-from quack.flydsl.rmsnorm_config import MAX_N, N_ALIGNMENT, next_power_of_two
+from quack.flydsl.rmsnorm_config import (
+    MAX_N,
+    MAX_TUNED_NUM_THREADS,
+    N_ALIGNMENT,
+    RmsNormRowConfig,
+    next_power_of_two,
+)
 from quack.flydsl.rmsnorm_kernel import build_rmsnorm_module
 
 __all__ = ["rmsnorm", "rmsnorm_autotuned"]
@@ -43,6 +49,8 @@ _SUPPORTED_ARCHES = frozenset({"gfx950"})
 _MAX_ROWS = 2**31 - 1
 _FWD_CACHE: dict[tuple, object] = {}
 _BWD_CACHE: dict[tuple, object] = {}
+_FWD_AUTOTUNED_FAST_CACHE: dict[tuple, tuple] = {}
+_BWD_AUTOTUNED_FAST_CACHE: dict[tuple, tuple] = {}
 _BWD_CU_COUNT_CACHE: dict[torch.device, int] = {}
 _DEVICE_ARCH_CACHE: dict[int, str] = {}
 _AUTOTUNE_ARCH_CACHE: dict[tuple, str] = {}
@@ -245,6 +253,15 @@ def _current_raw_stream(device: torch.device) -> int:
     return torch.cuda.current_stream(device).cuda_stream
 
 
+def _env_flag_enabled(name: str) -> bool:
+    data = getattr(os.environ, "_data", None)
+    if data is not None:
+        value = data.get(os.fsencode(name), b"").strip().lower()
+        return value in {b"1", b"true", b"yes", b"on"}
+    value = os.environ.get(name, "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _build_cached(cache: dict, key: tuple, device: torch.device, build):
     """Build a launcher at most once, even if several threads race here.
 
@@ -328,6 +345,32 @@ def _launch_rmsnorm_fwd(
     bias_dtype_str = _dtype_to_str(bias.dtype)
     residual_dtype_str = _dtype_to_str(residual.dtype)
     residual_out_dtype_str = _dtype_to_str(residual_out.dtype)
+    measured_threads = (
+        1024
+        if (
+            m == 32768
+            and n == 32768
+            and dtype_str == output_dtype_str == "bf16"
+            and weight_dtype_str == "f32"
+            and has_weight
+            and not has_bias
+            and not has_residual
+            and not store_residual
+            and not per_head
+            and weight_offset == 0.0
+        )
+        else None
+    )
+    row_config = (
+        RmsNormRowConfig.with_num_threads(
+            n,
+            16,
+            measured_threads,
+            max_num_threads=MAX_TUNED_NUM_THREADS,
+        )
+        if measured_threads is not None
+        else None
+    )
 
     with torch.cuda.device(x.device):
         key = (
@@ -346,6 +389,7 @@ def _launch_rmsnorm_fwd(
             store_rstd,
             per_head,
             num_heads,
+            measured_threads,
         )
         launcher = _FWD_CACHE.get(key)
         if launcher is None:
@@ -369,6 +413,7 @@ def _launch_rmsnorm_fwd(
                     per_head=per_head,
                     num_heads=num_heads,
                     arch=arch,
+                    row_config=row_config,
                 ),
             )
         run_compiled(
@@ -408,9 +453,60 @@ def _launch_rmsnorm_fwd_autotuned(
 ) -> None:
     """Launch through the tuner's ABI/config/device-aware CompiledFunction cache."""
     m, n = x.shape[0], x.shape[-1]
-    arch = _validated_autotune_arch(x.device)
+    input_dtype_str = _dtype_to_str(x.dtype)
+    output_dtype_str = _dtype_to_str(out.dtype)
+    weight_dtype_str = _dtype_to_str(weight.dtype)
+    bias_dtype_str = _dtype_to_str(bias.dtype)
+    residual_dtype_str = _dtype_to_str(residual.dtype)
+    residual_out_dtype_str = _dtype_to_str(residual_out.dtype)
+    fast_key = (
+        _rmsnorm_fwd_tuner.fast_context_token(),
+        x.device.index,
+        m,
+        n,
+        input_dtype_str,
+        output_dtype_str,
+        weight_dtype_str,
+        bias_dtype_str,
+        residual_dtype_str,
+        residual_out_dtype_str,
+        has_weight,
+        has_bias,
+        has_residual,
+        store_residual,
+        store_rstd,
+        per_head,
+        num_heads,
+    )
+    forced = _env_flag_enabled("FLYDSL_AUTOTUNE")
+    compile_only = _env_flag_enabled("COMPILE_ONLY")
     with torch.cuda.device(x.device):
-        _rmsnorm_fwd_tuner(
+        if not forced and not compile_only:
+            fast_entry = _FWD_AUTOTUNED_FAST_CACHE.get(fast_key)
+            if fast_entry is not None:
+                _config, compiled, constexpr_suffix = fast_entry
+                compiled(
+                    *(
+                        (
+                            x,
+                            weight,
+                            bias,
+                            residual,
+                            out,
+                            residual_out,
+                            rstd,
+                            m,
+                            eps,
+                            weight_offset,
+                        )
+                        + constexpr_suffix
+                        + (_current_raw_stream(x.device),)
+                    )
+                )
+                return
+
+        arch = _validated_autotune_arch(x.device)
+        args = (
             x,
             weight,
             bias,
@@ -421,24 +517,33 @@ def _launch_rmsnorm_fwd_autotuned(
             m,
             eps,
             weight_offset,
-            n=n,
-            input_dtype_str=_dtype_to_str(x.dtype),
-            output_dtype_str=_dtype_to_str(out.dtype),
-            weight_dtype_str=_dtype_to_str(weight.dtype),
-            bias_dtype_str=_dtype_to_str(bias.dtype),
-            residual_dtype_str=_dtype_to_str(residual.dtype),
-            residual_out_dtype_str=_dtype_to_str(residual_out.dtype),
-            has_weight=has_weight,
-            has_bias=has_bias,
-            has_residual=has_residual,
-            store_residual=store_residual,
-            store_rstd=store_rstd,
-            per_head=per_head,
-            num_heads=num_heads,
-            arch=arch,
-            schema_version=RMSNORM_AUTOTUNE_SCHEMA_VERSION,
-            stream=_current_raw_stream(x.device),
         )
+        kwargs = {
+            "n": n,
+            "input_dtype_str": input_dtype_str,
+            "output_dtype_str": output_dtype_str,
+            "weight_dtype_str": weight_dtype_str,
+            "bias_dtype_str": bias_dtype_str,
+            "residual_dtype_str": residual_dtype_str,
+            "residual_out_dtype_str": residual_out_dtype_str,
+            "has_weight": has_weight,
+            "has_bias": has_bias,
+            "has_residual": has_residual,
+            "store_residual": store_residual,
+            "store_rstd": store_rstd,
+            "per_head": per_head,
+            "num_heads": num_heads,
+            "arch": arch,
+            "schema_version": RMSNORM_AUTOTUNE_SCHEMA_VERSION,
+            "stream": _current_raw_stream(x.device),
+        }
+        _rmsnorm_fwd_tuner(
+            *args,
+            **kwargs,
+        )
+        resolved = _rmsnorm_fwd_tuner.resolved_fast_entry(args, kwargs)
+        if resolved is not None:
+            _FWD_AUTOTUNED_FAST_CACHE[fast_key] = resolved
 
 
 @torch.library.custom_op(
@@ -1164,6 +1269,42 @@ def _rmsnorm_impl(
     residual_arg = (
         _packed_rows(residual.reshape(-1, *last_shape)) if residual is not None else x_flat
     )
+    needs_grad = torch.is_grad_enabled() and any(
+        tensor is not None and tensor.requires_grad for tensor in (x, weight, bias, residual)
+    )
+    if not torch.compiler.is_compiling() and not needs_grad:
+        store_residual = prenorm
+        out = torch.empty_like(x_flat, dtype=output_dtype)
+        residual_out = (
+            torch.empty_like(x_flat, dtype=residual_out_dtype)
+            if store_residual
+            else torch.empty(0, device=x.device, dtype=residual_out_dtype)
+        )
+        rstd = torch.empty(0, device=x.device, dtype=torch.float32)
+        launch = _launch_rmsnorm_fwd_autotuned if autotuned else _launch_rmsnorm_fwd
+        launch(
+            x_flat,
+            weight_arg,
+            bias_arg,
+            residual_arg,
+            out,
+            residual_out,
+            rstd,
+            eps,
+            weight_offset,
+            has_weight=weight is not None,
+            has_bias=bias is not None,
+            has_residual=residual is not None,
+            store_residual=store_residual,
+            store_rstd=False,
+            per_head=per_head,
+            num_heads=num_heads,
+        )
+        out = out.reshape(x.shape)
+        if prenorm:
+            return out, residual_out.reshape(x.shape)
+        return out
+
     result = _RMSNormFunction.apply(
         x_flat,
         weight_arg,

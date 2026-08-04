@@ -46,6 +46,20 @@ _L2_EVICTION_CHUNK_BYTES = 256 * 1024**2
 _ROCM_TRITON_CACHE_BYTES = 256 * 1024**2
 _CORRECTNESS_ROWS = 16
 _AUTOTUNE_BENCH_LOCK = threading.Lock()
+_FAST_CONTEXT_ENV_VARS = (
+    "FLYDSL_COMPILE_BACKEND",
+    "FLYDSL_COMPILE_LLVM_DIR",
+    "FLYDSL_COMPILE_OPT_LEVEL",
+    "FLYDSL_DEBUG_ENABLE_DEBUG_INFO",
+    "FLYDSL_EXTRA_SOURCE_DIRS",
+    "FLYDSL_GPU_ARCH",
+    "FLYDSL_RUNTIME_KIND",
+    "FLYDSL_AUTOTUNE_CONFIG_DIR",
+    "ARCH",
+    "HSA_OVERRIDE_GFX_VERSION",
+    "COMPILE_ONLY",
+)
+_FAST_CONTEXT_ENV_VARS_BYTES = tuple(os.fsencode(name) for name in _FAST_CONTEXT_ENV_VARS)
 
 
 def _row_candidates(n: int, dtype_width: int) -> list[int]:
@@ -61,6 +75,12 @@ def _row_candidates(n: int, dtype_width: int) -> list[int]:
         # 512 is above what the heuristic may pick: it wins only when the row
         # is wide and there are many of them, and only the tuner sees M.
         candidates.update((64, 128, 256, 512))
+        # At N=32768, 1024 lanes bring the per-thread fragment back to the
+        # existing 32-element register budget, removing the epilogue reload.
+        # Neighboring rows either already fit at 512 or still stream, so keep
+        # the full-workgroup candidate target-only until separately measured.
+        if n == 32768:
+            candidates.add(1024)
 
     legal = []
     for threads in sorted(candidates):
@@ -806,6 +826,8 @@ class RmsNormAutotuner(Autotuner):
         self._hot_cache = {}
         self._active_call = threading.local()
         self._toolchain_key = None
+        self._fast_context_snapshot = None
+        self._fast_context_generation = 0
 
     def __call__(self, *args, **kwargs):
         hot_key = self._hot_key(args, kwargs)
@@ -831,6 +853,31 @@ class RmsNormAutotuner(Autotuner):
             self._active_call.value = None
             self._active_call.hot_key = None
             self._active_call.rotation_plan = None
+
+    def fast_context_token(self):
+        """Cheap invalidation token for an adapter-level resolved-winner cache."""
+        data = getattr(os.environ, "_data", None)
+        if data is None:
+            environment = tuple(os.environ.get(name, "") for name in _FAST_CONTEXT_ENV_VARS)
+        else:
+            environment = tuple(data.get(name, b"") for name in _FAST_CONTEXT_ENV_VARS_BYTES)
+        persistent_hints = getattr(self.fn, "compile_hints", {})
+        snapshot = (
+            environment,
+            _typed_identity(persistent_hints) if persistent_hints else (),
+        )
+        if snapshot != self._fast_context_snapshot:
+            self._fast_context_snapshot = snapshot
+            self._fast_context_generation += 1
+        return self._fast_context_generation
+
+    def resolved_fast_entry(self, args, kwargs):
+        """Return the process-hot callable after a normal tuner call resolved it."""
+        hot_entry = self._hot_cache.get(self._hot_key(args, kwargs))
+        if hot_entry is None:
+            return None
+        config, compiled, constexpr_suffix = hot_entry
+        return config, compiled, constexpr_suffix
 
     @staticmethod
     def _process_context_key():

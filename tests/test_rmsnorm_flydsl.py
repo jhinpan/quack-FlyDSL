@@ -909,6 +909,8 @@ class _AtenOpRecorder(torch.utils._python_dispatch.TorchDispatchMode):
 def _clear_caches():
     rmsnorm_flydsl_impl._FWD_CACHE.clear()
     rmsnorm_flydsl_impl._BWD_CACHE.clear()
+    rmsnorm_flydsl_impl._FWD_AUTOTUNED_FAST_CACHE.clear()
+    rmsnorm_flydsl_impl._BWD_AUTOTUNED_FAST_CACHE.clear()
     rmsnorm_flydsl_impl._BWD_CU_COUNT_CACHE.clear()
     rmsnorm_flydsl_impl._DEVICE_ARCH_CACHE.clear()
     rmsnorm_flydsl_impl._AUTOTUNE_ARCH_CACHE.clear()
@@ -1017,6 +1019,17 @@ def test_eager_fast_path_bypasses_custom_op_dispatch():
     with _FlyDSLOpCounter() as counter:
         rmsnorm(x, weight).sum().backward()
     assert counter.count == 0
+
+
+def test_eager_no_grad_inputs_bypass_autograd_function(monkeypatch):
+    x = torch.randn((8, 136), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(136, device="cuda", dtype=torch.float32)
+
+    def forbid_apply(*args, **kwargs):
+        raise AssertionError("inference entered autograd.Function")
+
+    monkeypatch.setattr(rmsnorm_flydsl_impl._RMSNormFunction, "apply", forbid_apply)
+    _assert_close(rmsnorm(x, weight), _reference(x, weight, 1e-6))
 
 
 def test_fullgraph_forward_backward_cold_and_warm_cache():
@@ -1305,6 +1318,30 @@ def test_wide_autotune_candidates_all_use_the_reload_path():
         assert row.reload_from == "gmem"
 
 
+def test_n32768_autotune_alone_offers_a_single_read_1024_thread_config():
+    target = rmsnorm_search_configs(n=32768, input_dtype_str="bf16")
+    neighbors = {n: rmsnorm_search_configs(n=n, input_dtype_str="bf16") for n in (16384, 65536)}
+
+    assert {config.kwargs["threads_per_row"] for config in target} == {
+        64,
+        128,
+        256,
+        512,
+        1024,
+    }
+    assert all(
+        1024 not in {config.kwargs["threads_per_row"] for config in configs}
+        for configs in neighbors.values()
+    )
+    row = RmsNormRowConfig.with_num_threads(
+        32768,
+        16,
+        1024,
+        max_num_threads=MAX_TUNED_NUM_THREADS,
+    )
+    assert row.reload_from is None
+
+
 def _direct_bwd_autotune_call_args(m=64, n=512):
     source = torch.randn((m, n), device="cuda", dtype=torch.bfloat16)
     weight = torch.randn(n, device="cuda", dtype=torch.float32)
@@ -1525,6 +1562,27 @@ def test_autotuned_wide_forward_matches_reference(tmp_path, monkeypatch):
     _assert_close(rmsnorm_autotuned(x, weight), _reference(x, weight, 1e-6))
 
 
+def test_autotuned_n32768_1024_thread_forward_matches_reference(tmp_path, monkeypatch):
+    from flydsl.autotune import Config
+
+    _clear_caches()
+    tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
+    monkeypatch.setattr(tuner, "_cache_file", tmp_path / "winner.json")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CONFIG_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setattr(tuner, "configs", [Config(threads_per_row=1024)])
+
+    def bench_once(call, warmup, rep):
+        call()
+        return 1.0
+
+    monkeypatch.setattr(tuner, "_do_bench", bench_once)
+    x = torch.randn((4, 32768), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(32768, device="cuda", dtype=torch.float32)
+    _assert_close(rmsnorm_autotuned(x, weight), _reference(x, weight, 1e-6))
+    assert next(iter(tuner.cache.values())).kwargs["threads_per_row"] == 1024
+
+
 def test_default_and_autotuned_forward_use_independent_caches(tmp_path, monkeypatch):
     _clear_caches()
     tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
@@ -1544,8 +1602,8 @@ def test_default_and_autotuned_forward_use_independent_caches(tmp_path, monkeypa
 
 
 def test_a_warm_tuned_call_reuses_the_compiled_function(monkeypatch):
-    # A process-hot call still enters the RMSNorm tuner object, but it must skip
-    # config selection and launch its cached CompiledFunction directly.
+    # A process-hot call bypasses the tuner object and launches the resolved
+    # CompiledFunction from the adapter's flat winner cache.
     _clear_caches()
     tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
     entries = 0
@@ -1564,12 +1622,35 @@ def test_a_warm_tuned_call_reuses_the_compiled_function(monkeypatch):
 
     _assert_close(rmsnorm_autotuned(x, weight), expected)
     assert entries == 1, "the first call has to resolve a winner"
+    assert len(rmsnorm_flydsl_impl._FWD_AUTOTUNED_FAST_CACHE) == 1
+
+    tuner_type = type(tuner)
+    real_tuner_call = tuner_type.__call__
+
+    def forbid_tuner_reentry(self, *args, **kwargs):
+        if self is tuner:
+            raise AssertionError("a warm adapter hit re-entered the tuner")
+        return real_tuner_call(self, *args, **kwargs)
+
+    monkeypatch.setattr(tuner_type, "__call__", forbid_tuner_reentry)
 
     for _ in range(5):
         _assert_close(rmsnorm_autotuned(x, weight), expected)
     assert entries == 1, f"a warm call selected a config {entries - 1} more time(s)"
     assert len(tuner._hot_cache) == 1
     assert len(tuner._compiled_cache) == 1
+
+
+def test_resolved_winner_generation_tracks_environment_and_hints(monkeypatch):
+    tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
+    first = tuner.fast_context_token()
+    monkeypatch.setenv("FLYDSL_RUNTIME_KIND", "generation-test")
+    second = tuner.fast_context_token()
+    assert second != first
+
+    monkeypatch.setattr(tuner.fn, "compile_hints", {"waves_per_eu": 2})
+    third = tuner.fast_context_token()
+    assert third != second
 
 
 def test_autotuned_forward_searches_all_candidates_then_hits_cache(tmp_path, monkeypatch):

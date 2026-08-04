@@ -7,11 +7,13 @@ same harness and shape ladder pointed at the FlyDSL backend.
 
 The default perf-report sweep is for quick iteration. ``--controlled`` runs a
 single shape with steady-state warmup, alternating provider order, batched
-event timing, and an opening/closing bandwidth canary.
+event timing, and an opening/closing bandwidth canary. ``--controlled-all``
+applies that contract to the full shape ladder and writes a joinable CSV.
 """
 
 import argparse
 import gc
+import json
 import os
 import statistics
 import time
@@ -252,6 +254,54 @@ def _restore_autotune_env(previous) -> None:
         os.environ["FLYDSL_AUTOTUNE"] = previous
 
 
+def _write_joined_contract(save_path: str, operation: str) -> None:
+    """Join device/public intervals once both sweeps exist and apply the gate."""
+    import pandas as pd
+
+    profile_path = os.path.join(save_path, f"rmsnorm-flydsl-profile-{operation}.csv")
+    controlled_path = os.path.join(save_path, f"rmsnorm-flydsl-controlled-{operation}.csv")
+    if not (os.path.exists(profile_path) and os.path.exists(controlled_path)):
+        return
+    profile = pd.read_csv(profile_path)
+    controlled = pd.read_csv(controlled_path)
+    joined = controlled.merge(
+        profile,
+        on=["M", "N", "provider"],
+        how="inner",
+        validate="one_to_one",
+    )
+    joined["host_gap_us"] = (joined["public_median_us"] - joined["device_us"]).clip(lower=0)
+    torch_rows = (
+        joined[joined["provider"] == "torch_compile"].set_index(["M", "N"]).add_prefix("torch_")
+    )
+    contract_path = os.path.join(save_path, f"rmsnorm-flydsl-contract-{operation}.csv")
+    if torch_rows.empty:
+        joined.to_csv(contract_path, index=False)
+        return
+    for metric in (
+        "device_us",
+        "device_p10_us",
+        "public_median_us",
+        "public_p10_us",
+    ):
+        joined[f"torch_{metric}"] = [
+            torch_rows.loc[(M, N), f"torch_{metric}"] for M, N in zip(joined["M"], joined["N"])
+        ]
+    joined["device_speedup_vs_torch"] = joined["torch_device_us"] / joined["device_us"]
+    joined["public_speedup_vs_torch"] = (
+        joined["torch_public_median_us"] / joined["public_median_us"]
+    )
+    joined["device_interval_win"] = joined["device_p90_us"] < joined["torch_device_p10_us"]
+    joined["public_interval_win"] = joined["public_p90_us"] < joined["torch_public_p10_us"]
+    joined["device_gate_pass"] = (joined["device_speedup_vs_torch"] >= 1.02) & joined[
+        "device_interval_win"
+    ]
+    joined["public_gate_pass"] = (joined["public_speedup_vs_torch"] >= 1.02) & joined[
+        "public_interval_win"
+    ]
+    joined.to_csv(contract_path, index=False)
+
+
 def run_controlled(
     M: int,
     N: int,
@@ -384,31 +434,126 @@ def run_controlled(
         _restore_autotune_env(previous_autotune_env)
     return {
         "operation": op,
-        "providers": {name: summary["median"] for name, summary in summaries.items()},
+        "summaries": summaries,
+        "opening_bandwidth": opening,
+        "closing_bandwidth": closing,
         "contention_canary": canary,
+        "settled_calls": settled_calls,
     }
 
 
-def _profile_device_call(call, repeats: int) -> tuple[float, float]:
+def run_controlled_shapes(
+    shapes,
+    *,
+    backward: bool,
+    dtype_name: str,
+    weight_mode: str,
+    rounds: int,
+    calls_per_sample: int,
+    rotation_buffers: int,
+    settle_seconds: float,
+    probe_mib: int,
+    probe_samples: int,
+    providers: list[str],
+    save_path: str | None,
+):
+    """Apply the controlled contract to every shape and persist raw intervals."""
+    import pandas as pd
+
+    rows = []
+    for M, N in shapes:
+        result = run_controlled(
+            M,
+            N,
+            backward=backward,
+            dtype_name=dtype_name,
+            weight_mode=weight_mode,
+            rounds=rounds,
+            calls_per_sample=calls_per_sample,
+            rotation_buffers=rotation_buffers,
+            settle_seconds=settle_seconds,
+            probe_mib=probe_mib,
+            probe_samples=probe_samples,
+            providers=providers,
+        )
+        opening = result["opening_bandwidth"]
+        closing = result["closing_bandwidth"]
+        for provider, summary in result["summaries"].items():
+            rows.append(
+                {
+                    "operation": result["operation"],
+                    "M": M,
+                    "N": N,
+                    "provider": provider,
+                    "public_median_us": round(summary["median"], 3),
+                    "public_p10_us": round(summary["p10"], 3),
+                    "public_p90_us": round(summary["p90"], 3),
+                    "contention_canary": round(result["contention_canary"], 6),
+                    "opening_bandwidth_gbps": round(opening["gbps"], 3),
+                    "closing_bandwidth_gbps": round(closing["gbps"], 3),
+                    "opening_best_probe": opening["best_probe"],
+                    "closing_best_probe": closing["best_probe"],
+                    "timed_samples": rounds,
+                    "calls_per_sample": calls_per_sample,
+                    "rotation_buffers": rotation_buffers,
+                }
+            )
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    frame = pd.DataFrame(rows)
+    if save_path:
+        os.makedirs(save_path, exist_ok=True)
+        op = "bwd" if backward else "fwd"
+        frame.to_csv(
+            os.path.join(save_path, f"rmsnorm-flydsl-controlled-{op}.csv"),
+            index=False,
+        )
+        _write_joined_contract(save_path, op)
+    return frame
+
+
+def _profile_device_call(call, repeats: int, rounds: int) -> dict:
     from torch.profiler import ProfilerActivity, profile
 
     for _ in range(5):
         call()
     torch.cuda.synchronize()
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
-        for _ in range(repeats):
-            call()
-        torch.cuda.synchronize()
-    device_events = [
-        event
-        for event in prof.events()
-        if event.device_type == torch.autograd.DeviceType.CUDA
-        and not event.name.startswith("## Call CompiledFxGraph")
-    ]
-    return (
-        sum(event.device_time_total for event in device_events) / repeats,
-        len(device_events) / repeats,
-    )
+    device_samples = []
+    launch_samples = []
+    component_samples: dict[str, list[float]] = {}
+    for _ in range(rounds):
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+            for _ in range(repeats):
+                call()
+            torch.cuda.synchronize()
+        device_events = [
+            event
+            for event in prof.events()
+            if event.device_type == torch.autograd.DeviceType.CUDA
+            and not event.name.startswith("## Call CompiledFxGraph")
+        ]
+        device_samples.append(sum(event.device_time_total for event in device_events) / repeats)
+        launch_samples.append(len(device_events) / repeats)
+        components = {}
+        for event in device_events:
+            components[event.name] = components.get(event.name, 0.0) + (
+                event.device_time_total / repeats
+            )
+        for name, value in components.items():
+            component_samples.setdefault(name, []).append(value)
+
+    summary = _summarize_us(device_samples)
+    return {
+        "device_us": summary["median"],
+        "device_p10_us": summary["p10"],
+        "device_p90_us": summary["p90"],
+        "gpu_events_per_call": statistics.median(launch_samples),
+        "components": {
+            name: round(statistics.median(values), 3)
+            for name, values in sorted(component_samples.items())
+        },
+    }
 
 
 def run_profiled_shapes(
@@ -419,6 +564,7 @@ def run_profiled_shapes(
     weight_mode: str,
     providers: list[str],
     repeats: int,
+    rounds: int,
     save_path: str | None,
 ):
     """Profile raw GPU events after every provider is warm and tuning is complete."""
@@ -494,19 +640,34 @@ def run_profiled_shapes(
             actual = call()
             actual_tensors = actual if isinstance(actual, tuple) else (actual,)
             _gate("bwd" if backward else "fwd", dtype_name, actual_tensors, expected)
-            device_us, launches = _profile_device_call(call, repeats)
+            profile_summary = _profile_device_call(call, repeats, rounds)
             rows.append(
                 {
                     "M": M,
                     "N": N,
                     "provider": name,
-                    "device_us": round(device_us, 3),
-                    "gpu_events_per_call": round(launches, 2),
+                    "device_us": round(profile_summary["device_us"], 3),
+                    "device_p10_us": round(profile_summary["device_p10_us"], 3),
+                    "device_p90_us": round(profile_summary["device_p90_us"], 3),
+                    "gpu_events_per_call": round(
+                        profile_summary["gpu_events_per_call"],
+                        2,
+                    ),
+                    "components_json": json.dumps(
+                        profile_summary["components"],
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    "profile_rounds": rounds,
+                    "calls_per_round": repeats,
                 }
             )
             print(
                 f"PASS profile {name:14s} M={M:<5d} N={N:<6d} "
-                f"{device_us:.3f}us, {launches:.2f} GPU events/call",
+                f"{profile_summary['device_us']:.3f}us "
+                f"[{profile_summary['device_p10_us']:.3f},"
+                f" {profile_summary['device_p90_us']:.3f}], "
+                f"{profile_summary['gpu_events_per_call']:.2f} GPU events/call",
                 flush=True,
             )
         if "flydsl_tuned" in calls:
@@ -532,6 +693,7 @@ def run_profiled_shapes(
             os.path.join(save_path, f"rmsnorm-flydsl-profile-{op}.csv"),
             index=False,
         )
+        _write_joined_contract(save_path, op)
     return frame
 
 
@@ -679,11 +841,17 @@ def main():
         help="Run one steady-state, order-balanced comparison instead of perf_report",
     )
     parser.add_argument(
+        "--controlled-all",
+        action="store_true",
+        help="Run the controlled comparison for every benchmark shape",
+    )
+    parser.add_argument(
         "--profile",
         action="store_true",
         help="Use torch.profiler GPU timestamps after warmup and tuning",
     )
     parser.add_argument("--profile_repeats", type=int, default=10)
+    parser.add_argument("--profile_rounds", type=int, default=5)
     parser.add_argument("--rounds", type=int, default=12)
     parser.add_argument("--calls_per_sample", type=int, default=None)
     parser.add_argument("--rotation_buffers", type=int, default=2)
@@ -698,13 +866,16 @@ def main():
         parser.error("--features fused is forward only")
     if "flydsl_tuned" in args.providers and os.environ.get("FLYDSL_AUTOTUNE") != "1":
         parser.error("flydsl_tuned requires FLYDSL_AUTOTUNE=1")
-    if args.controlled and args.profile:
-        parser.error("--controlled and --profile are mutually exclusive")
-    if args.profile_repeats <= 0:
-        parser.error("--profile_repeats must be positive")
-    if args.controlled:
+    selected_modes = int(args.controlled) + int(args.controlled_all) + int(args.profile)
+    if selected_modes > 1:
+        parser.error("--controlled, --controlled-all and --profile are mutually exclusive")
+    if args.profile_repeats <= 0 or args.profile_rounds <= 0:
+        parser.error("--profile_repeats and --profile_rounds must be positive")
+    if args.controlled or args.controlled_all:
         if args.features != "plain":
-            parser.error("--controlled supports only --features plain")
+            parser.error("controlled modes support only --features plain")
+        if args.controlled_all and args.M is not None:
+            parser.error("--controlled-all uses the full shape ladder; omit --M/--N")
         positive = {
             "--rounds": args.rounds,
             "--rotation_buffers": args.rotation_buffers,
@@ -724,20 +895,26 @@ def main():
         if calls_per_sample <= 0:
             parser.error("--calls_per_sample must be positive")
         torch.manual_seed(0)
-        run_controlled(
-            M,
-            N,
-            backward=args.backward,
-            dtype_name=args.dtype,
-            weight_mode=args.weight_dtype,
-            rounds=args.rounds,
-            calls_per_sample=calls_per_sample,
-            rotation_buffers=args.rotation_buffers,
-            settle_seconds=args.settle_seconds,
-            probe_mib=args.probe_mib,
-            probe_samples=args.probe_samples,
-            providers=args.providers,
-        )
+        kwargs = {
+            "backward": args.backward,
+            "dtype_name": args.dtype,
+            "weight_mode": args.weight_dtype,
+            "rounds": args.rounds,
+            "calls_per_sample": calls_per_sample,
+            "rotation_buffers": args.rotation_buffers,
+            "settle_seconds": args.settle_seconds,
+            "probe_mib": args.probe_mib,
+            "probe_samples": args.probe_samples,
+            "providers": args.providers,
+        }
+        if args.controlled_all:
+            run_controlled_shapes(
+                MN_PAIRS,
+                save_path=args.save_path,
+                **kwargs,
+            )
+        else:
+            run_controlled(M, N, **kwargs)
         return
     x_vals = [(args.M, args.N)] if args.M is not None else None
 
@@ -752,6 +929,7 @@ def main():
             weight_mode=args.weight_dtype,
             providers=args.providers,
             repeats=args.profile_repeats,
+            rounds=args.profile_rounds,
             save_path=args.save_path,
         )
         return

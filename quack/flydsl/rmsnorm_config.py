@@ -25,11 +25,11 @@ WAVE_SIZE = 64
 MIN_NUM_THREADS = WAVE_SIZE
 MAX_NUM_THREADS = 256
 # The analytical heuristic stops at 256 because it only sees N, and the right
-# width above that depends on M: 512 is 1.06x at 32768x8192 and 0.21x at
-# 32768x256. M cannot enter the heuristic, since it is symbolic under
-# ``dynamic=True`` and the row config has to be resolvable without it. The
-# tuner does see M, so it is allowed the wider block.
-MAX_TUNED_NUM_THREADS = 512
+# width above that depends on M. M cannot enter the heuristic, since it is
+# symbolic under ``dynamic=True`` and the row config has to be resolvable
+# without it. The tuner does see M, so it may use the full gfx950 workgroup for
+# the target row where that also restores the single-read register path.
+MAX_TUNED_NUM_THREADS = 1024
 SUPPORTED_DTYPE_WIDTHS = (16, 32)
 # The register-cached forward is tuned around this live-fragment ceiling. Wider
 # rows deliberately trade a second global read for bounded VGPR use.

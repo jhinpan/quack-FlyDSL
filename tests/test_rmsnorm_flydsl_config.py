@@ -14,6 +14,7 @@ import pytest
 from quack.flydsl.rmsnorm_config import (
     ACCESS_BITS,
     MAX_NUM_THREADS,
+    MAX_TUNED_NUM_THREADS,
     MIN_NUM_THREADS,
     N_ALIGNMENT,
     REGISTER_CACHE_ELEMS,
@@ -182,6 +183,19 @@ def test_explicit_thread_configs_cover_the_row(N, dtype_width, threads):
     assert c.num_threads == threads
     assert c.num_tiles * c.num_threads * c.vecsize >= N
     assert c.elems_per_thread <= 32
+
+
+def test_tuned_n32768_config_uses_one_legal_full_workgroup():
+    c = RmsNormRowConfig.with_num_threads(
+        32768,
+        16,
+        1024,
+        max_num_threads=MAX_TUNED_NUM_THREADS,
+    )
+
+    assert MAX_TUNED_NUM_THREADS == 1024
+    assert (c.num_threads, c.num_tiles, c.elems_per_thread) == (1024, 4, 32)
+    assert c.reload_from is None
 
 
 @pytest.mark.parametrize("threads", [0, 3, 512])
