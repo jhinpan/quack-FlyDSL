@@ -38,15 +38,13 @@ from .rmsnorm_common import (
     to_store_dtype,
     vector_access_plan,
 )
-from .rmsnorm_config import RmsNormRowConfig
+from .rmsnorm_config import RmsNormRowConfig, next_power_of_two
 
-# How the parameter reduce covers a workspace of num_programs x n. Its grid can
-# only widen with the parameter, so a block takes a column group and splits the
-# partial rows across lanes: opening on the parameter alone leaves a 256-element
-# weight on a single block whatever the row count.
-PARAMETER_REDUCE_COLS = 64
-PARAMETER_REDUCE_ROW_LANES = 4
-PARAMETER_REDUCE_THREADS = PARAMETER_REDUCE_COLS * PARAMETER_REDUCE_ROW_LANES
+# The reduce keeps one 256-thread block per column group. Opening a short
+# parameter down to one column per block gives gfx950 roughly one block per CU;
+# wider parameters grow the column group instead of oversubscribing forever.
+PARAMETER_REDUCE_THREADS = 256
+PARAMETER_REDUCE_TARGET_BLOCKS = 256
 
 # The staged backward accepts a wider block than the forward: it is persistent,
 # so a block also has to keep the machine busy across rows, not just cover one.
@@ -59,6 +57,28 @@ def rmsnorm_bwd_two_stage_config(n: int, dtype_str: str) -> RmsNormRowConfig:
         n,
         dtype_to_elem_bits(dtype_str),
         TWO_STAGE_MAX_NUM_THREADS,
+    )
+
+
+def rmsnorm_bwd_parameter_reduce_cols(
+    parameter_numel: int,
+    num_programs: int,
+    target_blocks: int = PARAMETER_REDUCE_TARGET_BLOCKS,
+) -> int:
+    """Choose a power-of-two column group for an occupancy-sized reduce grid."""
+    if parameter_numel <= 0:
+        raise ValueError(f"parameter_numel must be positive, got {parameter_numel}")
+    if num_programs <= 0:
+        raise ValueError(f"num_programs must be positive, got {num_programs}")
+    if target_blocks <= 0:
+        raise ValueError(f"target_blocks must be positive, got {target_blocks}")
+
+    columns_for_grid = next_power_of_two((parameter_numel + target_blocks - 1) // target_blocks)
+    active_row_lanes = min(PARAMETER_REDUCE_THREADS, next_power_of_two(num_programs))
+    columns_for_partials = PARAMETER_REDUCE_THREADS // active_row_lanes
+    return min(
+        PARAMETER_REDUCE_THREADS,
+        max(columns_for_grid, columns_for_partials),
     )
 
 
@@ -86,6 +106,7 @@ def build_rmsnorm_bwd_two_stage_module(
     num_heads: int,
     arch: str | None = None,
     row_config: RmsNormRowConfig | None = None,
+    parameter_reduce_cols: int | None = None,
 ):
     """Build the deterministic persistent backward plus its parameter reduce."""
     if num_programs <= 0:
@@ -111,6 +132,22 @@ def build_rmsnorm_bwd_two_stage_module(
     red_slots = max(1, (block_threads + WARP_SIZE - 1) // WARP_SIZE)
     shared_storage = make_reduction_storage(red_slots)
     parameter_numel = num_heads * n
+    if parameter_reduce_cols is None:
+        parameter_reduce_cols = rmsnorm_bwd_parameter_reduce_cols(
+            parameter_numel,
+            num_programs,
+        )
+    if (
+        parameter_reduce_cols <= 0
+        or parameter_reduce_cols > PARAMETER_REDUCE_THREADS
+        or parameter_reduce_cols & (parameter_reduce_cols - 1)
+    ):
+        raise ValueError(
+            "parameter_reduce_cols must be a power of two between 1 and "
+            f"{PARAMETER_REDUCE_THREADS}, got {parameter_reduce_cols}"
+        )
+    parameter_reduce_row_lanes = PARAMETER_REDUCE_THREADS // parameter_reduce_cols
+    parameter_reduce_steps = parameter_reduce_row_lanes.bit_length() - 1
     dweight_workspace_row_offset = 0
     dbias_workspace_row_offset = num_programs * num_heads if compute_dweight else 0
     # The reduce writes each gradient in the parameter's own dtype. dweight
@@ -896,9 +933,9 @@ def build_rmsnorm_bwd_two_stage_module(
     ):
         block = fx.block_idx.x
         tid = fx.thread_idx.x
-        column_lane = tid % PARAMETER_REDUCE_COLS
-        partial_lane = tid // PARAMETER_REDUCE_COLS
-        parameter_index = block * PARAMETER_REDUCE_COLS + column_lane
+        column_lane = tid % parameter_reduce_cols
+        partial_lane = tid // parameter_reduce_cols
+        parameter_index = block * parameter_reduce_cols + column_lane
         valid = parameter_index < parameter_numel
         safe_index = valid.select(parameter_index, 0)
         parameter_head = safe_index // n if per_head else fx.Int32(0)
@@ -949,7 +986,7 @@ def build_rmsnorm_bwd_two_stage_module(
         # A device loop, not range_constexpr: num_programs tracks the row count,
         # so unrolling it made codegen linear in the batch size -- 32s to build
         # at 1536 programs, against a flat 0.13s once it stayed a loop.
-        for partial_base in range(0, num_programs, PARAMETER_REDUCE_ROW_LANES):
+        for partial_base in range(0, num_programs, parameter_reduce_row_lanes):
             partial_row = partial_base + partial_lane
             partial_valid = partial_row < num_programs
             safe_row = partial_valid.select(partial_row, 0)
@@ -977,16 +1014,35 @@ def build_rmsnorm_bwd_two_stage_module(
             fx.memref_store(dbias_total, shared_partial, dbias_shared_offset + tid)
         gpu.barrier()
 
+        # A balanced tree gives every specialized geometry one fixed summation
+        # order. The barrier between levels also prevents reassociation across
+        # the tree; no gradient atomic participates in the result.
+        for reduce_step in range_constexpr(parameter_reduce_steps):
+            stride = parameter_reduce_row_lanes // (2 << reduce_step)
+            if partial_lane < stride:
+                peer_tid = (partial_lane + stride) * parameter_reduce_cols + column_lane
+                if const_expr(compute_dweight):
+                    total = fx.memref_load(shared_partial, tid) + fx.memref_load(
+                        shared_partial,
+                        peer_tid,
+                    )
+                    fx.memref_store(total, shared_partial, tid)
+                if const_expr(compute_dbias):
+                    total = fx.memref_load(
+                        shared_partial,
+                        dbias_shared_offset + tid,
+                    ) + fx.memref_load(
+                        shared_partial,
+                        dbias_shared_offset + peer_tid,
+                    )
+                    fx.memref_store(total, shared_partial, dbias_shared_offset + tid)
+            gpu.barrier()
+
         # Keep the lane predicate separate from the dynamic bounds check.
         if partial_lane == 0:  # noqa: SIM102
             if parameter_index < parameter_numel:
                 if const_expr(compute_dweight):
-                    total = fx.Float32(0.0)
-                    for lane in range_constexpr(PARAMETER_REDUCE_ROW_LANES):
-                        total = total + fx.memref_load(
-                            shared_partial,
-                            lane * PARAMETER_REDUCE_COLS + column_lane,
-                        )
+                    total = fx.memref_load(shared_partial, column_lane)
                     store_scalar(
                         dweight_copy,
                         dweight_elem_dtype,
@@ -996,12 +1052,10 @@ def build_rmsnorm_bwd_two_stage_module(
                         total if weight_dtype_str == "f32" else total.to(dweight_elem_dtype),
                     )
                 if const_expr(compute_dbias):
-                    total = fx.Float32(0.0)
-                    for lane in range_constexpr(PARAMETER_REDUCE_ROW_LANES):
-                        total = total + fx.memref_load(
-                            shared_partial,
-                            dbias_shared_offset + lane * PARAMETER_REDUCE_COLS + column_lane,
-                        )
+                    total = fx.memref_load(
+                        shared_partial,
+                        dbias_shared_offset + column_lane,
+                    )
                     store_scalar(
                         dbias_copy,
                         dbias_elem_dtype,
@@ -1011,7 +1065,7 @@ def build_rmsnorm_bwd_two_stage_module(
                         total if dbias_dtype_str == "f32" else total.to(dbias_elem_dtype),
                     )
 
-    reduce_grid = (parameter_numel + PARAMETER_REDUCE_COLS - 1) // PARAMETER_REDUCE_COLS
+    reduce_grid = (parameter_numel + parameter_reduce_cols - 1) // parameter_reduce_cols
     reduces_parameters = compute_dweight or compute_dbias
 
     @flyc.jit
@@ -1136,6 +1190,7 @@ def rmsnorm_bwd_direct(
     schema_version: fx.Constexpr[int],
     threads_per_row: fx.Constexpr[int],
     num_programs: fx.Constexpr[int],
+    parameter_reduce_cols: fx.Constexpr[int],
     stream: fx.Stream = fx.Stream(None),  # noqa: B008 - required by FlyDSL's traced ABI
 ):
     """Specialize the staged backward through autotunable row and grid geometry."""
@@ -1168,6 +1223,7 @@ def rmsnorm_bwd_direct(
         num_heads=num_heads,
         arch=arch,
         row_config=row_config,
+        parameter_reduce_cols=parameter_reduce_cols,
     )
     launch(
         source_tensor,

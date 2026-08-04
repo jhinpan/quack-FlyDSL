@@ -24,6 +24,10 @@ from quack.flydsl.rmsnorm_bwd_autotune import (
     rmsnorm_bwd_default_config,
     rmsnorm_bwd_search_configs,
 )
+from quack.flydsl.rmsnorm_bwd_kernel import (
+    PARAMETER_REDUCE_THREADS,
+    rmsnorm_bwd_parameter_reduce_cols,
+)
 from quack.flydsl.rmsnorm_config import (
     MAX_TUNED_NUM_THREADS,
     RmsNormRowConfig,
@@ -1395,18 +1399,60 @@ def _direct_bwd_autotune_call_args(m=64, n=512):
     return args, kwargs
 
 
-@pytest.mark.parametrize("n", [256, 512])
+@pytest.mark.parametrize("n", [256, 512, 1024])
 def test_backward_autotune_candidates_cover_row_and_grid_axes(n):
-    args, kwargs = _direct_bwd_autotune_call_args(m=512, n=n)
+    args, kwargs = _direct_bwd_autotune_call_args(m=2048, n=n)
     configs = rmsnorm_bwd_search_configs(*args, **kwargs)
     default = rmsnorm_bwd_default_config(*args, **kwargs)
     identities = {
-        (config.kwargs["threads_per_row"], config.kwargs["num_programs"]) for config in configs
+        (
+            config.kwargs["threads_per_row"],
+            config.kwargs["num_programs"],
+            config.kwargs["parameter_reduce_cols"],
+        )
+        for config in configs
     }
+    default_identity = (
+        default.kwargs["threads_per_row"],
+        default.kwargs["num_programs"],
+        default.kwargs["parameter_reduce_cols"],
+    )
 
-    assert (default.kwargs["threads_per_row"], default.kwargs["num_programs"]) in identities
-    assert all(threads >= 64 and threads & (threads - 1) == 0 for threads, _ in identities)
-    assert len({programs for _, programs in identities}) >= 2
+    assert default_identity in identities
+    assert all(threads >= 64 and threads & (threads - 1) == 0 for threads, _, _ in identities)
+    assert all(
+        1 <= cols <= PARAMETER_REDUCE_THREADS and cols & (cols - 1) == 0
+        for _, _, cols in identities
+    )
+    assert min(programs for _, programs, _ in identities) < 1536
+    assert len({programs for _, programs, _ in identities}) >= 3
+    assert len({cols for _, _, cols in identities}) >= 2
+
+
+@pytest.mark.parametrize(
+    ("parameter_numel", "expected_cols"),
+    [(256, 1), (512, 2), (1024, 4), (8192, 32), (32768, 128)],
+)
+def test_parameter_reduce_geometry_targets_one_grid_wave(parameter_numel, expected_cols):
+    cols = rmsnorm_bwd_parameter_reduce_cols(
+        parameter_numel,
+        num_programs=1536,
+        target_blocks=256,
+    )
+
+    assert cols == expected_cols
+    assert (parameter_numel + cols - 1) // cols == 256
+
+
+def test_parameter_reduce_geometry_does_not_outgrow_tiny_partial_counts():
+    assert (
+        rmsnorm_bwd_parameter_reduce_cols(
+            parameter_numel=256,
+            num_programs=1,
+            target_blocks=256,
+        )
+        == PARAMETER_REDUCE_THREADS
+    )
 
 
 def test_autotuned_backward_default_matches_reference_without_using_plain_cache():
@@ -1448,8 +1494,8 @@ def test_autotuned_backward_searches_once_then_reuses_pinned_winner(tmp_path, mo
         tuner,
         "configs",
         [
-            Config(threads_per_row=64, num_programs=32),
-            Config(threads_per_row=64, num_programs=64),
+            Config(threads_per_row=64, num_programs=32, parameter_reduce_cols=8),
+            Config(threads_per_row=64, num_programs=64, parameter_reduce_cols=4),
         ],
     )
     completed = 0

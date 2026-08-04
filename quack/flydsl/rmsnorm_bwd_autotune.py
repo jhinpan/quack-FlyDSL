@@ -17,16 +17,20 @@ from .rmsnorm_autotune import (
     l2_cold_bench,
 )
 from .rmsnorm_bwd_kernel import (
+    PARAMETER_REDUCE_THREADS,
     TWO_STAGE_MAX_NUM_THREADS,
     rmsnorm_bwd_direct,
+    rmsnorm_bwd_parameter_reduce_cols,
     rmsnorm_bwd_two_stage_config,
 )
 from .rmsnorm_common import dtype_to_elem_bits
 from .rmsnorm_config import WAVE_SIZE, RmsNormRowConfig, next_power_of_two
 
-RMSNORM_BWD_AUTOTUNE_SCHEMA_VERSION = 1
+RMSNORM_BWD_AUTOTUNE_SCHEMA_VERSION = 2
 _MAX_WORKSPACE_BYTES = 4 * 1024**3
 _CORRECTNESS_ROWS = 16
+_SMALL_N_MAX = 1024
+_SMALL_N_PROGRAMS_PER_CU = (2, 4, 6, 8, 12)
 
 
 def _call_values(args, kwargs):
@@ -87,10 +91,55 @@ def _programs_for_threads(values, threads: int) -> int:
     num_cus = torch.cuda.get_device_properties(device).multi_processor_count
     programs = num_cus if m < 2048 else (3 * num_cus) // 2
     programs *= TWO_STAGE_MAX_NUM_THREADS // threads
+    if int(values["n"]) <= _SMALL_N_MAX:
+        programs = min(programs, _SMALL_N_PROGRAMS_PER_CU[-1] * num_cus)
     programs = min(next_power_of_two(m), programs)
     if values["per_head"]:
         programs = max(1, next_power_of_two(programs // int(values["num_heads"])))
     return programs
+
+
+def _program_candidates(values, threads: int) -> list[int]:
+    base = _programs_for_threads(values, threads)
+    if int(values["n"]) > _SMALL_N_MAX:
+        return sorted(
+            {
+                max(1, base // 2),
+                base,
+                min(next_power_of_two(int(values["m"])), base * 2),
+            }
+        )
+
+    device = values["source_tensor"].device
+    num_cus = torch.cuda.get_device_properties(device).multi_processor_count
+    row_bound = next_power_of_two(int(values["m"]))
+    candidates = {base}
+    for multiplier in _SMALL_N_PROGRAMS_PER_CU:
+        programs = min(row_bound, multiplier * num_cus)
+        if values["per_head"]:
+            programs = max(
+                1,
+                next_power_of_two(programs // int(values["num_heads"])),
+            )
+        candidates.add(programs)
+    return sorted(candidates)
+
+
+def _parameter_reduce_cols_candidates(values, num_programs: int) -> list[int]:
+    parameter_numel = int(values["num_heads"]) * int(values["n"])
+    device = values["source_tensor"].device
+    num_cus = torch.cuda.get_device_properties(device).multi_processor_count
+    heuristic = rmsnorm_bwd_parameter_reduce_cols(
+        parameter_numel,
+        num_programs,
+        target_blocks=num_cus,
+    )
+    candidates = {
+        max(1, heuristic // 2),
+        heuristic,
+        min(PARAMETER_REDUCE_THREADS, heuristic * 2),
+    }
+    return sorted(candidates)
 
 
 def _workspace_bytes(values, num_programs: int) -> int:
@@ -113,25 +162,24 @@ def rmsnorm_bwd_search_configs(*args, **kwargs) -> list[Config]:
     configs = []
     seen = set()
     for threads in _threads_candidates(n, dtype_width):
-        base = _programs_for_threads(values, threads)
-        program_candidates = {
-            max(1, base // 2),
-            base,
-            min(next_power_of_two(int(values["m"])), base * 2),
-        }
-        for num_programs in sorted(program_candidates):
-            identity = (threads, num_programs)
-            if identity in seen:
-                continue
+        for num_programs in _program_candidates(values, threads):
             if _workspace_bytes(values, num_programs) > budget:
                 continue
-            seen.add(identity)
-            configs.append(
-                Config(
-                    threads_per_row=threads,
-                    num_programs=num_programs,
+            for parameter_reduce_cols in _parameter_reduce_cols_candidates(
+                values,
+                num_programs,
+            ):
+                identity = (threads, num_programs, parameter_reduce_cols)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                configs.append(
+                    Config(
+                        threads_per_row=threads,
+                        num_programs=num_programs,
+                        parameter_reduce_cols=parameter_reduce_cols,
+                    )
                 )
-            )
     if not configs:
         raise RuntimeError("RMSNorm backward autotuning found no workspace-legal configs")
     return configs
@@ -143,9 +191,17 @@ def rmsnorm_bwd_default_config(*args, **kwargs) -> Config:
         int(values["n"]),
         values["source_dtype_str"],
     )
+    num_programs = _programs_for_threads(values, row.num_threads)
+    device = values["source_tensor"].device
+    num_cus = torch.cuda.get_device_properties(device).multi_processor_count
     return Config(
         threads_per_row=row.num_threads,
-        num_programs=_programs_for_threads(values, row.num_threads),
+        num_programs=num_programs,
+        parameter_reduce_cols=rmsnorm_bwd_parameter_reduce_cols(
+            int(values["num_heads"]) * int(values["n"]),
+            num_programs,
+            target_blocks=num_cus,
+        ),
     )
 
 
