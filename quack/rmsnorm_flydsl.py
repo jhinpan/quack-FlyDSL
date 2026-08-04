@@ -46,7 +46,12 @@ _SUPPORTED_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 _SUPPORTED_ARCHES = frozenset({"gfx950"})
 # Measured on MI355X for the large-batch, plain BF16/FP32 inference cells.
 # Values are (threads per row, persistent programs per CU).
-_FWD_PERSISTENT_CONFIGS = {4096: (512, 56), 8192: (512, 56)}
+_FWD_PERSISTENT_CONFIGS = {
+    512: (64, 56),
+    1024: (64, 56),
+    4096: (512, 56),
+    8192: (512, 56),
+}
 # Row counts cross the Int32 kernel ABI here; reject before FlyDSL's argument
 # packing raises a struct.error from inside the dispatch.
 _MAX_ROWS = 2**31 - 1
