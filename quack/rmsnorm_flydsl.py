@@ -689,27 +689,28 @@ def _launch_rmsnorm_bwd(
     dbias_dtype_str = _dtype_to_str(dbias.dtype)
 
     num_programs = _select_rmsnorm_bwd_programs(m, n, source_dtype_str, source.device)
-    measured_reduce_cols = (
-        8
-        if (
-            m == 32768
-            and n == 256
-            and source_dtype_str == dy_dtype_str == dx_dtype_str == "bf16"
-            and weight_dtype_str == "f32"
-            and has_weight
-            and not has_bias
-            and compute_dweight
-            and not compute_dbias
-            and compute_input_grad
-            and store_dx
-            and not store_dresidual
-            and not has_residual
-            and not has_dresidual_out
-            and not per_head
-            and weight_offset == 0.0
-        )
-        else None
+    measured_n256 = (
+        m == 32768
+        and n == 256
+        and source_dtype_str == dy_dtype_str == dx_dtype_str == "bf16"
+        and weight_dtype_str == "f32"
+        and has_weight
+        and not has_bias
+        and compute_dweight
+        and not compute_dbias
+        and compute_input_grad
+        and store_dx
+        and not store_dresidual
+        and not has_residual
+        and not has_dresidual_out
+        and not per_head
+        and weight_offset == 0.0
     )
+    if measured_n256:
+        # Paired raw row access makes 2048 full waves faster than the previous
+        # 3072 half-useful waves and shrinks the staged workspace by one third.
+        num_programs = 2048
+    measured_reduce_cols = 8 if measured_n256 else None
     if per_head:
         # The staged grid is num_programs * num_heads, and the workspace has a
         # row per block, so the CU-derived count has to be divided by the head

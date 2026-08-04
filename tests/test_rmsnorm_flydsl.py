@@ -273,6 +273,9 @@ def test_public_contract_rejects_mixed_devices():
         # Fewer rows than the persistent grid would like, so most blocks
         # contribute a zeroed partial.
         ((17, 520), torch.float16, torch.float16),
+        # Two 32-lane row groups share one wave; the odd row count leaves the
+        # final group empty and exercises its zero partial.
+        ((65, 256), torch.bfloat16, torch.float32),
         ((5, 760), torch.float32, torch.float32),
         ((512, 4096), torch.bfloat16, torch.float32),
         ((512, 3584), torch.float16, torch.float16),
@@ -717,6 +720,107 @@ def test_per_head_affine_residual_matches_reference(use_compile):
     _assert_fused_residual_grad_close(residual.grad, residual_ref.grad)
 
 
+def test_paired_short_row_backward_handles_generic_features():
+    """The full generic feature set remains valid when two rows share a wave."""
+    torch.manual_seed(28)
+    shape = (17, 2, 256)
+    parameter_shape = (2, 256)
+    x = torch.randn(shape, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    weight = torch.randn(
+        parameter_shape,
+        device="cuda",
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    bias = torch.randn(
+        parameter_shape,
+        device="cuda",
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    residual = torch.randn_like(x, requires_grad=True)
+    x_ref = x.detach().clone().requires_grad_(True)
+    weight_ref = weight.detach().clone().requires_grad_(True)
+    bias_ref = bias.detach().clone().requires_grad_(True)
+    residual_ref = residual.detach().clone().requires_grad_(True)
+
+    actual, residual_out = rmsnorm(
+        x,
+        weight,
+        bias=bias,
+        residual=residual,
+        prenorm=True,
+        weight_offset=1.0,
+    )
+    expected, residual_out_ref = _full_reference(
+        x_ref,
+        weight_ref,
+        bias_ref,
+        residual_ref,
+        weight_offset=1.0,
+    )
+    dout = torch.randn_like(actual)
+    dresidual_out = torch.randn_like(residual_out)
+    actual_grads = torch.autograd.grad(
+        (actual, residual_out),
+        (x, residual, weight, bias),
+        grad_outputs=(dout, dresidual_out),
+    )
+    expected_grads = torch.autograd.grad(
+        (expected, residual_out_ref),
+        (x_ref, residual_ref, weight_ref, bias_ref),
+        grad_outputs=(dout, dresidual_out),
+    )
+
+    _assert_close(actual, expected)
+    _assert_close(residual_out, residual_out_ref)
+    for got, want in zip(actual_grads, expected_grads):
+        _assert_fused_residual_grad_close(got, want)
+
+
+def test_paired_raw_io_honors_row_pitch():
+    """The contiguous fast access still follows a padded row's real stride."""
+    torch.manual_seed(29)
+    m, n, pitch_pad = 65, 256, 3
+    full = torch.randn((m, n + pitch_pad), device="cuda", dtype=torch.bfloat16)
+    x = full[:, :n].detach().requires_grad_(True)
+    weight = torch.randn(n, device="cuda", dtype=torch.float32, requires_grad=True)
+    dout = torch.randn_like(x)
+    assert not x.is_contiguous() and x.stride() == (n + pitch_pad, 1)
+    assert rmsnorm_flydsl_impl._packed_rows(x).data_ptr() == x.data_ptr()
+
+    actual = rmsnorm(x, weight)
+    actual.backward(dout)
+    expected, dx_expected, dweight_expected = _reference_with_grads(
+        x,
+        weight,
+        dout,
+        1e-6,
+    )
+
+    _assert_close(actual, expected)
+    _assert_grad_close(x.grad, dx_expected)
+    _assert_grad_close(weight.grad, dweight_expected)
+
+
+def test_n256_target_pins_the_measured_two_stage_geometry():
+    """The public path uses the raw-row winner without paying tuner dispatch."""
+    _clear_caches()
+    torch.manual_seed(30)
+    x = torch.randn(
+        (32768, 256),
+        device="cuda",
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+    weight = torch.randn(256, device="cuda", dtype=torch.float32, requires_grad=True)
+    dout = torch.randn_like(x)
+
+    torch.autograd.grad(rmsnorm(x, weight), (x, weight), dout)
+
+    assert {key[-2:] for key in rmsnorm_flydsl_impl._BWD_CACHE} == {(2048, 8)}
+
+
 def test_compiled_rmsnorm_switches_from_plain_to_per_head():
     torch._dynamo.reset()
     compiled = torch.compile(rmsnorm, fullgraph=True)
@@ -862,7 +966,7 @@ def test_workspace_descriptors_are_row_scoped():
     assert source.count("row_buffer(") >= 4
 
 
-@pytest.mark.parametrize("n", [760, 32768])
+@pytest.mark.parametrize("n", [256, 760, 32768])
 def test_deterministic_backward_is_reproducible(n):
     torch.manual_seed(16)
     x = torch.randn((64, n), device="cuda", dtype=torch.float16)

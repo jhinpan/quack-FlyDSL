@@ -127,6 +127,35 @@ def build_rmsnorm_bwd_two_stage_module(
     num_tiles = config.num_tiles
     values_per_thread = num_tiles * vecsize
     wide_bwd = config.reload_from == "gmem"
+    # A 256-element 16-bit row has 32 vectors but the smallest legal gfx950
+    # workgroup is a full 64-lane wave. Give each half-wave an independent row
+    # stream, then combine their parameter partials once at the end. This keeps
+    # every lane useful without changing the two-kernel staged topology.
+    paired_partial_rows = (
+        not wide_bwd
+        and block_threads == WARP_SIZE
+        and num_tiles == 1
+        and num_vecs * 2 == block_threads
+    )
+    partial_rows_per_program = 2 if paired_partial_rows else 1
+    partial_threads_per_row = block_threads // partial_rows_per_program
+    raw_paired_io = (
+        paired_partial_rows
+        and source_dtype_str == "bf16"
+        and dy_dtype_str == "bf16"
+        and dx_dtype_str == "bf16"
+        and weight_dtype_str == "f32"
+        and has_weight
+        and not has_bias
+        and compute_dweight
+        and not compute_dbias
+        and compute_input_grad
+        and store_dx
+        and not store_dresidual
+        and not has_residual
+        and not has_dresidual_out
+        and not per_head
+    )
     wide_full_tiles = num_vecs // block_threads
     wide_tail_vecs = num_vecs % block_threads
     red_slots = max(1, (block_threads + WARP_SIZE - 1) // WARP_SIZE)
@@ -187,6 +216,8 @@ def build_rmsnorm_bwd_two_stage_module(
         tid = fx.thread_idx.x
         program = linear_program // fx.Int32(num_heads) if per_head else linear_program
         head = linear_program % fx.Int32(num_heads) if per_head else fx.Int32(0)
+        partial_lane = tid % fx.Int32(partial_threads_per_row)
+        partial_row_group = tid // fx.Int32(partial_threads_per_row)
 
         source_dtype = dtype_to_elem_type(source_dtype_str)
         dy_dtype = dtype_to_elem_type(dy_dtype_str)
@@ -203,6 +234,13 @@ def build_rmsnorm_bwd_two_stage_module(
             return shuffle_reduce_add(value, WARP_SIZE, WARP_SIZE, fast_math)
 
         def block_reduce_add(value):
+            if const_expr(paired_partial_rows):
+                return shuffle_reduce_add(
+                    value,
+                    partial_threads_per_row,
+                    fx.Int32(partial_threads_per_row),
+                    fast_math,
+                )
             if const_expr(red_slots == 1):
                 return wave_reduce_add(value)
             lane = tid % WARP_SIZE
@@ -231,6 +269,31 @@ def build_rmsnorm_bwd_two_stage_module(
                 else row_buffer(tensor, row_index, elem_bits, n)
             )
             return fx.logical_divide(buffer, fx.make_layout(per_access, 1))
+
+        def raw_load_row_vec(tensor, row_index, index, elem_dtype):
+            offset = fx.Int64(
+                fx.get_scalar(
+                    fx.crd2idx(
+                        (row_index, index * fx.Int32(vecsize)),
+                        tensor.layout,
+                    )
+                )
+            )
+            return fx.ptr_load(
+                fx.get_iter(tensor) + offset,
+                result_type=fx.Vector.make_type(vecsize, elem_dtype),
+            ).to(fx.Float32)
+
+        def raw_store_row_vec(tensor, row_index, index, value):
+            offset = fx.Int64(
+                fx.get_scalar(
+                    fx.crd2idx(
+                        (row_index, index * fx.Int32(vecsize)),
+                        tensor.layout,
+                    )
+                )
+            )
+            fx.ptr_store(value.ir_value(), fx.get_iter(tensor) + offset)
 
         # Bounded like the forward's. Left wide open the descriptor covers 4 GiB
         # from the base, so an index past that wraps to the head of the
@@ -272,7 +335,7 @@ def build_rmsnorm_bwd_two_stage_module(
             )
             weight_div = fx.logical_divide(weight_buffer, fx.make_layout(weight_per_access, 1))
             for tile_i in range_constexpr(num_tiles):
-                index = tid + tile_i * block_threads
+                index = partial_lane + tile_i * partial_threads_per_row
                 safe_index = (index < num_vecs).select(index, 0)
                 weight_local.append(
                     load_dtype_vec(
@@ -297,17 +360,18 @@ def build_rmsnorm_bwd_two_stage_module(
             fx.Float32,
         )
         for row, state in range(
-            fx.Int32(program),
+            fx.Int32(program) * fx.Int32(partial_rows_per_program) + partial_row_group,
             m,
-            fx.Int32(num_programs),
+            fx.Int32(num_programs * partial_rows_per_program),
             init=[initial_dweight, initial_dbias],
         ):
             accumulated_dweight = state[0]
             accumulated_dbias = state[1]
-            source_div = row_div(source_tensor, row, source_bits, source_per_access)
-            dy_div = row_div(dy_tensor, row, dy_bits, dy_per_access)
+            if const_expr(not raw_paired_io):
+                source_div = row_div(source_tensor, row, source_bits, source_per_access)
+                dy_div = row_div(dy_tensor, row, dy_bits, dy_per_access)
             if const_expr(compute_input_grad):
-                if const_expr(store_dx):
+                if const_expr(store_dx and not raw_paired_io):
                     dx_div = row_div(dx_tensor, row, dx_bits, dx_per_access)
                 if const_expr(has_dresidual_out):
                     dresidual_out_div = row_div(
@@ -332,18 +396,29 @@ def build_rmsnorm_bwd_two_stage_module(
             source_local = []
             dy_local = []
             for tile_i in range_constexpr(num_tiles):
-                index = tid + tile_i * block_threads
+                index = partial_lane + tile_i * partial_threads_per_row
                 valid = index < num_vecs
                 safe_index = valid.select(index, 0)
-                source = load_dtype_vec(
-                    source_copy,
-                    source_dtype,
-                    source_bits,
-                    source_div,
-                    safe_index,
-                    vecsize,
-                )
-                dy = load_dtype_vec(dy_copy, dy_dtype, dy_bits, dy_div, safe_index, vecsize)
+                if const_expr(raw_paired_io):
+                    source = raw_load_row_vec(source_tensor, row, safe_index, source_dtype)
+                    dy = raw_load_row_vec(dy_tensor, row, safe_index, dy_dtype)
+                else:
+                    source = load_dtype_vec(
+                        source_copy,
+                        source_dtype,
+                        source_bits,
+                        source_div,
+                        safe_index,
+                        vecsize,
+                    )
+                    dy = load_dtype_vec(
+                        dy_copy,
+                        dy_dtype,
+                        dy_bits,
+                        dy_div,
+                        safe_index,
+                        vecsize,
+                    )
                 source_local.append(source)
                 dy_local.append(dy)
                 if const_expr(compute_input_grad):
@@ -359,7 +434,7 @@ def build_rmsnorm_bwd_two_stage_module(
             row_dweight = []
             row_dbias = []
             for tile_i in range_constexpr(num_tiles):
-                index = tid + tile_i * block_threads
+                index = partial_lane + tile_i * partial_threads_per_row
                 valid = index < num_vecs
                 safe_index = valid.select(index, 0)
                 source = source_local[tile_i]
@@ -379,21 +454,25 @@ def build_rmsnorm_bwd_two_stage_module(
                         )
                     if index < num_vecs:
                         if const_expr(store_dx):
-                            store_dtype_vec(
-                                dx_copy,
+                            store_value = to_store_dtype(
+                                dx_dtype_str,
                                 dx_dtype,
-                                dx_bits,
-                                to_store_dtype(
-                                    dx_dtype_str,
-                                    dx_dtype,
-                                    use_hw_cvt_bf16,
-                                    total,
-                                    vecsize,
-                                ),
-                                dx_div,
-                                index,
+                                use_hw_cvt_bf16,
+                                total,
                                 vecsize,
                             )
+                            if const_expr(raw_paired_io):
+                                raw_store_row_vec(dx_tensor, row, index, store_value)
+                            else:
+                                store_dtype_vec(
+                                    dx_copy,
+                                    dx_dtype,
+                                    dx_bits,
+                                    store_value,
+                                    dx_div,
+                                    index,
+                                    vecsize,
+                                )
                         if const_expr(store_dresidual):
                             store_dtype_vec(
                                 dresidual_copy,
@@ -430,11 +509,47 @@ def build_rmsnorm_bwd_two_stage_module(
                     row_dbias,
                     fx.Float32,
                 )
-            gpu.barrier()
+            if const_expr(not paired_partial_rows):
+                gpu.barrier()
             results = yield [next_dweight, next_dbias]
 
         final_dweight = results[0]
         final_dbias = results[1]
+        if const_expr(paired_partial_rows):
+            if const_expr(compute_dweight):
+                combined_dweight = []
+                for lane in range_constexpr(values_per_thread):
+                    value = final_dweight[lane]
+                    combined_dweight.append(
+                        value.addf(
+                            value.shuffle_xor(
+                                partial_threads_per_row,
+                                WARP_SIZE,
+                            ),
+                            fastmath=fast_math,
+                        )
+                    )
+                final_dweight = fx.Vector.from_elements(
+                    combined_dweight,
+                    fx.Float32,
+                )
+            if const_expr(compute_dbias):
+                combined_dbias = []
+                for lane in range_constexpr(values_per_thread):
+                    value = final_dbias[lane]
+                    combined_dbias.append(
+                        value.addf(
+                            value.shuffle_xor(
+                                partial_threads_per_row,
+                                WARP_SIZE,
+                            ),
+                            fastmath=fast_math,
+                        )
+                    )
+                final_dbias = fx.Vector.from_elements(
+                    combined_dbias,
+                    fx.Float32,
+                )
         workspace_row = (
             fx.Int64(program) * fx.Int64(num_heads) + fx.Int64(head)
             if per_head
@@ -461,9 +576,10 @@ def build_rmsnorm_bwd_two_stage_module(
                 fx.make_layout(workspace_per_access, 1),
             )
         for tile_i in range_constexpr(num_tiles):
-            index = tid + tile_i * block_threads
+            index = partial_lane + tile_i * partial_threads_per_row
             lanes = list(range(tile_i * vecsize, (tile_i + 1) * vecsize))
-            if index < num_vecs:
+            store_partial = partial_row_group == 0 if paired_partial_rows else index < num_vecs
+            if store_partial:
                 if const_expr(compute_dweight):
                     store_dtype_vec(
                         workspace_copy,
@@ -1084,7 +1200,6 @@ def build_rmsnorm_bwd_two_stage_module(
             wave_lane = tid % WARP_SIZE
             wave = tid // WARP_SIZE
             fast_math = arith.FastMathFlags.fast
-
             if const_expr(compute_dweight):
                 reduced_dweight = dweight_total
                 for offset in (32, 16, 8):

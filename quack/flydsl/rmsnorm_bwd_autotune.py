@@ -26,7 +26,7 @@ from .rmsnorm_bwd_kernel import (
 from .rmsnorm_common import dtype_to_elem_bits
 from .rmsnorm_config import WAVE_SIZE, RmsNormRowConfig, next_power_of_two
 
-RMSNORM_BWD_AUTOTUNE_SCHEMA_VERSION = 2
+RMSNORM_BWD_AUTOTUNE_SCHEMA_VERSION = 3
 _MAX_WORKSPACE_BYTES = 4 * 1024**3
 _CORRECTNESS_ROWS = 16
 _SMALL_N_MAX = 1024
