@@ -1301,8 +1301,8 @@ def _direct_autotune_call_args(
     return args, kwargs
 
 
-def test_autotune_schema_three_and_candidates_retain_the_heuristic():
-    assert rmsnorm_autotune_impl.RMSNORM_AUTOTUNE_SCHEMA_VERSION == 3
+def test_autotune_schema_four_and_candidates_retain_the_heuristic():
+    assert rmsnorm_autotune_impl.RMSNORM_AUTOTUNE_SCHEMA_VERSION == 4
     for n, dtype_name in ((128, "bf16"), (512, "bf16"), (2048, "bf16"), (4096, "f32")):
         default = rmsnorm_autotune_impl.rmsnorm_default_config(
             n=n,
@@ -1317,6 +1317,25 @@ def test_autotune_schema_three_and_candidates_retain_the_heuristic():
             and config.waves_per_eu is None
             for config in candidates
         )
+
+
+def test_autotune_offers_persistent_candidate_for_supported_plain_shape():
+    args, kwargs = _direct_autotune_call_args(n=512)
+    args = args[:7] + (32768,) + args[8:]
+    kwargs.update(
+        input_dtype_str="bf16",
+        output_dtype_str="bf16",
+        weight_dtype_str="f32",
+    )
+
+    candidates = rmsnorm_autotune_impl.rmsnorm_search_configs(*args, **kwargs)
+    num_cus = torch.cuda.get_device_properties(args[0].device).multi_processor_count
+
+    assert any(
+        config.kwargs.get("persistent_programs") == min(32768, num_cus * 56)
+        and config.kwargs["threads_per_row"] == 64
+        for config in candidates
+    )
 
 
 def test_l2_rotation_clones_preserve_metadata_aliases_and_distinct_addresses():
@@ -2586,7 +2605,8 @@ def test_software_bf16_rounding_matches_the_hardware_convert():
     _assert_close(rounded["gfx942"], _reference(x, weight, 1e-6))
 
 
-def test_persistent_forward_carries_prefetched_rows_correctly():
+@pytest.mark.parametrize("weight_offset", [0.0, 1.0])
+def test_persistent_forward_carries_prefetched_rows_correctly(weight_offset):
     """The compile-time persistent mode must cover every grid-stride row."""
     from quack.flydsl.rmsnorm_common import run_compiled
     from quack.flydsl.rmsnorm_kernel import build_rmsnorm_module
@@ -2619,7 +2639,7 @@ def test_persistent_forward_carries_prefetched_rows_correctly():
             512,
             max_num_threads=MAX_TUNED_NUM_THREADS,
         ),
-        apply_weight_offset=False,
+        apply_weight_offset=weight_offset != 0.0,
         persistent_rows=True,
         persistent_programs=num_programs,
     )
@@ -2634,10 +2654,10 @@ def test_persistent_forward_carries_prefetched_rows_correctly():
         rstd,
         m,
         1e-6,
-        0.0,
+        weight_offset,
         torch.cuda.current_stream().cuda_stream,
     )
-    _assert_close(out, _reference(x, weight, 1e-6))
+    _assert_close(out, _reference(x, weight + weight_offset, 1e-6))
 
 
 def test_operands_larger_than_one_buffer_descriptor():

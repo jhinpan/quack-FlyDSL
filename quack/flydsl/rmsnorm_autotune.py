@@ -34,8 +34,14 @@ from .rmsnorm_config import (
 )
 from .rmsnorm_kernel import rmsnorm_direct
 
-RMSNORM_AUTOTUNE_SCHEMA_VERSION = 3
+RMSNORM_AUTOTUNE_SCHEMA_VERSION = 4
 _WAVES_PER_EU = (None, 1, 2, 4)
+_PERSISTENT_FWD_CONFIGS = {
+    512: (64, 56),
+    1024: (64, 56),
+    4096: (512, 56),
+    8192: (512, 56),
+}
 _L2_TARGET_RATIO = 3
 _L2_TIMED_CALLS = 200
 _L2_MAX_BUFFER_SETS = _L2_TIMED_CALLS
@@ -114,6 +120,30 @@ def rmsnorm_search_configs(*args, **kwargs) -> list[Config]:
                 continue
             seen.add(identity)
             configs.append(Config(threads_per_row=threads, waves_per_eu=waves_per_eu))
+    persistent = _PERSISTENT_FWD_CONFIGS.get(n)
+    if (
+        persistent is not None
+        and len(args) >= 8
+        and int(args[7]) == 32768
+        and kwargs.get("input_dtype_str") == "bf16"
+        and kwargs.get("output_dtype_str") == "bf16"
+        and kwargs.get("weight_dtype_str") == "f32"
+        and kwargs.get("has_weight", False)
+        and not kwargs.get("has_bias", False)
+        and not kwargs.get("has_residual", False)
+        and not kwargs.get("store_residual", False)
+        and not kwargs.get("store_rstd", False)
+        and not kwargs.get("per_head", False)
+        and kwargs.get("num_heads", 1) == 1
+    ):
+        threads, programs_per_cu = persistent
+        num_cus = torch.cuda.get_device_properties(args[0].device).multi_processor_count
+        configs.append(
+            Config(
+                threads_per_row=threads,
+                persistent_programs=min(int(args[7]), num_cus * programs_per_cu),
+            )
+        )
     return configs
 
 
@@ -1021,11 +1051,6 @@ class RmsNormAutotuner(Autotuner):
         )
 
     def _positional_arguments(self, config, args, kwargs):
-        if len(args) == 10:
-            constexpr = tuple(kwargs[name] for name in self.arg_names[10:-2])
-            stream = kwargs.get("stream", self._signature.parameters["stream"].default)
-            return args + constexpr + (config.kwargs["threads_per_row"], stream)
-
         values = dict(zip(self.arg_names, args))
         values.update(kwargs)
         values.update(config.all_kwargs())

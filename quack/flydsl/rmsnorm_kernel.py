@@ -112,7 +112,6 @@ def build_rmsnorm_module(
         and not store_residual
         and not store_rstd
         and not per_head
-        and not apply_weight_offset
     )
     non_temporal_input = plain_bf16_f32 and n in (4096, 8192)
     non_temporal_output = plain_bf16_f32 and n in (256, 512, 8192)
@@ -133,7 +132,6 @@ def build_rmsnorm_module(
             or store_rstd
             or per_head
             or num_heads != 1
-            or apply_weight_offset
             or reload_from_gmem
             or config.needs_predicate
         ):
@@ -306,16 +304,17 @@ def build_rmsnorm_module(
             initial_input = []
             for tile_i in range_constexpr(config.num_tiles):
                 index = lane + tile_i * threads_per_row
-                weight_local.append(
-                    load_dtype_vec(
-                        weight_copy,
-                        weight_dtype,
-                        weight_bits,
-                        weight_div,
-                        index,
-                        vecsize,
-                    )
+                persistent_weight = load_dtype_vec(
+                    weight_copy,
+                    weight_dtype,
+                    weight_bits,
+                    weight_div,
+                    index,
+                    vecsize,
                 )
+                if const_expr(apply_weight_offset):
+                    persistent_weight = persistent_weight + weight_offset
+                weight_local.append(persistent_weight)
                 initial_input.append(
                     load_vec(
                         input_copy,
@@ -847,6 +846,7 @@ def rmsnorm_direct(
     arch: fx.Constexpr[str],
     schema_version: fx.Constexpr[int],
     threads_per_row: fx.Constexpr[int],
+    persistent_programs: fx.Constexpr[int] = 0,
     stream: fx.Stream = fx.Stream(None),  # noqa: B008 - required by FlyDSL's traced ABI
 ):
     """Specialize the existing forward builder through autotunable Constexpr inputs."""
@@ -873,6 +873,8 @@ def rmsnorm_direct(
         num_heads=num_heads,
         arch=arch,
         row_config=row_config,
+        persistent_rows=persistent_programs > 0,
+        persistent_programs=persistent_programs,
     )
     launch(
         input_tensor,
