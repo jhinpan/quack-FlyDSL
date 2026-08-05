@@ -60,7 +60,6 @@ def build_rmsnorm_module(
     apply_weight_offset: bool = True,
     persistent_rows: bool = False,
     persistent_programs: int = 0,
-    raw_contiguous_rows: bool = False,
 ):
     """Build the RMSNorm forward, specialized by shape, dtypes and feature flags.
 
@@ -143,18 +142,6 @@ def build_rmsnorm_module(
                 "persistent-row mode currently requires aligned BF16 input/output, "
                 "FP32 weight, and plain inference feature flags"
             )
-    elif raw_contiguous_rows:
-        raise ValueError("raw contiguous rows require persistent-row mode")
-    if raw_contiguous_rows and (
-        n != 1024
-        or threads_per_row != WARP_SIZE
-        or rows_per_block != 1
-        or apply_weight_offset
-    ):
-        raise ValueError(
-            "raw contiguous rows require plain N=1024, one 64-lane wave, "
-            "and no weight offset"
-        )
     # Lanes the row reduction shuffles over, and how many of those groups it
     # has to stitch together through LDS. A group wider than a wavefront only
     # happens when the row has a block to itself.
@@ -270,33 +257,6 @@ def build_rmsnorm_module(
             )
             return fx.logical_divide(buffer, fx.make_layout(per_access, 1))
 
-        def raw_load_row_vec(tensor, row_index, index, elem_dtype):
-            """Load one vector from a host-validated contiguous row."""
-            offset = (
-                fx.Int64(row_index) * fx.Int64(n)
-                + fx.Int64(index) * fx.Int64(vecsize)
-            )
-            return fx.ptr_load(
-                fx.get_iter(tensor) + offset,
-                result_type=fx.Vector.make_type(vecsize, elem_dtype),
-            )
-
-        def raw_store_row_vec(tensor, row_index, index, value):
-            """Store one vector to a host-validated contiguous row."""
-            offset = (
-                fx.Int64(row_index) * fx.Int64(n)
-                + fx.Int64(index) * fx.Int64(vecsize)
-            )
-            fx.ptr_store(value.ir_value(), fx.get_iter(tensor) + offset)
-
-        def raw_load_parameter_vec(tensor, index, elem_dtype):
-            """Load one full activation-width parameter fragment."""
-            offset = fx.Int64(index) * fx.Int64(vecsize)
-            return fx.ptr_load(
-                fx.get_iter(tensor) + offset,
-                result_type=fx.Vector.make_type(vecsize, elem_dtype),
-            )
-
         input_div = row_div(input_tensor, input_bits, input_per_access)
         output_div = row_div(output_tensor, output_bits, output_per_access)
         input_copy = buffer_copy_atom(
@@ -347,54 +307,29 @@ def build_rmsnorm_module(
             initial_input = []
             for tile_i in range_constexpr(config.num_tiles):
                 index = lane + tile_i * threads_per_row
-                if const_expr(raw_contiguous_rows):
-                    persistent_weight = raw_load_parameter_vec(
-                        weight_tensor,
-                        index,
-                        weight_dtype,
-                    )
-                    input_value = raw_load_row_vec(
-                        input_tensor,
-                        program,
-                        index,
-                        input_dtype,
-                    )
-                else:
-                    persistent_weight = load_dtype_vec(
-                        weight_copy,
-                        weight_dtype,
-                        weight_bits,
-                        weight_div,
-                        index,
-                        vecsize,
-                    )
-                    if const_expr(apply_weight_offset):
-                        persistent_weight = persistent_weight + weight_offset
-                    input_value = load_vec(
+                persistent_weight = load_dtype_vec(
+                    weight_copy,
+                    weight_dtype,
+                    weight_bits,
+                    weight_div,
+                    index,
+                    vecsize,
+                )
+                if const_expr(apply_weight_offset):
+                    persistent_weight = persistent_weight + weight_offset
+                weight_local.append(persistent_weight)
+                initial_input.append(
+                    load_vec(
                         input_copy,
                         vecsize,
                         input_dtype,
                         input_div,
                         index,
                     )
-                weight_local.append(persistent_weight)
-                initial_input.append(input_value)
+                )
 
             def prefetch_input(next_row, next_valid, fallback):
-                if const_expr(raw_contiguous_rows):
-                    next_input = []
-                    for tile_i in range_constexpr(config.num_tiles):
-                        index = lane + tile_i * threads_per_row
-                        next_value = fallback[tile_i]
-                        if next_valid:
-                            next_value = raw_load_row_vec(
-                                input_tensor,
-                                next_row,
-                                index,
-                                input_dtype,
-                            )
-                        next_input.append(next_value)
-                elif const_expr(config.num_tiles == 1):
+                if const_expr(config.num_tiles == 1):
                     next_value = fallback[0]
                     if next_valid:
                         next_input_div = fx.logical_divide(
@@ -456,10 +391,10 @@ def build_rmsnorm_module(
 
                 next_row = fx.Int32(persistent_row) + fx.Int32(persistent_row_stride)
                 next_valid = next_row < num_programs
-                # Batched lane groups and the raw one-wave mode issue the next
-                # row before their DPP tree and rsqrt. Descriptor-backed
-                # single-row blocks retain the measured post-reduce placement.
-                if const_expr(rows_per_block > 1 or raw_contiguous_rows):
+                # Batched lane groups issue the next row before their DPP tree
+                # and rsqrt. Single-row blocks retain the measured post-reduce
+                # placement below, including the wider barrier-backed rows.
+                if const_expr(rows_per_block > 1):
                     next_input = prefetch_input(next_row, next_valid, prefetched_input)
 
                 sum_sq = row_reduce_add(
@@ -469,45 +404,35 @@ def build_rmsnorm_module(
                 )
                 rrms = fmath.rsqrt(sum_sq / float(n) + eps, fastmath=fast_math)
 
-                # Descriptor-backed single-row blocks issue the following row
-                # after the reduction barriers and before this row's epilogue.
-                # Carrying the fragment through loop SSA overlaps those loads
-                # with multiply/store work without forcing vmcnt to zero.
-                if const_expr(rows_per_block == 1 and not raw_contiguous_rows):
+                # Issue the following row after the reduction barriers and
+                # before this row's epilogue. Carrying the fragment through
+                # the loop SSA lets those loads overlap the multiply/store
+                # work without a barrier forcing their vmcnt to zero.
+                if const_expr(rows_per_block == 1):
                     next_input = prefetch_input(next_row, next_valid, prefetched_input)
 
-                if const_expr(not raw_contiguous_rows):
-                    persistent_output_div = fx.logical_divide(
-                        row_buffer(output_tensor, persistent_row, output_bits, n),
-                        fx.make_layout(output_per_access, 1),
-                    )
+                persistent_output_div = fx.logical_divide(
+                    row_buffer(output_tensor, persistent_row, output_bits, n),
+                    fx.make_layout(output_per_access, 1),
+                )
                 for tile_i in range_constexpr(config.num_tiles):
                     index = lane + tile_i * threads_per_row
                     result = prefetched_input[tile_i].to(fx.Float32) * rrms * weight_local[tile_i]
-                    output_value = to_store_dtype(
-                        output_dtype_str,
+                    store_dtype_vec(
+                        output_copy,
                         output_dtype,
-                        use_hw_cvt_bf16,
-                        result,
+                        output_bits,
+                        to_store_dtype(
+                            output_dtype_str,
+                            output_dtype,
+                            use_hw_cvt_bf16,
+                            result,
+                            vecsize,
+                        ),
+                        persistent_output_div,
+                        index,
                         vecsize,
                     )
-                    if const_expr(raw_contiguous_rows):
-                        raw_store_row_vec(
-                            output_tensor,
-                            persistent_row,
-                            index,
-                            output_value,
-                        )
-                    else:
-                        store_dtype_vec(
-                            output_copy,
-                            output_dtype,
-                            output_bits,
-                            output_value,
-                            persistent_output_div,
-                            index,
-                            vecsize,
-                        )
                 _persistent_results = yield next_input
             return
 
@@ -957,7 +882,6 @@ def rmsnorm_direct(
     schema_version: fx.Constexpr[int],
     threads_per_row: fx.Constexpr[int],
     persistent_programs: fx.Constexpr[int] = 0,
-    raw_contiguous_rows: fx.Constexpr[bool] = False,
     stream: fx.Stream = fx.Stream(None),  # noqa: B008 - required by FlyDSL's traced ABI
 ):
     """Specialize the existing forward builder through autotunable Constexpr inputs."""
@@ -984,10 +908,8 @@ def rmsnorm_direct(
         num_heads=num_heads,
         arch=arch,
         row_config=row_config,
-        apply_weight_offset=not raw_contiguous_rows,
         persistent_rows=persistent_programs > 0,
         persistent_programs=persistent_programs,
-        raw_contiguous_rows=raw_contiguous_rows and persistent_programs > 0,
     )
     launch(
         input_tensor,

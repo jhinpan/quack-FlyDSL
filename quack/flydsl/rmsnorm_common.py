@@ -202,12 +202,11 @@ def shuffle_reduce_add(value, lanes: int, shuffle_width, fast_math):
     result = value
     for shift_exp in range_constexpr(int(math.log2(lanes))):
         offset = lanes // (2 << shift_exp)
-        if lanes in (32, 64) and offset <= 8:
-            peer = _dpp_shuffle_xor(result, offset)
-        elif lanes in (32, 64) and offset == 16:
-            peer = _ds_swizzle_xor(result, offset)
-        else:
-            peer = result.shuffle_xor(offset, shuffle_width)
+        peer = (
+            (_dpp_shuffle_xor(result, offset) if offset <= 8 else _ds_swizzle_xor(result, offset))
+            if lanes == 32
+            else result.shuffle_xor(offset, shuffle_width)
+        )
         result = result.addf(peer, fastmath=fast_math)
     return result
 
