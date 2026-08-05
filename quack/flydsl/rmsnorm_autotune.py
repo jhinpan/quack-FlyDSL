@@ -35,7 +35,7 @@ from .rmsnorm_config import (
 )
 from .rmsnorm_kernel import rmsnorm_direct
 
-RMSNORM_AUTOTUNE_SCHEMA_VERSION = 4
+RMSNORM_AUTOTUNE_SCHEMA_VERSION = 5
 _WAVES_PER_EU = (None, 1, 2, 4)
 _PERSISTENT_FWD_CONFIGS = {
     256: (32, 9),
@@ -43,6 +43,9 @@ _PERSISTENT_FWD_CONFIGS = {
     1024: (64, 112),
     4096: (512, 56),
     8192: (512, 56),
+}
+_RAW_CONTIGUOUS_FWD_CONFIGS = {
+    1024: (64, 23),
 }
 _L2_TARGET_RATIO = 3
 _L2_TIMED_CALLS = 200
@@ -122,7 +125,10 @@ def rmsnorm_search_configs(*args, **kwargs) -> list[Config]:
                 continue
             seen.add(identity)
             configs.append(Config(threads_per_row=threads, waves_per_eu=waves_per_eu))
-    persistent = _PERSISTENT_FWD_CONFIGS.get(n)
+    raw_contiguous_rows = bool(kwargs.get("raw_contiguous_rows", False))
+    persistent = (
+        _RAW_CONTIGUOUS_FWD_CONFIGS if raw_contiguous_rows else _PERSISTENT_FWD_CONFIGS
+    ).get(n)
     if (
         persistent is not None
         and len(args) >= 8
@@ -146,6 +152,7 @@ def rmsnorm_search_configs(*args, **kwargs) -> list[Config]:
             Config(
                 threads_per_row=threads,
                 persistent_programs=min(available_blocks, num_cus * programs_per_cu),
+                raw_contiguous_rows=raw_contiguous_rows,
             )
         )
     return configs
@@ -958,10 +965,10 @@ class RmsNormAutotuner(Autotuner):
         else:
             return self._generic_hot_key(args, kwargs)
 
-        # The public adapter canonicalizes every operand to a torch Tensor with a
-        # layout-dynamic, unit inner stride. The explicit dtype/feature/shape axes
-        # above therefore determine the FlyDSL ABI; the full compiled cache still
-        # records exact tensor metadata and validates this alias on its first miss.
+        # The public adapter canonicalizes every operand to a torch Tensor with
+        # a layout-dynamic, unit inner stride. The explicit raw-mode bit
+        # partitions exact contiguous pointers from descriptor-backed rows; the
+        # full compiled cache still records exact metadata on its first miss.
         effective_hints = self.fn._effective_compile_hints()
         return (
             ("explicit", explicit),
@@ -1219,6 +1226,7 @@ _RMSNORM_AUTOTUNE_KEY = [
     "store_rstd",
     "per_head",
     "num_heads",
+    "raw_contiguous_rows",
     "arch",
     "schema_version",
 ]

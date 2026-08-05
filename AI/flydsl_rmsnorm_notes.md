@@ -621,9 +621,60 @@ sub-1% tuning regressions, while torch still wins the launch-bound `N=256/512`
 cells. Forward is one GPU event for every provider. Backward keeps the same
 two/three-event split as the analytical path.
 
+## N=1024 pins one weight fragment across grid-stride rows
+
+The `32768 x 1024` BF16/FP32 forward now has a compile-time mode inside the
+generic feature builder. It is selected only for the exact contiguous,
+16-byte-aligned inference ABI with no optional features or `weight_offset`.
+The wave uses raw pointers for activation, weight, and output vectors, keeps
+the 4 KiB FP32 weight fragment in registers, and software-prefetches the next
+grid-stride row before reducing and storing the current one. The selected grid
+is 23 one-wave blocks per CU, so a block processes five or six rows at the
+target M.
+
+This remains one builder. Padded rows, unaligned contiguous views, odd M,
+training/rstd, `weight_offset`, and every other feature combination use the
+descriptor path. The raw-mode bit and persistent grid are part of both
+launcher and autotune identities; a padded launch therefore cannot seed a raw
+callable or winner.
+
+The ISA explains the two choices. Inductor's XBLOCK=4 kernel uses 42 VGPRs,
+loads the 4 KiB weight once, and redistributes it through LDS to four rows. The
+selected one-wave FlyDSL mode uses 55 VGPRs with no scratch or LDS. Its wave64
+reduction now keeps only the 32-lane exchange and one 16-lane `ds_swizzle`;
+the 8/4/2/1 stages use the existing DPP implementation instead of four
+additional LDS waits. Two- and four-row register interleaving compiled to
+80/122 VGPRs and lost to the single-row loop-carried prefetch.
+
+Physical GPU 5 was idle for the final search. Blocks-per-CU 16 through 48,
+interleave depths 1/2/4, early/late prefetch, and four/eight rotating input and
+output addresses were measured. The strict device gate used 50
+provider-order-balanced samples (five groups of ten); times are microseconds:
+
+| addresses | FlyDSL median [p10, p90] | torch median [p10, p90] | FlyDSL / torch | BW canary |
+| --- | ---: | ---: | ---: | ---: |
+| 4 | 25.468 [25.383, 25.593] | 26.095 [25.683, 26.482] | 0.976x | 1.003 |
+| 8 | 24.983 [24.912, 25.135] | 26.395 [25.837, 27.029] | 0.947x | 0.997 |
+
+Both p90 intervals are below torch's p10 and both medians clear the
+`<= 0.98 * torch` gate. The public entry was then measured with the benchmark's
+normal output allocation, validation, alternating order, steady-state warmup,
+and 512 MiB opening/closing canary:
+
+| addresses | FlyDSL median [p10, p90] | torch median [p10, p90] | torch / FlyDSL | BW canary |
+| --- | ---: | ---: | ---: | ---: |
+| 4 | 25.450 [24.946, 26.061] | 31.650 [29.509, 32.895] | 1.244x | 0.996 |
+| 8 | 25.088 [24.628, 25.533] | 30.908 [28.922, 32.057] | 1.232x | 1.009 |
+
+The exact public inference cell bypasses generic argument normalization after
+checking its full type/shape/device/layout contract, but still launches the
+same cached generic-builder specialization. Targeted correctness covers the
+contiguous mode, an odd grid-stride tail, padded descriptor fallback,
+`weight_offset`, cache partitioning, and bitwise repeatability.
+
 ## Measuring this backend
 
-The suite figure for this revision is **810 passed, 3 skipped, 1 xfailed** when
+The suite figure for this revision is **843 passed, 3 skipped, 1 xfailed** when
 one idle GPU is visible. The three skips require multiple visible devices; the
 xfail is `test_simulated_cuda_flydsl_import_survives_a_broken_cutedsl_chain`,
 which pins a real limitation rather than a passing behaviour (see the import

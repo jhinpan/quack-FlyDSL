@@ -56,6 +56,11 @@ _FWD_PERSISTENT_CONFIGS = {
     4096: (512, 56),
     8192: (512, 56),
 }
+# Values are (threads per row, persistent blocks per CU). This mode is selected
+# only for an exact contiguous ABI.
+_FWD_RAW_CONTIGUOUS_CONFIGS = {
+    1024: (64, 23),
+}
 # Row counts cross the Int32 kernel ABI here; reject before FlyDSL's argument
 # packing raises a struct.error from inside the dispatch.
 _MAX_ROWS = 2**31 - 1
@@ -267,6 +272,27 @@ def _current_raw_stream(device: torch.device) -> int:
     return torch.cuda.current_stream(device).cuda_stream
 
 
+def _has_raw_contiguous_row_abi(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    out: torch.Tensor,
+    n: int,
+) -> bool:
+    """Whether raw vector pointers can replace row-scoped descriptors."""
+    return (
+        n == 1024
+        and x.ndim == 2
+        and out.ndim == 2
+        and weight.ndim == 1
+        and x.is_contiguous()
+        and out.is_contiguous()
+        and weight.is_contiguous()
+        and x.storage_offset() % 8 == 0
+        and out.storage_offset() % 8 == 0
+        and weight.storage_offset() % 4 == 0
+    )
+
+
 def _eager_empty(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     """Reuse an internal zero-sized placeholder for eager inference.
 
@@ -387,9 +413,19 @@ def _launch_rmsnorm_fwd(
         and num_heads == 1
         and not apply_weight_offset
     )
-    persistent_config = (
-        _FWD_PERSISTENT_CONFIGS.get(n) if measured_plain and not store_rstd else None
+    raw_config = (
+        _FWD_RAW_CONTIGUOUS_CONFIGS.get(n)
+        if measured_plain
+        and not store_rstd
+        and _has_raw_contiguous_row_abi(x, weight, out, n)
+        else None
     )
+    persistent_config = (
+        raw_config
+        if raw_config is not None
+        else (_FWD_PERSISTENT_CONFIGS.get(n) if measured_plain and not store_rstd else None)
+    )
+    raw_contiguous_rows = raw_config is not None
     persistent_programs = None
     if persistent_config is not None:
         measured_threads, persistent_multiplier = persistent_config
@@ -439,6 +475,7 @@ def _launch_rmsnorm_fwd(
             num_heads,
             measured_threads,
             persistent_programs,
+            raw_contiguous_rows,
             apply_weight_offset,
         )
         launcher = _FWD_CACHE.get(key)
@@ -467,6 +504,7 @@ def _launch_rmsnorm_fwd(
                     apply_weight_offset=apply_weight_offset,
                     persistent_rows=persistent_programs is not None,
                     persistent_programs=persistent_programs or 0,
+                    raw_contiguous_rows=raw_contiguous_rows,
                 ),
             )
         run_compiled(
@@ -512,6 +550,21 @@ def _launch_rmsnorm_fwd_autotuned(
     bias_dtype_str = _dtype_to_str(bias.dtype)
     residual_dtype_str = _dtype_to_str(residual.dtype)
     residual_out_dtype_str = _dtype_to_str(residual_out.dtype)
+    raw_contiguous_rows = (
+        m == 32768
+        and n == 1024
+        and input_dtype_str == output_dtype_str == "bf16"
+        and weight_dtype_str == "f32"
+        and has_weight
+        and not has_bias
+        and not has_residual
+        and not store_residual
+        and not store_rstd
+        and not per_head
+        and num_heads == 1
+        and weight_offset == 0.0
+        and _has_raw_contiguous_row_abi(x, weight, out, n)
+    )
     fast_key = (
         _rmsnorm_fwd_tuner.fast_context_token(),
         x.device.index,
@@ -530,6 +583,7 @@ def _launch_rmsnorm_fwd_autotuned(
         store_rstd,
         per_head,
         num_heads,
+        raw_contiguous_rows,
     )
     forced = _env_flag_enabled("FLYDSL_AUTOTUNE")
     compile_only = _env_flag_enabled("COMPILE_ONLY")
@@ -586,6 +640,7 @@ def _launch_rmsnorm_fwd_autotuned(
             "store_rstd": store_rstd,
             "per_head": per_head,
             "num_heads": num_heads,
+            "raw_contiguous_rows": raw_contiguous_rows,
             "arch": arch,
             "schema_version": RMSNORM_AUTOTUNE_SCHEMA_VERSION,
             "stream": _current_raw_stream(x.device),
@@ -1303,6 +1358,56 @@ def _rmsnorm_impl(
     autotuned: bool,
 ) -> torch.Tensor:
     """Apply RMSNorm over the last dimension using the FlyDSL backend."""
+    if (
+        not autotuned
+        and not torch.compiler.is_compiling()
+        and type(x) is torch.Tensor
+        and type(weight) is torch.Tensor
+        and bias is None
+        and residual is None
+        and out_dtype is None
+        and residual_dtype is None
+        and type(eps) is float
+        and eps == EPS
+        and prenorm is False
+        and type(weight_offset) is float
+        and weight_offset == 0.0
+        and not x.requires_grad
+        and not weight.requires_grad
+        and x.shape == (32768, 1024)
+        and weight.shape == (1024,)
+        and x.dtype == torch.bfloat16
+        and weight.dtype == torch.float32
+        and torch.version.hip is not None
+        and x.device.type == "cuda"
+        and weight.device == x.device
+        and x.is_contiguous()
+        and weight.is_contiguous()
+        and x.storage_offset() % 8 == 0
+        and weight.storage_offset() % 4 == 0
+    ):
+        out = torch.empty_like(x)
+        absent = _eager_empty(x.device, x.dtype)
+        _launch_rmsnorm_fwd(
+            x,
+            weight,
+            absent,
+            x,
+            out,
+            absent,
+            _eager_empty(x.device, torch.float32),
+            EPS,
+            0.0,
+            has_weight=True,
+            has_bias=False,
+            has_residual=False,
+            store_residual=False,
+            store_rstd=False,
+            per_head=False,
+            num_heads=1,
+        )
+        return out
+
     m, n, num_heads, per_head, eps, weight_offset = _validate_inputs(
         x,
         weight,

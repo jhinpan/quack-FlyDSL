@@ -835,7 +835,7 @@ def test_n256_target_pins_measured_forward_and_backward_geometries():
         torch.cuda.get_device_properties(x.device).multi_processor_count * 9,
     )
     persistent_geometries = {
-        key[-3:-1] for key in rmsnorm_flydsl_impl._FWD_CACHE if key[-2] is not None
+        key[-4:-2] for key in rmsnorm_flydsl_impl._FWD_CACHE if key[-3] is not None
     }
     assert persistent_geometries == {(32, expected_blocks)}
 
@@ -1345,12 +1345,13 @@ def _direct_autotune_call_args(
         "store_rstd": store_rstd,
         "per_head": False,
         "num_heads": 1,
+        "raw_contiguous_rows": False,
     }
     return args, kwargs
 
 
-def test_autotune_schema_four_and_candidates_retain_the_heuristic():
-    assert rmsnorm_autotune_impl.RMSNORM_AUTOTUNE_SCHEMA_VERSION == 4
+def test_autotune_schema_five_and_candidates_retain_the_heuristic():
+    assert rmsnorm_autotune_impl.RMSNORM_AUTOTUNE_SCHEMA_VERSION == 5
     for n, dtype_name in ((128, "bf16"), (512, "bf16"), (2048, "bf16"), (4096, "f32")):
         default = rmsnorm_autotune_impl.rmsnorm_default_config(
             n=n,
@@ -1394,6 +1395,32 @@ def test_autotune_offers_persistent_candidate_for_supported_plain_shape(
         and config.kwargs["threads_per_row"] == threads
         for config in candidates
     )
+
+
+def test_autotune_offers_raw_prefetch_candidate_only_for_contiguous_n1024():
+    args, kwargs = _direct_autotune_call_args(n=1024)
+    args = args[:7] + (32768,) + args[8:]
+    kwargs.update(
+        input_dtype_str="bf16",
+        output_dtype_str="bf16",
+        weight_dtype_str="f32",
+        raw_contiguous_rows=True,
+    )
+
+    candidates = rmsnorm_autotune_impl.rmsnorm_search_configs(*args, **kwargs)
+    num_cus = torch.cuda.get_device_properties(args[0].device).multi_processor_count
+    raw = [
+        config
+        for config in candidates
+        if config.kwargs.get("raw_contiguous_rows", False)
+    ]
+
+    assert len(raw) == 1
+    assert raw[0].kwargs == {
+        "threads_per_row": 64,
+        "persistent_programs": min(32768, num_cus * 23),
+        "raw_contiguous_rows": True,
+    }
 
 
 def test_l2_rotation_clones_preserve_metadata_aliases_and_distinct_addresses():
@@ -2742,6 +2769,102 @@ def test_persistent_forward_carries_prefetched_rows_correctly(
             rtol=0,
             atol=0,
         )
+
+
+def test_raw_contiguous_forward_covers_an_odd_grid_stride_tail():
+    """The loop-carried prefetch must not read past an odd final row."""
+    from quack.flydsl.rmsnorm_kernel import rmsnorm_direct
+
+    torch.manual_seed(32)
+    m, n, num_programs = 65, 1024, 17
+    x = torch.randn((m, n), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(n, device="cuda", dtype=torch.float32)
+    out = torch.empty_like(x)
+    absent = torch.empty(0, device="cuda", dtype=torch.bfloat16)
+    rstd = torch.empty(0, device="cuda", dtype=torch.float32)
+    rmsnorm_direct(
+        x,
+        weight,
+        absent,
+        x,
+        out,
+        absent,
+        rstd,
+        m,
+        1e-6,
+        0.0,
+        n=n,
+        input_dtype_str="bf16",
+        output_dtype_str="bf16",
+        weight_dtype_str="f32",
+        bias_dtype_str="bf16",
+        residual_dtype_str="bf16",
+        residual_out_dtype_str="bf16",
+        has_weight=True,
+        has_bias=False,
+        has_residual=False,
+        store_residual=False,
+        store_rstd=False,
+        per_head=False,
+        num_heads=1,
+        arch="gfx950",
+        schema_version=rmsnorm_autotune_impl.RMSNORM_AUTOTUNE_SCHEMA_VERSION,
+        threads_per_row=64,
+        persistent_programs=num_programs,
+        raw_contiguous_rows=True,
+        stream=torch.cuda.current_stream().cuda_stream,
+    )
+
+    _assert_close(out, _reference(x, weight, 1e-6))
+
+
+def test_n1024_raw_mode_is_deterministic_and_layout_partitioned():
+    """Padded rows and weight offsets must not reuse the raw-pointer launcher."""
+    _clear_caches()
+    torch.manual_seed(33)
+    m, n = 32768, 1024
+    x = torch.randn((m, n), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(n, device="cuda", dtype=torch.float32)
+    sample_rows = torch.tensor([0, 1, m // 2, m - 2, m - 1], device="cuda")
+
+    first = rmsnorm(x, weight)
+    for _ in range(3):
+        torch.testing.assert_close(rmsnorm(x, weight), first, rtol=0, atol=0)
+    _assert_close(
+        first.index_select(0, sample_rows),
+        _reference(x.index_select(0, sample_rows), weight, 1e-6),
+    )
+    raw_keys = [key for key in rmsnorm_flydsl_impl._FWD_CACHE if key[-2]]
+    assert len(raw_keys) == 1
+    assert raw_keys[0][-4:] == (
+        64,
+        min(m, torch.cuda.get_device_properties(x.device).multi_processor_count * 23),
+        True,
+        False,
+    )
+
+    padded_storage = torch.randn((m, n + 8), device="cuda", dtype=torch.bfloat16)
+    padded = padded_storage[:, :n]
+    assert not padded.is_contiguous()
+    padded_out = rmsnorm(padded, weight)
+    _assert_close(
+        padded_out.index_select(0, sample_rows),
+        _reference(padded.index_select(0, sample_rows), weight, 1e-6),
+    )
+    assert {key[-2] for key in rmsnorm_flydsl_impl._FWD_CACHE} == {False, True}
+
+    keys_before_offset = set(rmsnorm_flydsl_impl._FWD_CACHE)
+    offset_out = rmsnorm(x, weight, weight_offset=1.0)
+    _assert_close(
+        offset_out.index_select(0, sample_rows),
+        _reference(x.index_select(0, sample_rows), weight + 1.0, 1e-6),
+    )
+    offset_keys = set(rmsnorm_flydsl_impl._FWD_CACHE) - keys_before_offset
+    assert len(offset_keys) == 1
+    assert not next(iter(offset_keys))[-2]
+
+    # Reusing either fallback must leave the raw launcher's answer unchanged.
+    torch.testing.assert_close(rmsnorm(x, weight), first, rtol=0, atol=0)
 
 
 def test_operands_larger_than_one_buffer_descriptor():
