@@ -64,7 +64,6 @@ _FWD_AUTOTUNED_FAST_CACHE: dict[tuple, tuple] = {}
 _BWD_AUTOTUNED_FAST_CACHE: dict[tuple, tuple] = {}
 _FWD_CU_COUNT_CACHE: dict[torch.device, int] = {}
 _BWD_CU_COUNT_CACHE: dict[torch.device, int] = {}
-_EMPTY_PLACEHOLDER_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
 _DEVICE_ARCH_CACHE: dict[int, str] = {}
 _AUTOTUNE_ARCH_CACHE: dict[tuple, str] = {}
 _EAGER_EMPTY_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
@@ -1361,15 +1360,6 @@ def _is_measured_plain_inference(
     )
 
 
-def _empty_placeholder(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    key = (device, dtype)
-    tensor = _EMPTY_PLACEHOLDER_CACHE.get(key)
-    if tensor is None:
-        tensor = torch.empty(0, device=device, dtype=dtype)
-        _EMPTY_PLACEHOLDER_CACHE[key] = tensor
-    return tensor
-
-
 def _rmsnorm_measured_plain_inference(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -1378,8 +1368,8 @@ def _rmsnorm_measured_plain_inference(
     autotuned: bool,
 ) -> torch.Tensor:
     """Minimal host path for the correctness-proven measured specialization."""
-    absent = _empty_placeholder(x.device, torch.bfloat16)
-    rstd = _empty_placeholder(x.device, torch.float32)
+    absent = _eager_empty(x.device, torch.bfloat16)
+    rstd = _eager_empty(x.device, torch.float32)
     out = torch.empty_like(x)
     launch = _launch_rmsnorm_fwd_autotuned if autotuned else _launch_rmsnorm_fwd
     launch(
