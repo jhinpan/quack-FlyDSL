@@ -1,0 +1,1507 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+#
+# Adapted for Quack from ROCm/FlyDSL commit
+# ddaa507f56aa3fe9c08ebe6161a717b755540248.
+
+"""RMSNorm backward kernel builder.
+
+It is staged: a persistent kernel writes one partial parameter gradient per
+block, then a second kernel reduces the partials. There is no atomic variant.
+One existed for small row counts and was removed after measurement -- fp32
+atomics force a zeroed accumulator and a cast back to the weight dtype, which
+cost two torch launches to save one FlyDSL launch. See
+AI/flydsl_rmsnorm_notes.md.
+"""
+
+import flydsl.compiler as flyc
+import flydsl.expr as fx
+from flydsl.expr import arith, const_expr, gpu, range_constexpr
+from flydsl.expr.typing import ReductionOp
+from flydsl.runtime.device import get_rocm_arch
+
+from .rmsnorm_common import (
+    WARP_SIZE,
+    buffer_copy_atom,
+    dtype_to_elem_bits,
+    dtype_to_elem_type,
+    has_hw_bf16_convert,
+    load_dtype_vec,
+    load_scalar,
+    make_reduction_storage,
+    require_wave64,
+    row_buffer,
+    row_head_buffer,
+    shuffle_reduce_add,
+    store_dtype_vec,
+    store_scalar,
+    to_store_dtype,
+    vector_access_plan,
+)
+from .rmsnorm_config import RmsNormRowConfig, next_power_of_two
+
+# The reduce keeps one 256-thread block per column group. Opening a short
+# parameter down to one column per block gives gfx950 roughly one block per CU;
+# wider parameters grow the column group instead of oversubscribing forever.
+PARAMETER_REDUCE_THREADS = 256
+PARAMETER_REDUCE_TARGET_BLOCKS = 256
+
+# The staged backward accepts a wider block than the forward: it is persistent,
+# so a block also has to keep the machine busy across rows, not just cover one.
+TWO_STAGE_MAX_NUM_THREADS = 512
+
+
+def rmsnorm_bwd_two_stage_config(n: int, dtype_str: str) -> RmsNormRowConfig:
+    """How the staged backward splits one row's columns across its block."""
+    return RmsNormRowConfig.from_analytical_heuristic(
+        n,
+        dtype_to_elem_bits(dtype_str),
+        TWO_STAGE_MAX_NUM_THREADS,
+    )
+
+
+def rmsnorm_bwd_parameter_reduce_cols(
+    parameter_numel: int,
+    num_programs: int,
+    target_blocks: int = PARAMETER_REDUCE_TARGET_BLOCKS,
+) -> int:
+    """Choose a power-of-two column group for an occupancy-sized reduce grid."""
+    if parameter_numel <= 0:
+        raise ValueError(f"parameter_numel must be positive, got {parameter_numel}")
+    if num_programs <= 0:
+        raise ValueError(f"num_programs must be positive, got {num_programs}")
+    if target_blocks <= 0:
+        raise ValueError(f"target_blocks must be positive, got {target_blocks}")
+
+    columns_for_grid = next_power_of_two((parameter_numel + target_blocks - 1) // target_blocks)
+    active_row_lanes = min(PARAMETER_REDUCE_THREADS, next_power_of_two(num_programs))
+    columns_for_partials = PARAMETER_REDUCE_THREADS // active_row_lanes
+    return min(
+        PARAMETER_REDUCE_THREADS,
+        max(columns_for_grid, columns_for_partials),
+    )
+
+
+def build_rmsnorm_bwd_two_stage_module(
+    n: int,
+    source_dtype_str: str,
+    dy_dtype_str: str,
+    dx_dtype_str: str,
+    dresidual_dtype_str: str,
+    dresidual_out_dtype_str: str,
+    num_programs: int,
+    *,
+    weight_dtype_str: str,
+    dbias_dtype_str: str,
+    has_weight: bool,
+    has_bias: bool,
+    compute_dweight: bool,
+    compute_dbias: bool,
+    compute_input_grad: bool,
+    store_dx: bool,
+    store_dresidual: bool,
+    has_residual: bool,
+    has_dresidual_out: bool,
+    per_head: bool,
+    num_heads: int,
+    arch: str | None = None,
+    row_config: RmsNormRowConfig | None = None,
+    parameter_reduce_cols: int | None = None,
+):
+    """Build the deterministic persistent backward plus its parameter reduce."""
+    if num_programs <= 0:
+        raise ValueError(f"num_programs must be positive, got {num_programs}")
+    arch = get_rocm_arch() if arch is None else arch
+    require_wave64(arch)
+    use_hw_cvt_bf16 = has_hw_bf16_convert(arch)
+    source_bits = dtype_to_elem_bits(source_dtype_str)
+    dy_bits = dtype_to_elem_bits(dy_dtype_str)
+    dx_bits = dtype_to_elem_bits(dx_dtype_str)
+    dresidual_bits = dtype_to_elem_bits(dresidual_dtype_str)
+    dresidual_out_bits = dtype_to_elem_bits(dresidual_out_dtype_str)
+    weight_bits = dtype_to_elem_bits(weight_dtype_str)
+    config = row_config or rmsnorm_bwd_two_stage_config(n, source_dtype_str)
+    block_threads = config.num_threads
+    vecsize = config.vecsize
+    num_vecs = config.num_vecs
+    num_tiles = config.num_tiles
+    values_per_thread = num_tiles * vecsize
+    wide_bwd = config.reload_from == "gmem"
+    # A 256-element 16-bit row has 32 vectors but the smallest legal gfx950
+    # workgroup is a full 64-lane wave. Give each half-wave an independent row
+    # stream, then combine their parameter partials once at the end. This keeps
+    # every lane useful without changing the two-kernel staged topology.
+    paired_partial_rows = (
+        not wide_bwd
+        and block_threads == WARP_SIZE
+        and num_tiles == 1
+        and num_vecs * 2 == block_threads
+    )
+    partial_rows_per_program = 2 if paired_partial_rows else 1
+    partial_threads_per_row = block_threads // partial_rows_per_program
+    raw_paired_io = (
+        paired_partial_rows
+        and source_dtype_str == "bf16"
+        and dy_dtype_str == "bf16"
+        and dx_dtype_str == "bf16"
+        and weight_dtype_str == "f32"
+        and has_weight
+        and not has_bias
+        and compute_dweight
+        and not compute_dbias
+        and compute_input_grad
+        and store_dx
+        and not store_dresidual
+        and not has_residual
+        and not has_dresidual_out
+        and not per_head
+    )
+    wide_full_tiles = num_vecs // block_threads
+    wide_tail_vecs = num_vecs % block_threads
+    red_slots = max(1, (block_threads + WARP_SIZE - 1) // WARP_SIZE)
+    shared_storage = make_reduction_storage(red_slots)
+    parameter_numel = num_heads * n
+    if parameter_reduce_cols is None:
+        parameter_reduce_cols = rmsnorm_bwd_parameter_reduce_cols(
+            parameter_numel,
+            num_programs,
+        )
+    if (
+        parameter_reduce_cols <= 0
+        or parameter_reduce_cols > PARAMETER_REDUCE_THREADS
+        or parameter_reduce_cols & (parameter_reduce_cols - 1)
+    ):
+        raise ValueError(
+            "parameter_reduce_cols must be a power of two between 1 and "
+            f"{PARAMETER_REDUCE_THREADS}, got {parameter_reduce_cols}"
+        )
+    parameter_reduce_row_lanes = PARAMETER_REDUCE_THREADS // parameter_reduce_cols
+    parameter_reduce_steps = parameter_reduce_row_lanes.bit_length() - 1
+    dweight_workspace_row_offset = 0
+    dbias_workspace_row_offset = num_programs * num_heads if compute_dweight else 0
+    # The reduce writes each gradient in the parameter's own dtype. dweight
+    # shares the weight's, and an eager cast on the way out would be a kernel
+    # launch per backward for a tensor the size of a row.
+    dbias_bits = dtype_to_elem_bits(dbias_dtype_str)
+    # The reduce below splits the partial rows across lanes and combines them
+    # through LDS, so each gradient it produces needs a slot per thread.
+    reduced_parameters = int(compute_dweight) + int(compute_dbias)
+    dbias_shared_offset = PARAMETER_REDUCE_THREADS if compute_dweight else 0
+    parameter_reduce_storage = make_reduction_storage(
+        max(1, PARAMETER_REDUCE_THREADS * reduced_parameters)
+    )
+
+    _, source_per_access = vector_access_plan(vecsize, source_bits)
+    _, dy_per_access = vector_access_plan(vecsize, dy_bits)
+    _, dx_per_access = vector_access_plan(vecsize, dx_bits)
+    _, dresidual_per_access = vector_access_plan(vecsize, dresidual_bits)
+    _, dresidual_out_per_access = vector_access_plan(vecsize, dresidual_out_bits)
+    _, weight_per_access = vector_access_plan(vecsize, weight_bits)
+    _, workspace_per_access = vector_access_plan(vecsize, 32)
+
+    @flyc.kernel(known_block_size=[block_threads, 1, 1])
+    def rmsnorm_bwd_partial_kernel(
+        source_tensor: fx.Tensor,
+        weight_tensor: fx.Tensor,
+        dy_tensor: fx.Tensor,
+        dresidual_out_tensor: fx.Tensor,
+        rstd_tensor: fx.Tensor,
+        dx_tensor: fx.Tensor,
+        dresidual_tensor: fx.Tensor,
+        workspace_tensor: fx.Tensor,
+        m: fx.Int32,
+        weight_offset: fx.Float32,
+    ):
+        linear_program = fx.block_idx.x
+        tid = fx.thread_idx.x
+        program = linear_program // fx.Int32(num_heads) if per_head else linear_program
+        head = linear_program % fx.Int32(num_heads) if per_head else fx.Int32(0)
+        partial_lane = tid % fx.Int32(partial_threads_per_row)
+        partial_row_group = tid // fx.Int32(partial_threads_per_row)
+
+        source_dtype = dtype_to_elem_type(source_dtype_str)
+        dy_dtype = dtype_to_elem_type(dy_dtype_str)
+        dx_dtype = dtype_to_elem_type(dx_dtype_str)
+        dresidual_dtype = dtype_to_elem_type(dresidual_dtype_str)
+        dresidual_out_dtype = dtype_to_elem_type(dresidual_out_dtype_str)
+        weight_dtype = dtype_to_elem_type(weight_dtype_str)
+        fast_math = arith.FastMathFlags.fast
+
+        storage = fx.SharedAllocator().allocate(shared_storage).peek()
+        reduction = storage.s_red.view(fx.make_layout(red_slots, 1))
+
+        def wave_reduce_add(value):
+            return shuffle_reduce_add(value, WARP_SIZE, WARP_SIZE, fast_math)
+
+        def block_reduce_add(value):
+            if const_expr(paired_partial_rows):
+                return shuffle_reduce_add(
+                    value,
+                    partial_threads_per_row,
+                    fx.Int32(partial_threads_per_row),
+                    fast_math,
+                )
+            if const_expr(red_slots == 1):
+                return wave_reduce_add(value)
+            lane = tid % WARP_SIZE
+            wave = tid // WARP_SIZE
+            reduced = wave_reduce_add(value)
+            if lane == 0:
+                fx.memref_store(reduced, reduction, wave)
+            gpu.barrier()
+            if wave == 0:
+                in_range = lane < red_slots
+                safe_lane = in_range.select(lane, 0)
+                partial = in_range.select(
+                    fx.memref_load(reduction, safe_lane),
+                    fx.Float32(0.0),
+                )
+                partial = wave_reduce_add(partial)
+                if lane == 0:
+                    fx.memref_store(partial, reduction, 0)
+            gpu.barrier()
+            return fx.memref_load(reduction, 0)
+
+        def row_div(tensor, row_index, elem_bits, per_access):
+            buffer = (
+                row_head_buffer(tensor, row_index, head, elem_bits, n)
+                if per_head
+                else row_buffer(tensor, row_index, elem_bits, n)
+            )
+            return fx.logical_divide(buffer, fx.make_layout(per_access, 1))
+
+        def raw_load_row_vec(tensor, row_index, index, elem_dtype):
+            offset = fx.Int64(
+                fx.get_scalar(
+                    fx.crd2idx(
+                        (row_index, index * fx.Int32(vecsize)),
+                        tensor.layout,
+                    )
+                )
+            )
+            return fx.ptr_load(
+                fx.get_iter(tensor) + offset,
+                result_type=fx.Vector.make_type(vecsize, elem_dtype),
+            ).to(fx.Float32)
+
+        def raw_store_row_vec(tensor, row_index, index, value):
+            offset = fx.Int64(
+                fx.get_scalar(
+                    fx.crd2idx(
+                        (row_index, index * fx.Int32(vecsize)),
+                        tensor.layout,
+                    )
+                )
+            )
+            fx.ptr_store(value.ir_value(), fx.get_iter(tensor) + offset)
+
+        # Bounded like the forward's. Left wide open the descriptor covers 4 GiB
+        # from the base, so an index past that wraps to the head of the
+        # allocation instead of faulting -- the same silent-corruption mode the
+        # row-scoped operand descriptors exist to close.
+        rstd_buffer = fx.rocdl.make_buffer_tensor(
+            rstd_tensor,
+            num_records_bytes=m * fx.Int32(num_heads) * fx.Int32(4),
+        )
+        rstd_div = fx.logical_divide(rstd_buffer, fx.make_layout(1, 1))
+
+        source_copy = buffer_copy_atom(source_per_access * source_bits, source_bits)
+        dy_copy = buffer_copy_atom(dy_per_access * dy_bits, dy_bits)
+        if const_expr(compute_input_grad):
+            if const_expr(store_dx):
+                dx_copy = buffer_copy_atom(dx_per_access * dx_bits, dx_bits)
+            if const_expr(store_dresidual):
+                dresidual_copy = buffer_copy_atom(
+                    dresidual_per_access * dresidual_bits,
+                    dresidual_bits,
+                )
+            if const_expr(has_dresidual_out):
+                dresidual_out_copy = buffer_copy_atom(
+                    dresidual_out_per_access * dresidual_out_bits,
+                    dresidual_out_bits,
+                )
+        f32_copy = buffer_copy_atom(32, 32)
+        workspace_copy = buffer_copy_atom(workspace_per_access * 32, 32)
+
+        # The weight does not vary by row, so it is loaded once per block and
+        # kept in registers with weight_offset already folded in.
+        weight_local = []
+        if const_expr(compute_input_grad and has_weight):
+            weight_copy = buffer_copy_atom(weight_per_access * weight_bits, weight_bits)
+            weight_buffer = (
+                row_buffer(weight_tensor, head, weight_bits, n)
+                if per_head
+                else fx.rocdl.make_buffer_tensor(weight_tensor)
+            )
+            weight_div = fx.logical_divide(weight_buffer, fx.make_layout(weight_per_access, 1))
+            for tile_i in range_constexpr(num_tiles):
+                index = partial_lane + tile_i * partial_threads_per_row
+                safe_index = (index < num_vecs).select(index, 0)
+                weight_local.append(
+                    load_dtype_vec(
+                        weight_copy,
+                        weight_dtype,
+                        weight_bits,
+                        weight_div,
+                        safe_index,
+                        vecsize,
+                    )
+                    + weight_offset
+                )
+
+        initial_dweight = fx.Vector.filled(
+            values_per_thread,
+            0.0,
+            fx.Float32,
+        )
+        initial_dbias = fx.Vector.filled(
+            values_per_thread,
+            0.0,
+            fx.Float32,
+        )
+        for row, state in range(
+            fx.Int32(program) * fx.Int32(partial_rows_per_program) + partial_row_group,
+            m,
+            fx.Int32(num_programs * partial_rows_per_program),
+            init=[initial_dweight, initial_dbias],
+        ):
+            accumulated_dweight = state[0]
+            accumulated_dbias = state[1]
+            if const_expr(not raw_paired_io):
+                source_div = row_div(source_tensor, row, source_bits, source_per_access)
+                dy_div = row_div(dy_tensor, row, dy_bits, dy_per_access)
+            if const_expr(compute_input_grad):
+                if const_expr(store_dx and not raw_paired_io):
+                    dx_div = row_div(dx_tensor, row, dx_bits, dx_per_access)
+                if const_expr(has_dresidual_out):
+                    dresidual_out_div = row_div(
+                        dresidual_out_tensor,
+                        row,
+                        dresidual_out_bits,
+                        dresidual_out_per_access,
+                    )
+                if const_expr(store_dresidual):
+                    dresidual_div = row_div(
+                        dresidual_tensor,
+                        row,
+                        dresidual_bits,
+                        dresidual_per_access,
+                    )
+
+            rstd_index = fx.Int32(row) * fx.Int32(num_heads) + head if per_head else row
+            rstd = load_scalar(f32_copy, fx.Float32, rstd_div, rstd_index)
+
+            # Hold the row in registers across the reduction so it is read once.
+            thread_sum = fx.Float32(0.0)
+            source_local = []
+            dy_local = []
+            for tile_i in range_constexpr(num_tiles):
+                index = partial_lane + tile_i * partial_threads_per_row
+                valid = index < num_vecs
+                safe_index = valid.select(index, 0)
+                if const_expr(raw_paired_io):
+                    source = raw_load_row_vec(source_tensor, row, safe_index, source_dtype)
+                    dy = raw_load_row_vec(dy_tensor, row, safe_index, dy_dtype)
+                else:
+                    source = load_dtype_vec(
+                        source_copy,
+                        source_dtype,
+                        source_bits,
+                        source_div,
+                        safe_index,
+                        vecsize,
+                    )
+                    dy = load_dtype_vec(
+                        dy_copy,
+                        dy_dtype,
+                        dy_bits,
+                        dy_div,
+                        safe_index,
+                        vecsize,
+                    )
+                source_local.append(source)
+                dy_local.append(dy)
+                if const_expr(compute_input_grad):
+                    wdy = dy * weight_local[tile_i] if has_weight else dy
+                    product = (source * rstd * wdy).reduce(
+                        ReductionOp.ADD,
+                        fastmath=fast_math,
+                    )
+                    thread_sum = thread_sum + valid.select(product, fx.Float32(0.0))
+
+            if const_expr(compute_input_grad):
+                correction = block_reduce_add(thread_sum) / float(n)
+            row_dweight = []
+            row_dbias = []
+            for tile_i in range_constexpr(num_tiles):
+                index = partial_lane + tile_i * partial_threads_per_row
+                valid = index < num_vecs
+                safe_index = valid.select(index, 0)
+                source = source_local[tile_i]
+                dy = dy_local[tile_i]
+                x_hat = source * rstd
+                if const_expr(compute_input_grad):
+                    wdy = dy * weight_local[tile_i] if has_weight else dy
+                    total = (wdy - x_hat * correction) * rstd
+                    if const_expr(has_dresidual_out):
+                        total = total + load_dtype_vec(
+                            dresidual_out_copy,
+                            dresidual_out_dtype,
+                            dresidual_out_bits,
+                            dresidual_out_div,
+                            safe_index,
+                            vecsize,
+                        )
+                    if index < num_vecs:
+                        if const_expr(store_dx):
+                            store_value = to_store_dtype(
+                                dx_dtype_str,
+                                dx_dtype,
+                                use_hw_cvt_bf16,
+                                total,
+                                vecsize,
+                            )
+                            if const_expr(raw_paired_io):
+                                raw_store_row_vec(dx_tensor, row, index, store_value)
+                            else:
+                                store_dtype_vec(
+                                    dx_copy,
+                                    dx_dtype,
+                                    dx_bits,
+                                    store_value,
+                                    dx_div,
+                                    index,
+                                    vecsize,
+                                )
+                        if const_expr(store_dresidual):
+                            store_dtype_vec(
+                                dresidual_copy,
+                                dresidual_dtype,
+                                dresidual_bits,
+                                to_store_dtype(
+                                    dresidual_dtype_str,
+                                    dresidual_dtype,
+                                    use_hw_cvt_bf16,
+                                    total,
+                                    vecsize,
+                                ),
+                                dresidual_div,
+                                index,
+                                vecsize,
+                            )
+                if const_expr(compute_dweight):
+                    dweight_value = dy * x_hat
+                    for lane in range_constexpr(vecsize):
+                        row_dweight.append(valid.select(dweight_value[lane], fx.Float32(0.0)))
+                if const_expr(compute_dbias):
+                    for lane in range_constexpr(vecsize):
+                        row_dbias.append(valid.select(dy[lane], fx.Float32(0.0)))
+
+            next_dweight = accumulated_dweight
+            next_dbias = accumulated_dbias
+            if const_expr(compute_dweight):
+                next_dweight = accumulated_dweight + fx.Vector.from_elements(
+                    row_dweight,
+                    fx.Float32,
+                )
+            if const_expr(compute_dbias):
+                next_dbias = accumulated_dbias + fx.Vector.from_elements(
+                    row_dbias,
+                    fx.Float32,
+                )
+            if const_expr(not paired_partial_rows):
+                gpu.barrier()
+            results = yield [next_dweight, next_dbias]
+
+        final_dweight = results[0]
+        final_dbias = results[1]
+        if const_expr(paired_partial_rows):
+            if const_expr(compute_dweight):
+                combined_dweight = []
+                for lane in range_constexpr(values_per_thread):
+                    value = final_dweight[lane]
+                    combined_dweight.append(
+                        value.addf(
+                            value.shuffle_xor(
+                                partial_threads_per_row,
+                                WARP_SIZE,
+                            ),
+                            fastmath=fast_math,
+                        )
+                    )
+                final_dweight = fx.Vector.from_elements(
+                    combined_dweight,
+                    fx.Float32,
+                )
+            if const_expr(compute_dbias):
+                combined_dbias = []
+                for lane in range_constexpr(values_per_thread):
+                    value = final_dbias[lane]
+                    combined_dbias.append(
+                        value.addf(
+                            value.shuffle_xor(
+                                partial_threads_per_row,
+                                WARP_SIZE,
+                            ),
+                            fastmath=fast_math,
+                        )
+                    )
+                final_dbias = fx.Vector.from_elements(
+                    combined_dbias,
+                    fx.Float32,
+                )
+        workspace_row = (
+            fx.Int64(program) * fx.Int64(num_heads) + fx.Int64(head)
+            if per_head
+            else fx.Int64(program)
+        )
+        if const_expr(compute_dweight):
+            dweight_workspace_div = fx.logical_divide(
+                row_buffer(
+                    workspace_tensor,
+                    dweight_workspace_row_offset + workspace_row,
+                    32,
+                    n,
+                ),
+                fx.make_layout(workspace_per_access, 1),
+            )
+        if const_expr(compute_dbias):
+            dbias_workspace_div = fx.logical_divide(
+                row_buffer(
+                    workspace_tensor,
+                    dbias_workspace_row_offset + workspace_row,
+                    32,
+                    n,
+                ),
+                fx.make_layout(workspace_per_access, 1),
+            )
+        for tile_i in range_constexpr(num_tiles):
+            index = partial_lane + tile_i * partial_threads_per_row
+            lanes = list(range(tile_i * vecsize, (tile_i + 1) * vecsize))
+            store_partial = partial_row_group == 0 if paired_partial_rows else index < num_vecs
+            if store_partial:
+                if const_expr(compute_dweight):
+                    store_dtype_vec(
+                        workspace_copy,
+                        fx.Float32,
+                        32,
+                        final_dweight.shuffle(final_dweight, lanes),
+                        dweight_workspace_div,
+                        index,
+                        vecsize,
+                    )
+                if const_expr(compute_dbias):
+                    store_dtype_vec(
+                        workspace_copy,
+                        fx.Float32,
+                        32,
+                        final_dbias.shuffle(final_dbias, lanes),
+                        dbias_workspace_div,
+                        index,
+                        vecsize,
+                    )
+
+    @flyc.kernel(known_block_size=[block_threads, 1, 1])
+    def rmsnorm_bwd_correction_kernel(
+        source_tensor: fx.Tensor,
+        weight_tensor: fx.Tensor,
+        dy_tensor: fx.Tensor,
+        rstd_tensor: fx.Tensor,
+        correction_tensor: fx.Tensor,
+        m: fx.Int32,
+        weight_offset: fx.Float32,
+    ):
+        """Stream one wide row and write its scalar dx correction."""
+        linear_program = fx.block_idx.x
+        tid = fx.thread_idx.x
+        row = linear_program // fx.Int32(num_heads) if per_head else linear_program
+        head = linear_program % fx.Int32(num_heads) if per_head else fx.Int32(0)
+
+        source_dtype = dtype_to_elem_type(source_dtype_str)
+        dy_dtype = dtype_to_elem_type(dy_dtype_str)
+        weight_dtype = dtype_to_elem_type(weight_dtype_str)
+        fast_math = arith.FastMathFlags.fast
+
+        storage = fx.SharedAllocator().allocate(shared_storage).peek()
+        reduction = storage.s_red.view(fx.make_layout(red_slots, 1))
+
+        def wave_reduce_add(value):
+            return shuffle_reduce_add(value, WARP_SIZE, WARP_SIZE, fast_math)
+
+        def block_reduce_add(value):
+            if const_expr(red_slots == 1):
+                return wave_reduce_add(value)
+            lane = tid % WARP_SIZE
+            wave = tid // WARP_SIZE
+            reduced = wave_reduce_add(value)
+            if lane == 0:
+                fx.memref_store(reduced, reduction, wave)
+            gpu.barrier()
+            if wave == 0:
+                in_range = lane < red_slots
+                safe_lane = in_range.select(lane, 0)
+                partial = in_range.select(
+                    fx.memref_load(reduction, safe_lane),
+                    fx.Float32(0.0),
+                )
+                partial = wave_reduce_add(partial)
+                if lane == 0:
+                    fx.memref_store(partial, reduction, 0)
+            gpu.barrier()
+            return fx.memref_load(reduction, 0)
+
+        source_buffer = (
+            row_head_buffer(source_tensor, row, head, source_bits, n)
+            if per_head
+            else row_buffer(source_tensor, row, source_bits, n)
+        )
+        dy_buffer = (
+            row_head_buffer(dy_tensor, row, head, dy_bits, n)
+            if per_head
+            else row_buffer(dy_tensor, row, dy_bits, n)
+        )
+        weight_buffer = (
+            row_buffer(weight_tensor, head, weight_bits, n)
+            if per_head
+            else fx.rocdl.make_buffer_tensor(weight_tensor)
+        )
+        source_div = fx.logical_divide(source_buffer, fx.make_layout(source_per_access, 1))
+        dy_div = fx.logical_divide(dy_buffer, fx.make_layout(dy_per_access, 1))
+        weight_div = fx.logical_divide(weight_buffer, fx.make_layout(weight_per_access, 1))
+        rstd_div = fx.logical_divide(
+            fx.rocdl.make_buffer_tensor(rstd_tensor),
+            fx.make_layout(1, 1),
+        )
+        correction_div = fx.logical_divide(
+            fx.rocdl.make_buffer_tensor(
+                correction_tensor,
+                num_records_bytes=m * fx.Int32(num_heads * 4),
+            ),
+            fx.make_layout(1, 1),
+        )
+
+        source_copy = buffer_copy_atom(source_per_access * source_bits, source_bits)
+        dy_copy = buffer_copy_atom(dy_per_access * dy_bits, dy_bits)
+        weight_copy = buffer_copy_atom(weight_per_access * weight_bits, weight_bits)
+        f32_copy = buffer_copy_atom(32, 32)
+        rstd_index = row * fx.Int32(num_heads) + head if per_head else row
+        rstd = load_scalar(f32_copy, fx.Float32, rstd_div, rstd_index)
+
+        thread_sum = fx.Float32(0.0)
+        for tile_i in range(wide_full_tiles):
+            index = tid + tile_i * block_threads
+            source = load_dtype_vec(
+                source_copy,
+                source_dtype,
+                source_bits,
+                source_div,
+                index,
+                vecsize,
+            )
+            dy = load_dtype_vec(dy_copy, dy_dtype, dy_bits, dy_div, index, vecsize)
+            wdy = dy
+            if const_expr(has_weight):
+                weight = load_dtype_vec(
+                    weight_copy,
+                    weight_dtype,
+                    weight_bits,
+                    weight_div,
+                    index,
+                    vecsize,
+                )
+                wdy = dy * (weight + weight_offset)
+            thread_sum = thread_sum + (source * rstd * wdy).reduce(
+                ReductionOp.ADD,
+                fastmath=fast_math,
+            )
+
+        if const_expr(wide_tail_vecs > 0):
+            index = tid + wide_full_tiles * block_threads
+            valid = tid < wide_tail_vecs
+            safe_index = valid.select(index, 0)
+            source = load_dtype_vec(
+                source_copy,
+                source_dtype,
+                source_bits,
+                source_div,
+                safe_index,
+                vecsize,
+            )
+            dy = load_dtype_vec(dy_copy, dy_dtype, dy_bits, dy_div, safe_index, vecsize)
+            wdy = dy
+            if const_expr(has_weight):
+                weight = load_dtype_vec(
+                    weight_copy,
+                    weight_dtype,
+                    weight_bits,
+                    weight_div,
+                    safe_index,
+                    vecsize,
+                )
+                wdy = dy * (weight + weight_offset)
+            contribution = (source * rstd * wdy).reduce(
+                ReductionOp.ADD,
+                fastmath=fast_math,
+            )
+            thread_sum = thread_sum + valid.select(contribution, fx.Float32(0.0))
+
+        correction = block_reduce_add(thread_sum) / float(n)
+        if tid == 0:
+            store_scalar(
+                f32_copy,
+                fx.Float32,
+                fx.Float32,
+                correction_div,
+                linear_program,
+                correction,
+            )
+
+    @flyc.kernel(known_block_size=[block_threads, 1, 1])
+    def rmsnorm_bwd_wide_partial_kernel(
+        source_tensor: fx.Tensor,
+        weight_tensor: fx.Tensor,
+        dy_tensor: fx.Tensor,
+        dresidual_out_tensor: fx.Tensor,
+        rstd_tensor: fx.Tensor,
+        correction_tensor: fx.Tensor,
+        dx_tensor: fx.Tensor,
+        dresidual_tensor: fx.Tensor,
+        workspace_tensor: fx.Tensor,
+        m: fx.Int32,
+        weight_offset: fx.Float32,
+    ):
+        """Process one bounded column tile across a persistent row subset."""
+        linear_block = fx.block_idx.x
+        tid = fx.thread_idx.x
+        column_block = linear_block % fx.Int32(num_tiles)
+        program_head = linear_block // fx.Int32(num_tiles)
+        program = program_head // fx.Int32(num_heads) if per_head else program_head
+        head = program_head % fx.Int32(num_heads) if per_head else fx.Int32(0)
+        index = tid + column_block * fx.Int32(block_threads)
+        valid = index < num_vecs
+        safe_index = valid.select(index, 0)
+
+        source_dtype = dtype_to_elem_type(source_dtype_str)
+        dy_dtype = dtype_to_elem_type(dy_dtype_str)
+        dx_dtype = dtype_to_elem_type(dx_dtype_str)
+        dresidual_dtype = dtype_to_elem_type(dresidual_dtype_str)
+        dresidual_out_dtype = dtype_to_elem_type(dresidual_out_dtype_str)
+        weight_dtype = dtype_to_elem_type(weight_dtype_str)
+
+        source_copy = buffer_copy_atom(source_per_access * source_bits, source_bits)
+        dy_copy = buffer_copy_atom(dy_per_access * dy_bits, dy_bits)
+        if const_expr(compute_input_grad):
+            if const_expr(store_dx):
+                dx_copy = buffer_copy_atom(dx_per_access * dx_bits, dx_bits)
+            if const_expr(store_dresidual):
+                dresidual_copy = buffer_copy_atom(
+                    dresidual_per_access * dresidual_bits,
+                    dresidual_bits,
+                )
+            if const_expr(has_dresidual_out):
+                dresidual_out_copy = buffer_copy_atom(
+                    dresidual_out_per_access * dresidual_out_bits,
+                    dresidual_out_bits,
+                )
+        f32_copy = buffer_copy_atom(32, 32)
+        workspace_copy = buffer_copy_atom(workspace_per_access * 32, 32)
+
+        rstd_div = fx.logical_divide(
+            fx.rocdl.make_buffer_tensor(rstd_tensor),
+            fx.make_layout(1, 1),
+        )
+        if const_expr(compute_input_grad):
+            correction_div = fx.logical_divide(
+                fx.rocdl.make_buffer_tensor(correction_tensor),
+                fx.make_layout(1, 1),
+            )
+
+        if const_expr(compute_input_grad and has_weight):
+            weight_buffer = (
+                row_buffer(weight_tensor, head, weight_bits, n)
+                if per_head
+                else fx.rocdl.make_buffer_tensor(weight_tensor)
+            )
+            weight_div = fx.logical_divide(
+                weight_buffer,
+                fx.make_layout(weight_per_access, 1),
+            )
+            weight_copy = buffer_copy_atom(weight_per_access * weight_bits, weight_bits)
+            weight_local = (
+                load_dtype_vec(
+                    weight_copy,
+                    weight_dtype,
+                    weight_bits,
+                    weight_div,
+                    safe_index,
+                    vecsize,
+                )
+                + weight_offset
+            )
+
+        initial_dweight = fx.Vector.filled(vecsize, 0.0, fx.Float32)
+        initial_dbias = fx.Vector.filled(vecsize, 0.0, fx.Float32)
+        for row, state in range(
+            fx.Int32(program),
+            m,
+            fx.Int32(num_programs),
+            init=[initial_dweight, initial_dbias],
+        ):
+            accumulated_dweight = state[0]
+            accumulated_dbias = state[1]
+            source_buffer = (
+                row_head_buffer(source_tensor, row, head, source_bits, n)
+                if per_head
+                else row_buffer(source_tensor, row, source_bits, n)
+            )
+            dy_buffer = (
+                row_head_buffer(dy_tensor, row, head, dy_bits, n)
+                if per_head
+                else row_buffer(dy_tensor, row, dy_bits, n)
+            )
+            source_div = fx.logical_divide(
+                source_buffer,
+                fx.make_layout(source_per_access, 1),
+            )
+            dy_div = fx.logical_divide(dy_buffer, fx.make_layout(dy_per_access, 1))
+            if const_expr(compute_input_grad):
+                if const_expr(store_dx):
+                    dx_buffer = (
+                        row_head_buffer(dx_tensor, row, head, dx_bits, n)
+                        if per_head
+                        else row_buffer(dx_tensor, row, dx_bits, n)
+                    )
+                    dx_div = fx.logical_divide(dx_buffer, fx.make_layout(dx_per_access, 1))
+                if const_expr(has_dresidual_out):
+                    dresidual_out_buffer = (
+                        row_head_buffer(
+                            dresidual_out_tensor,
+                            row,
+                            head,
+                            dresidual_out_bits,
+                            n,
+                        )
+                        if per_head
+                        else row_buffer(dresidual_out_tensor, row, dresidual_out_bits, n)
+                    )
+                    dresidual_out_div = fx.logical_divide(
+                        dresidual_out_buffer,
+                        fx.make_layout(dresidual_out_per_access, 1),
+                    )
+                if const_expr(store_dresidual):
+                    dresidual_buffer = (
+                        row_head_buffer(dresidual_tensor, row, head, dresidual_bits, n)
+                        if per_head
+                        else row_buffer(dresidual_tensor, row, dresidual_bits, n)
+                    )
+                    dresidual_div = fx.logical_divide(
+                        dresidual_buffer,
+                        fx.make_layout(dresidual_per_access, 1),
+                    )
+
+            scalar_index = fx.Int32(row) * fx.Int32(num_heads) + head if per_head else fx.Int32(row)
+            rstd = load_scalar(f32_copy, fx.Float32, rstd_div, scalar_index)
+            source = load_dtype_vec(
+                source_copy,
+                source_dtype,
+                source_bits,
+                source_div,
+                safe_index,
+                vecsize,
+            )
+            dy = load_dtype_vec(
+                dy_copy,
+                dy_dtype,
+                dy_bits,
+                dy_div,
+                safe_index,
+                vecsize,
+            )
+            x_hat = source * rstd
+            if const_expr(compute_input_grad):
+                correction = load_scalar(
+                    f32_copy,
+                    fx.Float32,
+                    correction_div,
+                    scalar_index,
+                )
+                wdy = dy * weight_local if has_weight else dy
+                total = (wdy - x_hat * correction) * rstd
+                if const_expr(has_dresidual_out):
+                    total = total + load_dtype_vec(
+                        dresidual_out_copy,
+                        dresidual_out_dtype,
+                        dresidual_out_bits,
+                        dresidual_out_div,
+                        safe_index,
+                        vecsize,
+                    )
+                if valid:
+                    if const_expr(store_dx):
+                        store_dtype_vec(
+                            dx_copy,
+                            dx_dtype,
+                            dx_bits,
+                            to_store_dtype(
+                                dx_dtype_str,
+                                dx_dtype,
+                                use_hw_cvt_bf16,
+                                total,
+                                vecsize,
+                            ),
+                            dx_div,
+                            index,
+                            vecsize,
+                        )
+                    if const_expr(store_dresidual):
+                        store_dtype_vec(
+                            dresidual_copy,
+                            dresidual_dtype,
+                            dresidual_bits,
+                            to_store_dtype(
+                                dresidual_dtype_str,
+                                dresidual_dtype,
+                                use_hw_cvt_bf16,
+                                total,
+                                vecsize,
+                            ),
+                            dresidual_div,
+                            index,
+                            vecsize,
+                        )
+
+            row_dweight = []
+            row_dbias = []
+            if const_expr(compute_dweight):
+                dweight_value = dy * x_hat
+                for lane in range_constexpr(vecsize):
+                    row_dweight.append(valid.select(dweight_value[lane], fx.Float32(0.0)))
+            if const_expr(compute_dbias):
+                for lane in range_constexpr(vecsize):
+                    row_dbias.append(valid.select(dy[lane], fx.Float32(0.0)))
+
+            next_dweight = accumulated_dweight
+            next_dbias = accumulated_dbias
+            if const_expr(compute_dweight):
+                next_dweight = accumulated_dweight + fx.Vector.from_elements(
+                    row_dweight,
+                    fx.Float32,
+                )
+            if const_expr(compute_dbias):
+                next_dbias = accumulated_dbias + fx.Vector.from_elements(
+                    row_dbias,
+                    fx.Float32,
+                )
+            results = yield [next_dweight, next_dbias]
+
+        workspace_row = (
+            fx.Int64(program) * fx.Int64(num_heads) + fx.Int64(head)
+            if per_head
+            else fx.Int64(program)
+        )
+        if const_expr(compute_dweight):
+            dweight_workspace_div = fx.logical_divide(
+                row_buffer(
+                    workspace_tensor,
+                    dweight_workspace_row_offset + workspace_row,
+                    32,
+                    n,
+                ),
+                fx.make_layout(workspace_per_access, 1),
+            )
+        if const_expr(compute_dbias):
+            dbias_workspace_div = fx.logical_divide(
+                row_buffer(
+                    workspace_tensor,
+                    dbias_workspace_row_offset + workspace_row,
+                    32,
+                    n,
+                ),
+                fx.make_layout(workspace_per_access, 1),
+            )
+        if valid:
+            if const_expr(compute_dweight):
+                store_dtype_vec(
+                    workspace_copy,
+                    fx.Float32,
+                    32,
+                    results[0],
+                    dweight_workspace_div,
+                    index,
+                    vecsize,
+                )
+            if const_expr(compute_dbias):
+                store_dtype_vec(
+                    workspace_copy,
+                    fx.Float32,
+                    32,
+                    results[1],
+                    dbias_workspace_div,
+                    index,
+                    vecsize,
+                )
+
+    @flyc.kernel(known_block_size=[PARAMETER_REDUCE_THREADS, 1, 1])
+    def rmsnorm_parameter_reduce_kernel(
+        workspace_flat: fx.Tensor,
+        dweight_tensor: fx.Tensor,
+        dbias_tensor: fx.Tensor,
+    ):
+        block = fx.block_idx.x
+        tid = fx.thread_idx.x
+        column_lane = tid % parameter_reduce_cols
+        partial_lane = tid // parameter_reduce_cols
+        parameter_index = block * parameter_reduce_cols + column_lane
+        valid = parameter_index < parameter_numel
+        safe_index = valid.select(parameter_index, 0)
+        parameter_head = safe_index // n if per_head else fx.Int32(0)
+        parameter_column = safe_index % n if per_head else safe_index
+        if const_expr(compute_dweight):
+            dweight_elem_dtype = dtype_to_elem_type(weight_dtype_str)
+            dweight_copy = buffer_copy_atom(weight_bits, weight_bits)
+            dweight_buffer = (
+                row_buffer(dweight_tensor, parameter_head, weight_bits, n)
+                if per_head
+                else fx.rocdl.make_buffer_tensor(dweight_tensor)
+            )
+            dweight_div = fx.logical_divide(
+                dweight_buffer,
+                fx.make_layout(1, 1),
+            )
+        if const_expr(compute_dbias):
+            dbias_elem_dtype = dtype_to_elem_type(dbias_dtype_str)
+            dbias_copy = buffer_copy_atom(dbias_bits, dbias_bits)
+            dbias_buffer = (
+                row_buffer(dbias_tensor, parameter_head, dbias_bits, n)
+                if per_head
+                else fx.rocdl.make_buffer_tensor(dbias_tensor)
+            )
+            dbias_div = fx.logical_divide(
+                dbias_buffer,
+                fx.make_layout(1, 1),
+            )
+        output_index = parameter_column if per_head else parameter_index
+        f32_copy = buffer_copy_atom(32, 32)
+        # One descriptor for the whole workspace, built once and indexed flat.
+        # Per-row descriptors cannot be hoisted out of the loop below, and the
+        # row a lane reads depends on its lane, so building them inside would
+        # make the descriptor itself divergent -- which costs far more than the
+        # lane split saves. num_programs comes from the CU count, so the
+        # workspace stays well inside the 4 GiB a descriptor addresses.
+        workspace_div = fx.logical_divide(
+            fx.rocdl.make_buffer_tensor(workspace_flat),
+            fx.make_layout(1, 1),
+        )
+        storage = fx.SharedAllocator().allocate(parameter_reduce_storage).peek()
+        shared_partial = storage.s_red.view(
+            fx.make_layout(max(1, PARAMETER_REDUCE_THREADS * reduced_parameters), 1)
+        )
+
+        dweight_total = fx.Float32(0.0)
+        dbias_total = fx.Float32(0.0)
+        # A device loop, not range_constexpr: num_programs tracks the row count,
+        # so unrolling it made codegen linear in the batch size -- 32s to build
+        # at 1536 programs, against a flat 0.13s once it stayed a loop.
+        for partial_base in range(0, num_programs, parameter_reduce_row_lanes):
+            partial_row = partial_base + partial_lane
+            partial_valid = partial_row < num_programs
+            safe_row = partial_valid.select(partial_row, 0)
+            workspace_row = safe_row * num_heads + parameter_head if per_head else safe_row
+            if const_expr(compute_dweight):
+                value = load_scalar(
+                    f32_copy,
+                    fx.Float32,
+                    workspace_div,
+                    (dweight_workspace_row_offset + workspace_row) * n + parameter_column,
+                )
+                dweight_total = dweight_total + partial_valid.select(value, fx.Float32(0.0))
+            if const_expr(compute_dbias):
+                value = load_scalar(
+                    f32_copy,
+                    fx.Float32,
+                    workspace_div,
+                    (dbias_workspace_row_offset + workspace_row) * n + parameter_column,
+                )
+                dbias_total = dbias_total + partial_valid.select(value, fx.Float32(0.0))
+
+        if const_expr(parameter_reduce_cols == 1):
+            # One block owns one output column at N=256. Reduce within each
+            # wave in registers, then combine only four wave totals through
+            # LDS. This preserves a fixed tree while replacing eight
+            # workgroup-wide barriers with one.
+            lane = tid % WARP_SIZE
+            wave = tid // WARP_SIZE
+            fast_math = arith.FastMathFlags.fast
+            if const_expr(compute_dweight):
+                reduced_dweight = shuffle_reduce_add(
+                    dweight_total,
+                    WARP_SIZE,
+                    WARP_SIZE,
+                    fast_math,
+                )
+                if lane == 0:
+                    fx.memref_store(reduced_dweight, shared_partial, wave)
+            if const_expr(compute_dbias):
+                reduced_dbias = shuffle_reduce_add(
+                    dbias_total,
+                    WARP_SIZE,
+                    WARP_SIZE,
+                    fast_math,
+                )
+                if lane == 0:
+                    fx.memref_store(
+                        reduced_dbias,
+                        shared_partial,
+                        dbias_shared_offset + wave,
+                    )
+            gpu.barrier()
+
+            if wave == 0:
+                in_range = lane < PARAMETER_REDUCE_THREADS // WARP_SIZE
+                safe_lane = in_range.select(lane, 0)
+                if const_expr(compute_dweight):
+                    partial = in_range.select(
+                        fx.memref_load(shared_partial, safe_lane),
+                        fx.Float32(0.0),
+                    )
+                    total = shuffle_reduce_add(partial, WARP_SIZE, WARP_SIZE, fast_math)
+                    if lane == 0:
+                        store_scalar(
+                            dweight_copy,
+                            dweight_elem_dtype,
+                            dweight_elem_dtype,
+                            dweight_div,
+                            output_index,
+                            total if weight_dtype_str == "f32" else total.to(dweight_elem_dtype),
+                        )
+                if const_expr(compute_dbias):
+                    partial = in_range.select(
+                        fx.memref_load(
+                            shared_partial,
+                            dbias_shared_offset + safe_lane,
+                        ),
+                        fx.Float32(0.0),
+                    )
+                    total = shuffle_reduce_add(partial, WARP_SIZE, WARP_SIZE, fast_math)
+                    if lane == 0:
+                        store_scalar(
+                            dbias_copy,
+                            dbias_elem_dtype,
+                            dbias_elem_dtype,
+                            dbias_div,
+                            output_index,
+                            total if dbias_dtype_str == "f32" else total.to(dbias_elem_dtype),
+                        )
+        elif const_expr(parameter_reduce_cols == 8 and parameter_reduce_row_lanes == 32):
+            # Eight adjacent columns make each workspace transaction coalesced.
+            # Within a wave, equal columns are eight lanes apart; reduce those
+            # eight row lanes with shuffles, then combine the four wave totals
+            # through one LDS rendezvous.
+            wave_lane = tid % WARP_SIZE
+            wave = tid // WARP_SIZE
+            fast_math = arith.FastMathFlags.fast
+            if const_expr(compute_dweight):
+                reduced_dweight = dweight_total
+                for offset in (32, 16, 8):
+                    reduced_dweight = reduced_dweight.addf(
+                        reduced_dweight.shuffle_xor(offset, WARP_SIZE),
+                        fastmath=fast_math,
+                    )
+                if wave_lane < parameter_reduce_cols:
+                    fx.memref_store(
+                        reduced_dweight,
+                        shared_partial,
+                        wave * parameter_reduce_cols + wave_lane,
+                    )
+            if const_expr(compute_dbias):
+                reduced_dbias = dbias_total
+                for offset in (32, 16, 8):
+                    reduced_dbias = reduced_dbias.addf(
+                        reduced_dbias.shuffle_xor(offset, WARP_SIZE),
+                        fastmath=fast_math,
+                    )
+                if wave_lane < parameter_reduce_cols:
+                    fx.memref_store(
+                        reduced_dbias,
+                        shared_partial,
+                        dbias_shared_offset + wave * parameter_reduce_cols + wave_lane,
+                    )
+            gpu.barrier()
+
+            if wave == 0:
+                active = wave_lane < (PARAMETER_REDUCE_THREADS // WARP_SIZE) * 8
+                safe_lane = active.select(wave_lane, 0)
+                if const_expr(compute_dweight):
+                    total = active.select(
+                        fx.memref_load(shared_partial, safe_lane),
+                        fx.Float32(0.0),
+                    )
+                    for offset in (16, 8):
+                        total = total.addf(
+                            total.shuffle_xor(offset, WARP_SIZE),
+                            fastmath=fast_math,
+                        )
+                    if wave_lane < parameter_reduce_cols:
+                        store_scalar(
+                            dweight_copy,
+                            dweight_elem_dtype,
+                            dweight_elem_dtype,
+                            dweight_div,
+                            output_index,
+                            total if weight_dtype_str == "f32" else total.to(dweight_elem_dtype),
+                        )
+                if const_expr(compute_dbias):
+                    total = active.select(
+                        fx.memref_load(
+                            shared_partial,
+                            dbias_shared_offset + safe_lane,
+                        ),
+                        fx.Float32(0.0),
+                    )
+                    for offset in (16, 8):
+                        total = total.addf(
+                            total.shuffle_xor(offset, WARP_SIZE),
+                            fastmath=fast_math,
+                        )
+                    if wave_lane < parameter_reduce_cols:
+                        store_scalar(
+                            dbias_copy,
+                            dbias_elem_dtype,
+                            dbias_elem_dtype,
+                            dbias_div,
+                            output_index,
+                            total if dbias_dtype_str == "f32" else total.to(dbias_elem_dtype),
+                        )
+        else:
+            if const_expr(compute_dweight):
+                fx.memref_store(dweight_total, shared_partial, tid)
+            if const_expr(compute_dbias):
+                fx.memref_store(dbias_total, shared_partial, dbias_shared_offset + tid)
+            gpu.barrier()
+
+            # A balanced tree gives every specialized geometry one fixed
+            # summation order. No gradient atomic participates in the result.
+            for reduce_step in range_constexpr(parameter_reduce_steps):
+                stride = parameter_reduce_row_lanes // (2 << reduce_step)
+                if partial_lane < stride:
+                    peer_tid = (partial_lane + stride) * parameter_reduce_cols + column_lane
+                    if const_expr(compute_dweight):
+                        total = fx.memref_load(shared_partial, tid) + fx.memref_load(
+                            shared_partial,
+                            peer_tid,
+                        )
+                        fx.memref_store(total, shared_partial, tid)
+                    if const_expr(compute_dbias):
+                        total = fx.memref_load(
+                            shared_partial,
+                            dbias_shared_offset + tid,
+                        ) + fx.memref_load(
+                            shared_partial,
+                            dbias_shared_offset + peer_tid,
+                        )
+                        fx.memref_store(total, shared_partial, dbias_shared_offset + tid)
+                gpu.barrier()
+
+            if partial_lane == 0:  # noqa: SIM102 - traced lane predicate
+                if parameter_index < parameter_numel:
+                    if const_expr(compute_dweight):
+                        total = fx.memref_load(shared_partial, column_lane)
+                        store_scalar(
+                            dweight_copy,
+                            dweight_elem_dtype,
+                            dweight_elem_dtype,
+                            dweight_div,
+                            output_index,
+                            total if weight_dtype_str == "f32" else total.to(dweight_elem_dtype),
+                        )
+                    if const_expr(compute_dbias):
+                        total = fx.memref_load(
+                            shared_partial,
+                            dbias_shared_offset + column_lane,
+                        )
+                        store_scalar(
+                            dbias_copy,
+                            dbias_elem_dtype,
+                            dbias_elem_dtype,
+                            dbias_div,
+                            output_index,
+                            total if dbias_dtype_str == "f32" else total.to(dbias_elem_dtype),
+                        )
+
+    reduce_grid = (parameter_numel + parameter_reduce_cols - 1) // parameter_reduce_cols
+    reduces_parameters = compute_dweight or compute_dbias
+
+    @flyc.jit
+    def launch_rmsnorm_bwd_two_stage(
+        source_tensor: fx.Tensor,
+        weight_tensor: fx.Tensor,
+        dy_tensor: fx.Tensor,
+        dresidual_out_tensor: fx.Tensor,
+        rstd_tensor: fx.Tensor,
+        correction_tensor: fx.Tensor,
+        dx_tensor: fx.Tensor,
+        dresidual_tensor: fx.Tensor,
+        dweight_tensor: fx.Tensor,
+        dbias_tensor: fx.Tensor,
+        workspace_tensor: fx.Tensor,
+        workspace_flat: fx.Tensor,
+        m: fx.Int32,
+        weight_offset: fx.Float32,
+        stream: fx.Stream = fx.Stream(None),  # noqa: B008 - required by FlyDSL's traced ABI
+    ):
+        if const_expr(wide_bwd):
+            if const_expr(compute_input_grad):
+                rmsnorm_bwd_correction_kernel(
+                    source_tensor,
+                    weight_tensor,
+                    dy_tensor,
+                    rstd_tensor,
+                    correction_tensor,
+                    m,
+                    weight_offset,
+                ).launch(
+                    grid=(m * fx.Int32(num_heads), 1, 1),
+                    block=(block_threads, 1, 1),
+                    stream=stream,
+                )
+            rmsnorm_bwd_wide_partial_kernel(
+                source_tensor,
+                weight_tensor,
+                dy_tensor,
+                dresidual_out_tensor,
+                rstd_tensor,
+                correction_tensor,
+                dx_tensor,
+                dresidual_tensor,
+                workspace_tensor,
+                m,
+                weight_offset,
+            ).launch(
+                grid=(num_programs * num_heads * num_tiles, 1, 1),
+                block=(block_threads, 1, 1),
+                stream=stream,
+            )
+        else:
+            rmsnorm_bwd_partial_kernel(
+                source_tensor,
+                weight_tensor,
+                dy_tensor,
+                dresidual_out_tensor,
+                rstd_tensor,
+                dx_tensor,
+                dresidual_tensor,
+                workspace_tensor,
+                m,
+                weight_offset,
+            ).launch(
+                grid=(num_programs * num_heads, 1, 1),
+                block=(block_threads, 1, 1),
+                stream=stream,
+            )
+        # Both reduce branches compile out when no parameter gradient is
+        # wanted, so the launch would cover parameter_numel doing nothing.
+        if const_expr(reduces_parameters):
+            rmsnorm_parameter_reduce_kernel(
+                workspace_flat,
+                dweight_tensor,
+                dbias_tensor,
+            ).launch(
+                grid=(reduce_grid, 1, 1),
+                block=(PARAMETER_REDUCE_THREADS, 1, 1),
+                stream=stream,
+            )
+
+    return launch_rmsnorm_bwd_two_stage
+
+
+@flyc.jit
+def rmsnorm_bwd_direct(
+    source_tensor: fx.Tensor,
+    weight_tensor: fx.Tensor,
+    dy_tensor: fx.Tensor,
+    dresidual_out_tensor: fx.Tensor,
+    rstd_tensor: fx.Tensor,
+    correction_tensor: fx.Tensor,
+    dx_tensor: fx.Tensor,
+    dresidual_tensor: fx.Tensor,
+    dweight_tensor: fx.Tensor,
+    dbias_tensor: fx.Tensor,
+    workspace_tensor: fx.Tensor,
+    workspace_flat: fx.Tensor,
+    m: fx.Int32,
+    weight_offset: fx.Float32,
+    n: fx.Constexpr[int],
+    source_dtype_str: fx.Constexpr[str],
+    dy_dtype_str: fx.Constexpr[str],
+    dx_dtype_str: fx.Constexpr[str],
+    dresidual_dtype_str: fx.Constexpr[str],
+    dresidual_out_dtype_str: fx.Constexpr[str],
+    weight_dtype_str: fx.Constexpr[str],
+    dbias_dtype_str: fx.Constexpr[str],
+    has_weight: fx.Constexpr[bool],
+    has_bias: fx.Constexpr[bool],
+    compute_dweight: fx.Constexpr[bool],
+    compute_dbias: fx.Constexpr[bool],
+    compute_input_grad: fx.Constexpr[bool],
+    store_dx: fx.Constexpr[bool],
+    store_dresidual: fx.Constexpr[bool],
+    has_residual: fx.Constexpr[bool],
+    has_dresidual_out: fx.Constexpr[bool],
+    per_head: fx.Constexpr[bool],
+    num_heads: fx.Constexpr[int],
+    arch: fx.Constexpr[str],
+    schema_version: fx.Constexpr[int],
+    threads_per_row: fx.Constexpr[int],
+    num_programs: fx.Constexpr[int],
+    parameter_reduce_cols: fx.Constexpr[int],
+    stream: fx.Stream = fx.Stream(None),  # noqa: B008 - required by FlyDSL's traced ABI
+):
+    """Specialize the staged backward through autotunable row and grid geometry."""
+    row_config = RmsNormRowConfig.with_num_threads(
+        n,
+        dtype_to_elem_bits(source_dtype_str),
+        threads_per_row,
+        max_num_threads=TWO_STAGE_MAX_NUM_THREADS,
+    )
+    launch = build_rmsnorm_bwd_two_stage_module(
+        n,
+        source_dtype_str,
+        dy_dtype_str,
+        dx_dtype_str,
+        dresidual_dtype_str,
+        dresidual_out_dtype_str,
+        num_programs,
+        weight_dtype_str=weight_dtype_str,
+        dbias_dtype_str=dbias_dtype_str,
+        has_weight=has_weight,
+        has_bias=has_bias,
+        compute_dweight=compute_dweight,
+        compute_dbias=compute_dbias,
+        compute_input_grad=compute_input_grad,
+        store_dx=store_dx,
+        store_dresidual=store_dresidual,
+        has_residual=has_residual,
+        has_dresidual_out=has_dresidual_out,
+        per_head=per_head,
+        num_heads=num_heads,
+        arch=arch,
+        row_config=row_config,
+        parameter_reduce_cols=parameter_reduce_cols,
+    )
+    launch(
+        source_tensor,
+        weight_tensor,
+        dy_tensor,
+        dresidual_out_tensor,
+        rstd_tensor,
+        correction_tensor,
+        dx_tensor,
+        dresidual_tensor,
+        dweight_tensor,
+        dbias_tensor,
+        workspace_tensor,
+        workspace_flat,
+        m,
+        weight_offset,
+        stream,
+    )
