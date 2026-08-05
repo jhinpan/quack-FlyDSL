@@ -57,6 +57,10 @@ def build_rmsnorm_module(
     num_heads: int,
     arch: str | None = None,
     row_config: RmsNormRowConfig | None = None,
+    row_groups_per_block: int | None = None,
+    output_cache_modifier: int | None = None,
+    persistent_single_pass: bool = False,
+    packed_flat_rows: bool = False,
     apply_weight_offset: bool = True,
     persistent_rows: bool = False,
     persistent_programs: int = 0,
@@ -74,9 +78,9 @@ def build_rmsnorm_module(
 
     A row is covered by a group of threads, and a block holds one or more such
     groups. A row long enough to fill a block gets a group that wide and a
-    block to itself; a short row gets a narrower group and shares the block,
-    which is what keeps a 128-element head from launching a block per row with
-    three quarters of its lanes idle.
+    block to itself by default; a short row gets a narrower group and shares
+    the block. ``row_groups_per_block`` can compile-time specialize that
+    packing without creating a second kernel body.
     """
     arch = get_rocm_arch() if arch is None else arch
     require_wave64(arch)
@@ -96,8 +100,20 @@ def build_rmsnorm_module(
             else RmsNormRowConfig.from_analytical_heuristic(n, input_bits)
         )
     threads_per_row = config.num_threads
-    rows_per_block = multi_row_block_rows(threads_per_row) if batched else 1
+    default_row_groups = multi_row_block_rows(threads_per_row) if batched else 1
+    rows_per_block = default_row_groups if row_groups_per_block is None else row_groups_per_block
     block_threads = rows_per_block * threads_per_row
+    if row_groups_per_block is not None and (
+        rows_per_block <= 0
+        or block_threads > MAX_TUNED_NUM_THREADS
+        or block_threads % WARP_SIZE
+        or (rows_per_block > 1 and threads_per_row > WARP_SIZE)
+    ):
+        raise ValueError(
+            "row_groups_per_block must make complete wave64 groups within "
+            f"{MAX_TUNED_NUM_THREADS} threads, with at most one wave per row "
+            "when a block owns multiple rows"
+        )
     vecsize = config.vecsize
     num_vecs = config.num_vecs
     last_tile = config.num_tiles - 1
@@ -115,6 +131,9 @@ def build_rmsnorm_module(
     )
     non_temporal_input = plain_bf16_f32 and n in (4096, 8192)
     non_temporal_output = plain_bf16_f32 and n in (256, 512, 2048, 8192)
+    output_modifier = (
+        int(non_temporal_output) * 2 if output_cache_modifier is None else output_cache_modifier
+    )
     wide_full_tiles = num_vecs // threads_per_row
     wide_tail_vecs = num_vecs % threads_per_row
     # ``persistent_programs`` is the persistent block count. A block can own
@@ -142,6 +161,8 @@ def build_rmsnorm_module(
                 "persistent-row mode currently requires aligned BF16 input/output, "
                 "FP32 weight, and plain inference feature flags"
             )
+    if packed_flat_rows != persistent_single_pass:
+        raise ValueError("packed-flat rows and single-pass scheduling must be enabled together")
     # Lanes the row reduction shuffles over, and how many of those groups it
     # has to stitch together through LDS. A group wider than a wavefront only
     # happens when the row has a block to itself.
@@ -257,8 +278,27 @@ def build_rmsnorm_module(
             )
             return fx.logical_divide(buffer, fx.make_layout(per_access, 1))
 
-        input_div = row_div(input_tensor, input_bits, input_per_access)
-        output_div = row_div(output_tensor, output_bits, output_per_access)
+        def packed_div(tensor, elem_bits, per_access):
+            buffer_pointer = fx.rocdl.make_buffer_ptr(
+                fx.get_iter(tensor),
+                num_records_bytes=(num_programs * fx.Int32(n * (elem_bits // 8))),
+            )
+            flat = fx.make_view(
+                buffer_pointer,
+                fx.make_layout(num_programs * fx.Int32(n), 1),
+            )
+            return fx.logical_divide(flat, fx.make_layout(per_access, 1))
+
+        input_div = (
+            packed_div(input_tensor, input_bits, input_per_access)
+            if packed_flat_rows
+            else row_div(input_tensor, input_bits, input_per_access)
+        )
+        output_div = (
+            packed_div(output_tensor, output_bits, output_per_access)
+            if packed_flat_rows
+            else row_div(output_tensor, output_bits, output_per_access)
+        )
         input_copy = buffer_copy_atom(
             input_per_access * input_bits,
             input_bits,
@@ -267,7 +307,7 @@ def build_rmsnorm_module(
         output_copy = buffer_copy_atom(
             output_per_access * output_bits,
             output_bits,
-            cache_modifier=2 if non_temporal_output else 0,
+            cache_modifier=output_modifier,
         )
         if const_expr(has_residual):
             residual_div = row_div(residual_tensor, residual_bits, residual_per_access)
@@ -304,7 +344,6 @@ def build_rmsnorm_module(
             # above keeps unsupported feature combinations on the unchanged
             # one-row fallback.
             weight_local = []
-            initial_input = []
             for tile_i in range_constexpr(config.num_tiles):
                 index = lane + tile_i * threads_per_row
                 persistent_weight = load_dtype_vec(
@@ -318,15 +357,28 @@ def build_rmsnorm_module(
                 if const_expr(apply_weight_offset):
                     persistent_weight = persistent_weight + weight_offset
                 weight_local.append(persistent_weight)
-                initial_input.append(
-                    load_vec(
-                        input_copy,
-                        vecsize,
-                        input_dtype,
-                        input_div,
-                        index,
+
+            def load_persistent_input(input_row):
+                fragment = []
+                for tile_i in range_constexpr(config.num_tiles):
+                    index = lane + tile_i * threads_per_row
+                    row_index = (
+                        input_row * fx.Int32(num_vecs) + index
+                        if const_expr(packed_flat_rows)
+                        else index
                     )
-                )
+                    fragment.append(
+                        load_vec(
+                            input_copy,
+                            vecsize,
+                            input_dtype,
+                            input_div,
+                            row_index,
+                        )
+                    )
+                return fragment
+
+            initial_input = load_persistent_input(row)
 
             def prefetch_input(next_row, next_valid, fallback):
                 if const_expr(config.num_tiles == 1):
@@ -375,12 +427,8 @@ def build_rmsnorm_module(
                         next_input.append(next_value)
                 return next_input
 
-            for persistent_row, prefetched_input in range(
-                fx.Int32(program),
-                num_programs,
-                fx.Int32(persistent_row_stride),
-                init=initial_input,
-            ):
+            def process_persistent_row(persistent_row, prefetched_input, allow_prefetch):
+                next_input = prefetched_input
                 thread_sumsq = fx.Float32(0.0)
                 for tile_i in range_constexpr(config.num_tiles):
                     value = prefetched_input[tile_i].to(fx.Float32)
@@ -389,12 +437,13 @@ def build_rmsnorm_module(
                         fastmath=fast_math,
                     )
 
-                next_row = fx.Int32(persistent_row) + fx.Int32(persistent_row_stride)
-                next_valid = next_row < num_programs
+                if const_expr(allow_prefetch):
+                    next_row = fx.Int32(persistent_row) + fx.Int32(persistent_row_stride)
+                    next_valid = next_row < num_programs
                 # Batched lane groups issue the next row before their DPP tree
                 # and rsqrt. Single-row blocks retain the measured post-reduce
                 # placement below, including the wider barrier-backed rows.
-                if const_expr(rows_per_block > 1):
+                if const_expr(allow_prefetch and rows_per_block > 1):
                     next_input = prefetch_input(next_row, next_valid, prefetched_input)
 
                 sum_sq = row_reduce_add(
@@ -408,15 +457,24 @@ def build_rmsnorm_module(
                 # before this row's epilogue. Carrying the fragment through
                 # the loop SSA lets those loads overlap the multiply/store
                 # work without a barrier forcing their vmcnt to zero.
-                if const_expr(rows_per_block == 1):
+                if const_expr(allow_prefetch and rows_per_block == 1):
                     next_input = prefetch_input(next_row, next_valid, prefetched_input)
 
-                persistent_output_div = fx.logical_divide(
-                    row_buffer(output_tensor, persistent_row, output_bits, n),
-                    fx.make_layout(output_per_access, 1),
+                persistent_output_div = (
+                    output_div
+                    if const_expr(packed_flat_rows)
+                    else fx.logical_divide(
+                        row_buffer(output_tensor, persistent_row, output_bits, n),
+                        fx.make_layout(output_per_access, 1),
+                    )
                 )
                 for tile_i in range_constexpr(config.num_tiles):
                     index = lane + tile_i * threads_per_row
+                    output_index = (
+                        persistent_row * fx.Int32(num_vecs) + index
+                        if const_expr(packed_flat_rows)
+                        else index
+                    )
                     result = prefetched_input[tile_i].to(fx.Float32) * rrms * weight_local[tile_i]
                     store_dtype_vec(
                         output_copy,
@@ -430,9 +488,30 @@ def build_rmsnorm_module(
                             vecsize,
                         ),
                         persistent_output_div,
-                        index,
+                        output_index,
                         vecsize,
                     )
+                return next_input
+
+            if const_expr(persistent_single_pass):
+                process_persistent_row(
+                    fx.Int32(program),
+                    initial_input,
+                    False,
+                )
+                return
+
+            for persistent_row, prefetched_input in range(
+                fx.Int32(program),
+                num_programs,
+                fx.Int32(persistent_row_stride),
+                init=initial_input,
+            ):
+                next_input = process_persistent_row(
+                    persistent_row,
+                    prefetched_input,
+                    True,
+                )
                 _persistent_results = yield next_input
             return
 
@@ -882,6 +961,10 @@ def rmsnorm_direct(
     schema_version: fx.Constexpr[int],
     threads_per_row: fx.Constexpr[int],
     persistent_programs: fx.Constexpr[int] = 0,
+    row_groups_per_block: fx.Constexpr[int] = 0,
+    output_cache_modifier: fx.Constexpr[int] = -1,
+    persistent_single_pass: fx.Constexpr[bool] = False,
+    packed_flat_rows: fx.Constexpr[bool] = False,
     stream: fx.Stream = fx.Stream(None),  # noqa: B008 - required by FlyDSL's traced ABI
 ):
     """Specialize the existing forward builder through autotunable Constexpr inputs."""
@@ -908,6 +991,10 @@ def rmsnorm_direct(
         num_heads=num_heads,
         arch=arch,
         row_config=row_config,
+        row_groups_per_block=(row_groups_per_block if row_groups_per_block > 0 else None),
+        output_cache_modifier=(output_cache_modifier if output_cache_modifier >= 0 else None),
+        persistent_single_pass=persistent_single_pass,
+        packed_flat_rows=packed_flat_rows,
         persistent_rows=persistent_programs > 0,
         persistent_programs=persistent_programs,
     )

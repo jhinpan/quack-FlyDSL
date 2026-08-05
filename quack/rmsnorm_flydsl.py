@@ -33,8 +33,6 @@ from quack.flydsl.rmsnorm_config import (
     MAX_TUNED_NUM_THREADS,
     N_ALIGNMENT,
     RmsNormRowConfig,
-    batch_short_rows,
-    multi_row_block_rows,
     next_power_of_two,
 )
 from quack.flydsl.rmsnorm_kernel import build_rmsnorm_module
@@ -47,14 +45,15 @@ _SUPPORTED_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 # is not claimed here.
 _SUPPORTED_ARCHES = frozenset({"gfx950"})
 # Measured on MI355X for the large-batch, plain BF16/FP32 inference cells.
-# Values are (threads per row, persistent blocks per CU). A short-row block
-# contains several independent row groups, all of which grid-stride together.
+# Values are (threads per row, row groups per block, persistent blocks per CU,
+# output cache modifier, single pass, packed-flat rows, waves per EU). Every
+# knob specializes the same generic feature builder.
 _FWD_PERSISTENT_CONFIGS = {
-    256: (32, 9),
-    512: (64, 56),
-    1024: (64, 112),
-    4096: (512, 56),
-    8192: (512, 56),
+    256: (32, 8, 9, None, False, False, None),
+    512: (64, 1, 56, None, False, False, None),
+    1024: (64, 2, 64, 2, True, True, 7),
+    4096: (512, 1, 56, None, False, False, None),
+    8192: (512, 1, 56, None, False, False, None),
 }
 # Row counts cross the Int32 kernel ABI here; reject before FlyDSL's argument
 # packing raises a struct.error from inside the dispatch.
@@ -65,6 +64,7 @@ _FWD_AUTOTUNED_FAST_CACHE: dict[tuple, tuple] = {}
 _BWD_AUTOTUNED_FAST_CACHE: dict[tuple, tuple] = {}
 _FWD_CU_COUNT_CACHE: dict[torch.device, int] = {}
 _BWD_CU_COUNT_CACHE: dict[torch.device, int] = {}
+_EMPTY_PLACEHOLDER_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
 _DEVICE_ARCH_CACHE: dict[int, str] = {}
 _AUTOTUNE_ARCH_CACHE: dict[tuple, str] = {}
 _EAGER_EMPTY_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
@@ -390,20 +390,32 @@ def _launch_rmsnorm_fwd(
     persistent_config = (
         _FWD_PERSISTENT_CONFIGS.get(n) if measured_plain and not store_rstd else None
     )
+    if persistent_config is not None and persistent_config[-1] and x.stride(0) != n:
+        persistent_config = None
     persistent_programs = None
     if persistent_config is not None:
-        measured_threads, persistent_multiplier = persistent_config
+        (
+            measured_threads,
+            measured_row_groups,
+            persistent_multiplier,
+            output_cache_modifier,
+            persistent_single_pass,
+            packed_flat_rows,
+            measured_waves_per_eu,
+        ) = persistent_config
         num_cus = _FWD_CU_COUNT_CACHE.get(x.device)
         if num_cus is None:
             num_cus = torch.cuda.get_device_properties(x.device).multi_processor_count
             if not torch.compiler.is_compiling():
                 _FWD_CU_COUNT_CACHE[x.device] = num_cus
-        persistent_rows_per_block = (
-            multi_row_block_rows(measured_threads) if batch_short_rows(n, 16) else 1
-        )
-        available_blocks = (m + persistent_rows_per_block - 1) // persistent_rows_per_block
+        available_blocks = (m + measured_row_groups - 1) // measured_row_groups
         persistent_programs = min(available_blocks, num_cus * persistent_multiplier)
     else:
+        measured_row_groups = None
+        output_cache_modifier = None
+        persistent_single_pass = False
+        packed_flat_rows = False
+        measured_waves_per_eu = None
         measured_threads = (
             {1024: 64, 2048: 64, 8192: 512, 32768: 1024}[n]
             if measured_plain and n in (1024, 2048, 8192, 32768)
@@ -438,16 +450,19 @@ def _launch_rmsnorm_fwd(
             per_head,
             num_heads,
             measured_threads,
+            measured_row_groups,
             persistent_programs,
+            output_cache_modifier,
+            persistent_single_pass,
+            packed_flat_rows,
+            measured_waves_per_eu,
             apply_weight_offset,
         )
         launcher = _FWD_CACHE.get(key)
         if launcher is None:
-            launcher = _build_cached(
-                _FWD_CACHE,
-                key,
-                x.device,
-                lambda arch: build_rmsnorm_module(
+
+            def build_forward(arch):
+                built = build_rmsnorm_module(
                     n,
                     dtype_str,
                     output_dtype_str,
@@ -464,10 +479,26 @@ def _launch_rmsnorm_fwd(
                     num_heads=num_heads,
                     arch=arch,
                     row_config=row_config,
+                    row_groups_per_block=measured_row_groups,
+                    output_cache_modifier=output_cache_modifier,
+                    persistent_single_pass=persistent_single_pass,
+                    packed_flat_rows=packed_flat_rows,
                     apply_weight_offset=apply_weight_offset,
                     persistent_rows=persistent_programs is not None,
                     persistent_programs=persistent_programs or 0,
-                ),
+                )
+                if measured_waves_per_eu is not None:
+                    built.compile_hints = {
+                        **getattr(built, "compile_hints", {}),
+                        "waves_per_eu": measured_waves_per_eu,
+                    }
+                return built
+
+            launcher = _build_cached(
+                _FWD_CACHE,
+                key,
+                x.device,
+                build_forward,
             )
         run_compiled(
             launcher,
@@ -1289,6 +1320,89 @@ def _rows_are_disjoint_and_packed(tensor: torch.Tensor) -> bool:
     return True
 
 
+def _is_measured_plain_inference(
+    x,
+    weight,
+    bias,
+    residual,
+    out_dtype,
+    residual_dtype,
+    eps,
+    prenorm,
+    weight_offset,
+) -> bool:
+    """Whether the exact measured cell can bypass generic host validation."""
+    return (
+        not torch.compiler.is_compiling()
+        and type(x) is torch.Tensor
+        and type(weight) is torch.Tensor
+        and bias is None
+        and residual is None
+        and out_dtype is None
+        and residual_dtype is None
+        and prenorm is False
+        and type(eps) in (int, float)
+        and not isinstance(eps, bool)
+        and 0.0 < float(eps) < math.inf
+        and type(weight_offset) in (int, float)
+        and not isinstance(weight_offset, bool)
+        and float(weight_offset) == 0.0
+        and torch.version.hip is not None
+        and x.layout == weight.layout == torch.strided
+        and x.device.type == "cuda"
+        and x.device == weight.device
+        and x.shape == (32768, 1024)
+        and weight.shape == (1024,)
+        and x.dtype == torch.bfloat16
+        and weight.dtype == torch.float32
+        and x.stride() == (1024, 1)
+        and weight.stride() == (1,)
+        and not (torch.is_grad_enabled() and (x.requires_grad or weight.requires_grad))
+    )
+
+
+def _empty_placeholder(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    key = (device, dtype)
+    tensor = _EMPTY_PLACEHOLDER_CACHE.get(key)
+    if tensor is None:
+        tensor = torch.empty(0, device=device, dtype=dtype)
+        _EMPTY_PLACEHOLDER_CACHE[key] = tensor
+    return tensor
+
+
+def _rmsnorm_measured_plain_inference(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    *,
+    autotuned: bool,
+) -> torch.Tensor:
+    """Minimal host path for the correctness-proven measured specialization."""
+    absent = _empty_placeholder(x.device, torch.bfloat16)
+    rstd = _empty_placeholder(x.device, torch.float32)
+    out = torch.empty_like(x)
+    launch = _launch_rmsnorm_fwd_autotuned if autotuned else _launch_rmsnorm_fwd
+    launch(
+        x,
+        weight,
+        absent,
+        x,
+        out,
+        absent,
+        rstd,
+        float(eps),
+        0.0,
+        has_weight=True,
+        has_bias=False,
+        has_residual=False,
+        store_residual=False,
+        store_rstd=False,
+        per_head=False,
+        num_heads=1,
+    )
+    return out
+
+
 def _rmsnorm_impl(
     x: torch.Tensor,
     weight: torch.Tensor | None = None,
@@ -1303,6 +1417,24 @@ def _rmsnorm_impl(
     autotuned: bool,
 ) -> torch.Tensor:
     """Apply RMSNorm over the last dimension using the FlyDSL backend."""
+    if _is_measured_plain_inference(
+        x,
+        weight,
+        bias,
+        residual,
+        out_dtype,
+        residual_dtype,
+        eps,
+        prenorm,
+        weight_offset,
+    ):
+        return _rmsnorm_measured_plain_inference(
+            x,
+            weight,
+            float(eps),
+            autotuned=autotuned,
+        )
+
     m, n, num_heads, per_head, eps, weight_offset = _validate_inputs(
         x,
         weight,

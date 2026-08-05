@@ -835,9 +835,50 @@ def test_n256_target_pins_measured_forward_and_backward_geometries():
         torch.cuda.get_device_properties(x.device).multi_processor_count * 9,
     )
     persistent_geometries = {
-        key[-3:-1] for key in rmsnorm_flydsl_impl._FWD_CACHE if key[-2] is not None
+        key[-8:-5] for key in rmsnorm_flydsl_impl._FWD_CACHE if key[-6] is not None
     }
-    assert persistent_geometries == {(32, expected_blocks)}
+    assert persistent_geometries == {(32, 8, expected_blocks)}
+
+
+def test_n1024_target_packs_two_rows_per_persistent_block():
+    _clear_caches()
+    torch.manual_seed(30)
+    x = torch.randn((32768, 1024), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(1024, device="cuda", dtype=torch.float32)
+
+    actual = rmsnorm(x, weight)
+    row_indices = torch.tensor(
+        [0, 1, 2, 63, 127, 1023, 16383, 32766, 32767],
+        device=x.device,
+    )
+    _assert_close(
+        actual.index_select(0, row_indices),
+        _reference(x.index_select(0, row_indices), weight, 1e-6),
+    )
+
+    expected_blocks = min(
+        (x.shape[0] + 1) // 2,
+        torch.cuda.get_device_properties(x.device).multi_processor_count * 64,
+    )
+    assert {key[-8:-1] for key in rmsnorm_flydsl_impl._FWD_CACHE} == {
+        (64, 2, expected_blocks, 2, True, True, 7)
+    }
+
+    _clear_caches()
+    padded_storage = torch.randn(
+        (32768, 1027),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    padded = padded_storage[:, :1024]
+    padded_actual = rmsnorm(padded, weight)
+    _assert_close(
+        padded_actual.index_select(0, row_indices),
+        _reference(padded.index_select(0, row_indices), weight, 1e-6),
+    )
+    assert {key[-8:-1] for key in rmsnorm_flydsl_impl._FWD_CACHE} == {
+        (64, None, None, None, False, False, None)
+    }
 
 
 def test_compiled_rmsnorm_switches_from_plain_to_per_head():
@@ -1349,8 +1390,8 @@ def _direct_autotune_call_args(
     return args, kwargs
 
 
-def test_autotune_schema_four_and_candidates_retain_the_heuristic():
-    assert rmsnorm_autotune_impl.RMSNORM_AUTOTUNE_SCHEMA_VERSION == 4
+def test_autotune_schema_five_and_candidates_retain_the_heuristic():
+    assert rmsnorm_autotune_impl.RMSNORM_AUTOTUNE_SCHEMA_VERSION == 5
     for n, dtype_name in ((128, "bf16"), (512, "bf16"), (2048, "bf16"), (4096, "f32")):
         default = rmsnorm_autotune_impl.rmsnorm_default_config(
             n=n,
@@ -1368,14 +1409,31 @@ def test_autotune_schema_four_and_candidates_retain_the_heuristic():
 
 
 @pytest.mark.parametrize(
-    ("n", "threads", "blocks_per_cu", "rows_per_block"),
-    [(256, 32, 9, 8), (512, 64, 56, 1)],
+    (
+        "n",
+        "threads",
+        "blocks_per_cu",
+        "rows_per_block",
+        "output_cache_modifier",
+        "persistent_single_pass",
+        "packed_flat_rows",
+        "waves_per_eu",
+    ),
+    [
+        (256, 32, 9, 8, None, False, False, None),
+        (512, 64, 56, 1, None, False, False, None),
+        (1024, 64, 64, 2, 2, True, True, 7),
+    ],
 )
 def test_autotune_offers_persistent_candidate_for_supported_plain_shape(
     n,
     threads,
     blocks_per_cu,
     rows_per_block,
+    output_cache_modifier,
+    persistent_single_pass,
+    packed_flat_rows,
+    waves_per_eu,
 ):
     args, kwargs = _direct_autotune_call_args(n=n)
     args = args[:7] + (32768,) + args[8:]
@@ -1388,12 +1446,20 @@ def test_autotune_offers_persistent_candidate_for_supported_plain_shape(
     candidates = rmsnorm_autotune_impl.rmsnorm_search_configs(*args, **kwargs)
     num_cus = torch.cuda.get_device_properties(args[0].device).multi_processor_count
 
-    assert any(
-        config.kwargs.get("persistent_programs")
+    matching = [
+        config
+        for config in candidates
+        if config.kwargs.get("persistent_programs")
         == min((32768 + rows_per_block - 1) // rows_per_block, num_cus * blocks_per_cu)
         and config.kwargs["threads_per_row"] == threads
-        for config in candidates
-    )
+    ]
+    assert len(matching) == 1
+    candidate = matching[0]
+    assert candidate.kwargs["row_groups_per_block"] == rows_per_block
+    assert candidate.kwargs.get("output_cache_modifier") == output_cache_modifier
+    assert candidate.kwargs.get("persistent_single_pass", False) is persistent_single_pass
+    assert candidate.kwargs.get("packed_flat_rows", False) is packed_flat_rows
+    assert candidate.waves_per_eu == waves_per_eu
 
 
 def test_l2_rotation_clones_preserve_metadata_aliases_and_distinct_addresses():
@@ -2665,10 +2731,22 @@ def test_software_bf16_rounding_matches_the_hardware_convert():
 
 @pytest.mark.parametrize("weight_offset", [0.0, 1.0])
 @pytest.mark.parametrize(
-    ("m", "n", "num_programs", "row_threads", "pitch_pad"),
+    (
+        "m",
+        "n",
+        "num_programs",
+        "row_threads",
+        "row_groups_per_block",
+        "pitch_pad",
+        "output_cache_modifier",
+        "persistent_single_pass",
+        "packed_flat_rows",
+    ),
     [
-        pytest.param(65, 4096, 16, 512, 0, id="whole-block-rows"),
-        pytest.param(43, 256, 3, 32, 5, id="eight-lane-groups-padded"),
+        pytest.param(65, 4096, 16, 512, 1, 0, None, False, False, id="whole-block-rows"),
+        pytest.param(43, 256, 3, 32, 8, 5, None, False, False, id="eight-lane-groups-padded"),
+        pytest.param(67, 1024, 7, 64, 2, 3, 2, False, False, id="two-wave-blocks-padded"),
+        pytest.param(66, 1024, 33, 64, 2, 0, 2, True, True, id="packed-flat-two-wave-blocks"),
     ],
 )
 def test_persistent_forward_carries_prefetched_rows_correctly(
@@ -2676,7 +2754,11 @@ def test_persistent_forward_carries_prefetched_rows_correctly(
     n,
     num_programs,
     row_threads,
+    row_groups_per_block,
     pitch_pad,
+    output_cache_modifier,
+    persistent_single_pass,
+    packed_flat_rows,
     weight_offset,
 ):
     """Each row group must cover its odd grid-stride tail without OOB stores."""
@@ -2716,6 +2798,10 @@ def test_persistent_forward_carries_prefetched_rows_correctly(
             row_threads,
             max_num_threads=MAX_TUNED_NUM_THREADS,
         ),
+        row_groups_per_block=row_groups_per_block,
+        output_cache_modifier=output_cache_modifier,
+        persistent_single_pass=persistent_single_pass,
+        packed_flat_rows=packed_flat_rows,
         apply_weight_offset=weight_offset != 0.0,
         persistent_rows=True,
         persistent_programs=num_programs,
