@@ -33,6 +33,8 @@ from quack.flydsl.rmsnorm_config import (
     MAX_TUNED_NUM_THREADS,
     N_ALIGNMENT,
     RmsNormRowConfig,
+    batch_short_rows,
+    multi_row_block_rows,
     next_power_of_two,
 )
 from quack.flydsl.rmsnorm_kernel import build_rmsnorm_module
@@ -45,8 +47,10 @@ _SUPPORTED_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 # is not claimed here.
 _SUPPORTED_ARCHES = frozenset({"gfx950"})
 # Measured on MI355X for the large-batch, plain BF16/FP32 inference cells.
-# Values are (threads per row, persistent programs per CU).
+# Values are (threads per row, persistent blocks per CU). A short-row block
+# contains several independent row groups, all of which grid-stride together.
 _FWD_PERSISTENT_CONFIGS = {
+    256: (32, 9),
     512: (64, 56),
     1024: (64, 96),
     4096: (512, 56),
@@ -368,9 +372,7 @@ def _launch_rmsnorm_fwd(
         and not apply_weight_offset
     )
     persistent_config = (
-        _FWD_PERSISTENT_CONFIGS.get(n)
-        if measured_plain and not store_rstd
-        else None
+        _FWD_PERSISTENT_CONFIGS.get(n) if measured_plain and not store_rstd else None
     )
     persistent_programs = None
     if persistent_config is not None:
@@ -380,7 +382,11 @@ def _launch_rmsnorm_fwd(
             num_cus = torch.cuda.get_device_properties(x.device).multi_processor_count
             if not torch.compiler.is_compiling():
                 _FWD_CU_COUNT_CACHE[x.device] = num_cus
-        persistent_programs = min(m, num_cus * persistent_multiplier)
+        persistent_rows_per_block = (
+            multi_row_block_rows(measured_threads) if batch_short_rows(n, 16) else 1
+        )
+        available_blocks = (m + persistent_rows_per_block - 1) // persistent_rows_per_block
+        persistent_programs = min(available_blocks, num_cus * persistent_multiplier)
     else:
         measured_threads = (
             {1024: 64, 2048: 64, 8192: 512, 32768: 1024}[n]

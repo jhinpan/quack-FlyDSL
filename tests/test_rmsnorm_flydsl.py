@@ -808,8 +808,8 @@ def test_paired_raw_io_honors_row_pitch():
     _assert_grad_close(weight.grad, dweight_expected)
 
 
-def test_n256_target_pins_the_measured_two_stage_geometry():
-    """The public path uses the raw-row winner without paying tuner dispatch."""
+def test_n256_target_pins_measured_forward_and_backward_geometries():
+    """The public path uses both measured winners without tuner dispatch."""
     _clear_caches()
     torch.manual_seed(30)
     x = torch.randn(
@@ -822,8 +822,22 @@ def test_n256_target_pins_the_measured_two_stage_geometry():
     dout = torch.randn_like(x)
 
     torch.autograd.grad(rmsnorm(x, weight), (x, weight), dout)
+    inference_x = x.detach()
+    inference_weight = weight.detach()
+    _assert_close(
+        rmsnorm(inference_x, inference_weight),
+        _reference(inference_x, inference_weight, 1e-6),
+    )
 
     assert {key[-2:] for key in rmsnorm_flydsl_impl._BWD_CACHE} == {(2048, 8)}
+    expected_blocks = min(
+        (x.shape[0] + 7) // 8,
+        torch.cuda.get_device_properties(x.device).multi_processor_count * 9,
+    )
+    persistent_geometries = {
+        key[-3:-1] for key in rmsnorm_flydsl_impl._FWD_CACHE if key[-2] is not None
+    }
+    assert persistent_geometries == {(32, expected_blocks)}
 
 
 def test_compiled_rmsnorm_switches_from_plain_to_per_head():
@@ -2606,16 +2620,35 @@ def test_software_bf16_rounding_matches_the_hardware_convert():
 
 
 @pytest.mark.parametrize("weight_offset", [0.0, 1.0])
-def test_persistent_forward_carries_prefetched_rows_correctly(weight_offset):
-    """The compile-time persistent mode must cover every grid-stride row."""
+@pytest.mark.parametrize(
+    ("m", "n", "num_programs", "row_threads", "pitch_pad"),
+    [
+        pytest.param(65, 4096, 16, 512, 0, id="whole-block-rows"),
+        pytest.param(43, 256, 3, 32, 5, id="eight-lane-groups-padded"),
+    ],
+)
+def test_persistent_forward_carries_prefetched_rows_correctly(
+    m,
+    n,
+    num_programs,
+    row_threads,
+    pitch_pad,
+    weight_offset,
+):
+    """Each row group must cover its odd grid-stride tail without OOB stores."""
     from quack.flydsl.rmsnorm_common import run_compiled
     from quack.flydsl.rmsnorm_kernel import build_rmsnorm_module
 
     torch.manual_seed(31)
-    m, n, num_programs = 64, 4096, 16
-    x = torch.randn((m, n), device="cuda", dtype=torch.bfloat16)
+    input_storage = torch.randn(
+        (m, n + pitch_pad),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    x = input_storage[:, :n]
     weight = torch.randn(n, device="cuda", dtype=torch.float32)
-    out = torch.empty_like(x)
+    output_storage = torch.full_like(input_storage, 13.0)
+    out = output_storage[:, :n]
     absent = torch.empty(0, device="cuda", dtype=torch.bfloat16)
     rstd = torch.empty(0, device="cuda", dtype=torch.float32)
     launcher = build_rmsnorm_module(
@@ -2636,7 +2669,7 @@ def test_persistent_forward_carries_prefetched_rows_correctly(weight_offset):
         row_config=RmsNormRowConfig.with_num_threads(
             n,
             16,
-            512,
+            row_threads,
             max_num_threads=MAX_TUNED_NUM_THREADS,
         ),
         apply_weight_offset=weight_offset != 0.0,
@@ -2658,6 +2691,13 @@ def test_persistent_forward_carries_prefetched_rows_correctly(weight_offset):
         torch.cuda.current_stream().cuda_stream,
     )
     _assert_close(out, _reference(x, weight + weight_offset, 1e-6))
+    if pitch_pad:
+        torch.testing.assert_close(
+            output_storage[:, n:],
+            torch.full_like(output_storage[:, n:], 13.0),
+            rtol=0,
+            atol=0,
+        )
 
 
 def test_operands_larger_than_one_buffer_descriptor():

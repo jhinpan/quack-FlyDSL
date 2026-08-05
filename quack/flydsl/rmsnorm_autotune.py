@@ -31,12 +31,14 @@ from .rmsnorm_config import (
     MAX_TUNED_NUM_THREADS,
     RmsNormRowConfig,
     batch_short_rows,
+    multi_row_block_rows,
 )
 from .rmsnorm_kernel import rmsnorm_direct
 
 RMSNORM_AUTOTUNE_SCHEMA_VERSION = 4
 _WAVES_PER_EU = (None, 1, 2, 4)
 _PERSISTENT_FWD_CONFIGS = {
+    256: (32, 9),
     512: (64, 56),
     1024: (64, 96),
     4096: (512, 56),
@@ -138,10 +140,12 @@ def rmsnorm_search_configs(*args, **kwargs) -> list[Config]:
     ):
         threads, programs_per_cu = persistent
         num_cus = torch.cuda.get_device_properties(args[0].device).multi_processor_count
+        rows_per_block = multi_row_block_rows(threads) if batch_short_rows(n, 16) else 1
+        available_blocks = (int(args[7]) + rows_per_block - 1) // rows_per_block
         configs.append(
             Config(
                 threads_per_row=threads,
-                persistent_programs=min(int(args[7]), num_cus * programs_per_cu),
+                persistent_programs=min(available_blocks, num_cus * programs_per_cu),
             )
         )
     return configs
