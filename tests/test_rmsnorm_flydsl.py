@@ -861,7 +861,7 @@ def test_n1024_target_packs_two_rows_per_persistent_block():
         torch.cuda.get_device_properties(x.device).multi_processor_count * 64,
     )
     assert {key[-8:-1] for key in rmsnorm_flydsl_impl._FWD_CACHE} == {
-        (64, 2, expected_blocks, 2, True, True, 7)
+        (64, 2, expected_blocks, 3, True, True, 7)
     }
 
     _clear_caches()
@@ -1422,7 +1422,7 @@ def test_autotune_schema_five_and_candidates_retain_the_heuristic():
     [
         (256, 32, 9, 8, None, False, False, None),
         (512, 64, 56, 1, None, False, False, None),
-        (1024, 64, 64, 2, 2, True, True, 7),
+        (1024, 64, 64, 2, 3, True, True, 7),
     ],
 )
 def test_autotune_offers_persistent_candidate_for_supported_plain_shape(

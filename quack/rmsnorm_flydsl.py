@@ -51,7 +51,7 @@ _SUPPORTED_ARCHES = frozenset({"gfx950"})
 _FWD_PERSISTENT_CONFIGS = {
     256: (32, 8, 9, None, False, False, None),
     512: (64, 1, 56, None, False, False, None),
-    1024: (64, 2, 64, 2, True, True, 7),
+    1024: (64, 2, 64, 3, True, True, 7),
     4096: (512, 1, 56, None, False, False, None),
     8192: (512, 1, 56, None, False, False, None),
 }
