@@ -1,0 +1,202 @@
+# Copyright (c) 2026, Tri Dao.
+
+"""Focused public-contract coverage for the FlyDSL RMSNorm backend."""
+
+import importlib
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
+import pytest
+import torch
+
+if torch.version.hip is None:
+    pytest.skip("FlyDSL RMSNorm requires a ROCm PyTorch build", allow_module_level=True)
+
+pytest.importorskip("flydsl")
+
+ROOT = Path(__file__).resolve().parents[1]
+EPS = 1e-6
+quack = importlib.import_module("quack")
+rmsnorm = quack.rmsnorm
+
+
+def _reference(
+    x,
+    weight=None,
+    bias=None,
+    residual=None,
+    *,
+    eps=EPS,
+    weight_offset=0.0,
+    out_dtype=None,
+    residual_dtype=None,
+):
+    value = x.float()
+    if residual is not None:
+        value = value + residual.float()
+    output = value * torch.rsqrt(value.square().mean(dim=-1, keepdim=True) + eps)
+    if weight is not None:
+        output = output * (weight.float() + weight_offset)
+    if bias is not None:
+        output = output + bias.float()
+    output = output.to(x.dtype if out_dtype is None else out_dtype)
+    residual_out = value.to(
+        residual_dtype
+        if residual_dtype is not None
+        else (residual.dtype if residual is not None else x.dtype)
+    )
+    return output, residual_out
+
+
+def _assert_close(actual, expected):
+    if actual.dtype == torch.float32:
+        torch.testing.assert_close(actual, expected, rtol=2e-4, atol=2e-5)
+    else:
+        torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+
+def _assert_grad_close(actual, expected):
+    if actual.dtype == torch.float32:
+        torch.testing.assert_close(actual, expected, rtol=5e-3, atol=5e-3)
+    else:
+        torch.testing.assert_close(actual, expected, rtol=3e-2, atol=3e-2)
+
+
+def test_package_export_is_lazy_and_matches_the_cute_signature():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent(
+                """
+                import ast
+                import inspect
+                import sys
+                from pathlib import Path
+
+                import torch
+
+                assert torch.version.hip is not None
+                import quack
+
+                assert "quack.rmsnorm" not in sys.modules
+                assert "quack.rmsnorm_flydsl" not in sys.modules
+                assert not any(
+                    name == "flydsl" or name.startswith("flydsl.") for name in sys.modules
+                )
+
+                public = quack.rmsnorm
+                assert public is quack.rmsnorm
+                assert public.__module__ == "quack.rmsnorm_flydsl"
+                assert "quack.rmsnorm" not in sys.modules
+                assert "quack.rmsnorm_flydsl" in sys.modules
+
+                source = Path(quack.__file__).with_name("rmsnorm.py").read_text()
+                upstream = next(
+                    node
+                    for node in ast.parse(source).body
+                    if isinstance(node, ast.FunctionDef) and node.name == "rmsnorm"
+                )
+                names = [argument.arg for argument in upstream.args.args]
+                defaults = [ast.unparse(default) for default in upstream.args.defaults]
+                expected_defaults = dict(zip(names[-len(defaults):], defaults))
+                ours = inspect.signature(public).parameters
+
+                assert list(ours) == names
+                for name, default in expected_defaults.items():
+                    assert repr(ours[name].default) == default, name
+                """
+            ),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_forward_matches_fp32_reference():
+    torch.manual_seed(0)
+    x = torch.randn((3, 1024), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(1024, device=x.device, dtype=torch.float32)
+
+    actual = rmsnorm(x, weight, eps=1e-5)
+    expected, _ = _reference(x, weight, eps=1e-5)
+
+    assert actual.shape == x.shape
+    assert actual.dtype == x.dtype
+    _assert_close(actual, expected)
+
+
+def test_backward_matches_reference_and_is_deterministic():
+    torch.manual_seed(1)
+    x = torch.randn((64, 760), device="cuda", dtype=torch.bfloat16) * 0.5
+    weight = 1.0 + torch.randn(760, device=x.device, dtype=torch.float32) * 0.1
+    dout = torch.randn_like(x) * 0.1
+
+    def run():
+        x_i = x.detach().clone().requires_grad_(True)
+        weight_i = weight.detach().clone().requires_grad_(True)
+        output = rmsnorm(x_i, weight_i)
+        output.backward(dout)
+        return output.detach(), x_i.grad, weight_i.grad
+
+    was_deterministic = torch.are_deterministic_algorithms_enabled()
+    torch.use_deterministic_algorithms(True)
+    try:
+        first = run()
+        second = run()
+    finally:
+        torch.use_deterministic_algorithms(was_deterministic)
+
+    x_ref = x.float().detach().requires_grad_(True)
+    weight_ref = weight.float().detach().requires_grad_(True)
+    output_ref, _ = _reference(x_ref, weight_ref)
+    dx_ref, dweight_ref = torch.autograd.grad(
+        output_ref,
+        (x_ref, weight_ref),
+        dout.float(),
+    )
+
+    _assert_close(first[0], output_ref.to(first[0].dtype))
+    _assert_grad_close(first[1], dx_ref.to(first[1].dtype))
+    _assert_grad_close(first[2], dweight_ref.to(first[2].dtype))
+    for original, repeated in zip(first, second):
+        torch.testing.assert_close(original, repeated, rtol=0.0, atol=0.0)
+
+
+def test_per_head_bias_residual_and_prenorm_contract():
+    torch.manual_seed(2)
+    x = torch.randn((2, 3, 4, 64), device="cuda", dtype=torch.bfloat16)
+    residual = torch.randn_like(x)
+    weight = torch.randn((4, 64), device=x.device, dtype=torch.float32)
+    bias = torch.randn_like(weight)
+
+    actual, residual_out = rmsnorm(
+        x,
+        weight,
+        bias=bias,
+        residual=residual,
+        out_dtype=torch.float16,
+        residual_dtype=torch.float32,
+        prenorm=True,
+        weight_offset=1.0,
+    )
+    expected, expected_residual = _reference(
+        x,
+        weight,
+        bias,
+        residual,
+        out_dtype=torch.float16,
+        residual_dtype=torch.float32,
+        weight_offset=1.0,
+    )
+
+    assert actual.dtype == torch.float16
+    assert residual_out.dtype == torch.float32
+    _assert_close(actual, expected)
+    _assert_close(residual_out, expected_residual)
