@@ -93,6 +93,27 @@ The FlyDSL-specific advanced entry point
 autotuning and searches only when `FLYDSL_AUTOTUNE=1` is set. Design notes and
 measured results are in [AI/flydsl_rmsnorm_notes.md](AI/flydsl_rmsnorm_notes.md).
 
+Reproduce the complete 11-shape forward/backward comparison with one command:
+
+```bash
+HIP_VISIBLE_DEVICES=<idle-gfx950-gpu> PYTHONPATH=$PWD \
+  python benchmarks/reproduce_rmsnorm_flydsl.py \
+  --output-dir /root/artifacts/rmsnorm-$(git rev-parse --short HEAD)
+```
+
+The runner compares analytical FlyDSL, autotuned FlyDSL, and `torch.compile`
+in one process, correctness-gates every cell, runs both device profiles and
+order-balanced public timing, and rejects a noisy bandwidth canary. The output
+directory contains the raw CSVs, joined strict-gate contracts, autotune
+artifacts, `environment.json`, `summary.json`, the exact reproduction command,
+and the complete log. It also verifies that `quack` resolves to this checkout
+instead of an installed wheel.
+
+The package extra intentionally accepts the FlyDSL 0.3 API line
+(`flydsl>=0.3,<0.4`). Always quote the exact distribution build recorded in
+`environment.json`; a nightly such as `0.3.0.dev765` is not the exact
+`0.3.0` release even though `flydsl.__version__` reports `0.3.0`.
+
 ## Documentations
 
 - [JAX interface](docs/jax.md) — optional `jax` + `jax-tvm-ffi` bindings, see `quack/softmax_jax.py` for an example.
