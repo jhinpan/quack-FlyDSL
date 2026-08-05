@@ -1333,8 +1333,17 @@ def test_autotune_schema_four_and_candidates_retain_the_heuristic():
         )
 
 
-def test_autotune_offers_persistent_candidate_for_supported_plain_shape():
-    args, kwargs = _direct_autotune_call_args(n=512)
+@pytest.mark.parametrize(
+    ("n", "threads", "blocks_per_cu", "rows_per_block"),
+    [(256, 32, 9, 8), (512, 64, 56, 1)],
+)
+def test_autotune_offers_persistent_candidate_for_supported_plain_shape(
+    n,
+    threads,
+    blocks_per_cu,
+    rows_per_block,
+):
+    args, kwargs = _direct_autotune_call_args(n=n)
     args = args[:7] + (32768,) + args[8:]
     kwargs.update(
         input_dtype_str="bf16",
@@ -1346,8 +1355,9 @@ def test_autotune_offers_persistent_candidate_for_supported_plain_shape():
     num_cus = torch.cuda.get_device_properties(args[0].device).multi_processor_count
 
     assert any(
-        config.kwargs.get("persistent_programs") == min(32768, num_cus * 56)
-        and config.kwargs["threads_per_row"] == 64
+        config.kwargs.get("persistent_programs")
+        == min((32768 + rows_per_block - 1) // rows_per_block, num_cus * blocks_per_cu)
+        and config.kwargs["threads_per_row"] == threads
         for config in candidates
     )
 
