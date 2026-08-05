@@ -2772,7 +2772,7 @@ def test_the_staged_backward_does_not_recompile_per_batch_size():
         _, dx_expected, _ = _reference_with_grads(x, weight, dout, 1e-6)
         _assert_grad_close(x.grad, dx_expected)
 
-    programs = {key[-1] for key in rmsnorm_flydsl_impl._BWD_CACHE}
+    programs = {key[-2] for key in rmsnorm_flydsl_impl._BWD_CACHE}
     assert programs, "expected at least one staged backward build"
     assert all(p & (p - 1) == 0 for p in programs), (
         f"num_programs must be a power of two: {programs}"
@@ -3376,6 +3376,7 @@ def test_a_persisted_singleton_artifact_cannot_be_loaded_for_another_row_count(
     tuner._artifact_cache.clear()
     tuner.cache.clear()
     tuner._hot_cache.clear()
+    rmsnorm_flydsl_impl._FWD_AUTOTUNED_FAST_CACHE.clear()
     monkeypatch.delenv("FLYDSL_AUTOTUNE")
 
     loaded = []
