@@ -1038,6 +1038,7 @@ def _clear_caches():
     rmsnorm_flydsl_impl._BWD_CACHE.clear()
     rmsnorm_flydsl_impl._FWD_AUTOTUNED_FAST_CACHE.clear()
     rmsnorm_flydsl_impl._BWD_AUTOTUNED_FAST_CACHE.clear()
+    rmsnorm_flydsl_impl._EAGER_EMPTY_CACHE.clear()
     rmsnorm_flydsl_impl._FWD_CU_COUNT_CACHE.clear()
     rmsnorm_flydsl_impl._BWD_CU_COUNT_CACHE.clear()
     rmsnorm_flydsl_impl._DEVICE_ARCH_CACHE.clear()
@@ -1132,6 +1133,7 @@ def test_custom_ops_are_unique_mutation_only_and_fake_safe():
 
 
 def test_eager_fast_path_bypasses_custom_op_dispatch():
+    _clear_caches()
     x = torch.randn(
         (4, 136),
         device="cuda",
@@ -1147,6 +1149,7 @@ def test_eager_fast_path_bypasses_custom_op_dispatch():
     with _FlyDSLOpCounter() as counter:
         rmsnorm(x, weight).sum().backward()
     assert counter.count == 0
+    assert not rmsnorm_flydsl_impl._EAGER_EMPTY_CACHE
 
 
 def test_eager_no_grad_inputs_bypass_autograd_function(monkeypatch):
@@ -1158,6 +1161,36 @@ def test_eager_no_grad_inputs_bypass_autograd_function(monkeypatch):
 
     monkeypatch.setattr(rmsnorm_flydsl_impl._RMSNormFunction, "apply", forbid_apply)
     _assert_close(rmsnorm(x, weight), _reference(x, weight, 1e-6))
+
+
+def test_eager_no_grad_reuses_internal_empty_placeholders(monkeypatch):
+    _clear_caches()
+    x = torch.randn((8, 136), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(136, device="cuda", dtype=torch.float32)
+    seen = []
+    original = rmsnorm_flydsl_impl._eager_empty
+
+    def record(device, dtype):
+        result = original(device, dtype)
+        seen.append((device, dtype, result))
+        return result
+
+    monkeypatch.setattr(rmsnorm_flydsl_impl, "_eager_empty", record)
+    first = rmsnorm(x, weight)
+    second = rmsnorm(x.clone(), weight.clone())
+
+    _assert_close(first, _reference(x, weight, 1e-6))
+    _assert_close(second, _reference(x, weight, 1e-6))
+    for dtype, expected_calls in ((torch.bfloat16, 4), (torch.float32, 2)):
+        placeholders = [tensor for _, seen_dtype, tensor in seen if seen_dtype == dtype]
+        assert len(placeholders) == expected_calls
+        assert all(tensor is placeholders[0] for tensor in placeholders)
+        assert placeholders[0].numel() == 0
+        assert placeholders[0].device == x.device
+    assert set(rmsnorm_flydsl_impl._EAGER_EMPTY_CACHE) == {
+        (x.device, torch.bfloat16),
+        (x.device, torch.float32),
+    }
 
 
 def test_fullgraph_forward_backward_cold_and_warm_cache():
@@ -1213,6 +1246,7 @@ def test_fullgraph_forward_backward_cold_and_warm_cache():
     assert next(iter(rmsnorm_flydsl_impl._BWD_CACHE.values())) is bwd_launcher
     assert fwd_launcher._cf is fwd_compiled
     assert bwd_launcher._cf is bwd_compiled
+    assert not rmsnorm_flydsl_impl._EAGER_EMPTY_CACHE
 
 
 def test_fullgraph_two_stage_backward():

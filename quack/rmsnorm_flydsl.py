@@ -67,6 +67,7 @@ _FWD_CU_COUNT_CACHE: dict[torch.device, int] = {}
 _BWD_CU_COUNT_CACHE: dict[torch.device, int] = {}
 _DEVICE_ARCH_CACHE: dict[int, str] = {}
 _AUTOTUNE_ARCH_CACHE: dict[tuple, str] = {}
+_EAGER_EMPTY_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
 _AUTOTUNE_TARGET_ENV_VARS = (
     "FLYDSL_COMPILE_BACKEND",
     "ARCH",
@@ -264,6 +265,21 @@ def _validate_inputs(
 
 def _current_raw_stream(device: torch.device) -> int:
     return torch.cuda.current_stream(device).cuda_stream
+
+
+def _eager_empty(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """Reuse an internal zero-sized placeholder for eager inference.
+
+    A zero-sized tensor owns no device storage, and callers never observe these
+    placeholders. Sharing one per device and dtype therefore removes allocator
+    dispatch without creating stream dependencies or cross-device pointers.
+    """
+    key = (device, dtype)
+    result = _EAGER_EMPTY_CACHE.get(key)
+    if result is None:
+        result = torch.empty(0, device=device, dtype=dtype)
+        _EAGER_EMPTY_CACHE[key] = result
+    return result
 
 
 def _env_flag_enabled(name: str) -> bool:
@@ -1321,27 +1337,33 @@ def _rmsnorm_impl(
     last_shape = (num_heads, n) if per_head else (n,)
     x_flat = _packed_rows(x.reshape(-1, *last_shape))
 
+    needs_grad = torch.is_grad_enabled() and any(
+        tensor is not None and tensor.requires_grad for tensor in (x, weight, bias, residual)
+    )
+    eager_no_grad = not torch.compiler.is_compiling() and not needs_grad
     # An absent weight or bias still has to be passed, because the custom op
-    # schema is fixed. The kernels build no descriptor for it, so an empty
-    # tensor is enough and keeps the allocation off every call.
-    absent = torch.empty(0, device=x.device, dtype=x.dtype)
+    # schema is fixed. The kernels build no descriptor for it, so eager
+    # inference can safely share an internal zero-sized tensor. Keep the
+    # custom-op/autograd path's placeholder call-local.
+    absent = (
+        _eager_empty(x.device, x.dtype)
+        if eager_no_grad
+        else torch.empty(0, device=x.device, dtype=x.dtype)
+    )
     weight_arg = _packed_rows(weight) if weight is not None else absent
     bias_arg = _packed_rows(bias) if bias is not None else absent
     residual_arg = (
         _packed_rows(residual.reshape(-1, *last_shape)) if residual is not None else x_flat
     )
-    needs_grad = torch.is_grad_enabled() and any(
-        tensor is not None and tensor.requires_grad for tensor in (x, weight, bias, residual)
-    )
-    if not torch.compiler.is_compiling() and not needs_grad:
+    if eager_no_grad:
         store_residual = prenorm
         out = torch.empty_like(x_flat, dtype=output_dtype)
         residual_out = (
             torch.empty_like(x_flat, dtype=residual_out_dtype)
             if store_residual
-            else torch.empty(0, device=x.device, dtype=residual_out_dtype)
+            else _eager_empty(x.device, residual_out_dtype)
         )
-        rstd = torch.empty(0, device=x.device, dtype=torch.float32)
+        rstd = _eager_empty(x.device, torch.float32)
         launch = _launch_rmsnorm_fwd_autotuned if autotuned else _launch_rmsnorm_fwd
         launch(
             x_flat,
