@@ -114,7 +114,7 @@ def build_rmsnorm_module(
         and not per_head
     )
     non_temporal_input = plain_bf16_f32 and n in (4096, 8192)
-    non_temporal_output = plain_bf16_f32 and n in (256, 512, 8192)
+    non_temporal_output = plain_bf16_f32 and n in (256, 512, 2048, 8192)
     wide_full_tiles = num_vecs // threads_per_row
     wide_tail_vecs = num_vecs % threads_per_row
     # ``persistent_programs`` is the persistent block count. A block can own
