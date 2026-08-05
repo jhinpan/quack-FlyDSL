@@ -38,7 +38,7 @@ RMSNORM_AUTOTUNE_SCHEMA_VERSION = 4
 _WAVES_PER_EU = (None, 1, 2, 4)
 _PERSISTENT_FWD_CONFIGS = {
     512: (64, 56),
-    1024: (64, 56),
+    1024: (64, 96),
     4096: (512, 56),
     8192: (512, 56),
 }

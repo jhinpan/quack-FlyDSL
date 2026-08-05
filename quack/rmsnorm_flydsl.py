@@ -48,7 +48,7 @@ _SUPPORTED_ARCHES = frozenset({"gfx950"})
 # Values are (threads per row, persistent programs per CU).
 _FWD_PERSISTENT_CONFIGS = {
     512: (64, 56),
-    1024: (64, 56),
+    1024: (64, 96),
     4096: (512, 56),
     8192: (512, 56),
 }
