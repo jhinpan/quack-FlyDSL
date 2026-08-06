@@ -8,6 +8,7 @@ on:
       - "quack/rmsnorm.py"
       - "quack/rmsnorm_flydsl.py"
       - "quack/flydsl/**"
+      - "benchmarks/reproduce_rmsnorm_flydsl.py"
   push:
     paths:
       - ".github/workflows/flydsl-compat.yml"
@@ -16,6 +17,7 @@ on:
       - "quack/rmsnorm.py"
       - "quack/rmsnorm_flydsl.py"
       - "quack/flydsl/**"
+      - "benchmarks/reproduce_rmsnorm_flydsl.py"
   schedule:
     - cron: "17 8 * * 1"
   workflow_dispatch:
