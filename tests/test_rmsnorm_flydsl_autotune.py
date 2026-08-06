@@ -8,7 +8,7 @@ import torch
 if torch.version.hip is None:
     pytest.skip("FlyDSL RMSNorm requires a ROCm PyTorch build", allow_module_level=True)
 
-pytest.importorskip("flydsl")
+pytest.importorskip("flydsl.compiler")
 
 import quack.flydsl.rmsnorm_autotune as autotune
 from quack.flydsl.rmsnorm_config import (
@@ -125,13 +125,10 @@ def test_selected_config_launch_passes_the_correctness_gate(tmp_path, monkeypatc
     torch.manual_seed(0)
     tuner = autotune._rmsnorm_fwd_tuner
     monkeypatch.setenv("FLYDSL_AUTOTUNE_CONFIG_DIR", str(tmp_path))
-    for cache_name in (
-        "_compiled_cache",
-        "_compiled_lookup",
-        "_device_jit_functions",
-        "_hot_cache",
-    ):
-        getattr(tuner, cache_name).clear()
+    tuner._compiled_cache.clear()
+    tuner._compiled_lookup.clear()
+    tuner._device_jit_functions.clear()
+    tuner._hot_cache.clear()
 
     args, kwargs = _direct_call(rows=5, n=512)
     config = autotune.rmsnorm_default_config(*args, **kwargs)

@@ -8,6 +8,7 @@
 
 import math
 import threading
+import weakref
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -29,6 +30,35 @@ WARP_SIZE = WAVE_SIZE
 # rare and already tens of milliseconds, so one lock costs nothing and keeps
 # concurrent first calls out of the compiler's global state.
 FLYDSL_BUILD_LOCK = threading.RLock()
+
+# Keep compiled callables owned by this consumer, not on FlyDSL's private
+# objects. Identity keys avoid equality/hash aliases, while weak references
+# release generated launchers and their code when callers do.
+_COMPILED_CALLABLES_LOCK = threading.Lock()
+_COMPILED_CALLABLES = {}
+
+
+def _cached_callable(executable):
+    key = id(executable)
+    with _COMPILED_CALLABLES_LOCK:
+        entry = _COMPILED_CALLABLES.get(key)
+        if entry is not None and entry[0]() is executable:
+            return entry[1]
+    return None
+
+
+def _cache_callable(executable, compiled) -> None:
+    key = id(executable)
+
+    def remove(reference):
+        with _COMPILED_CALLABLES_LOCK:
+            entry = _COMPILED_CALLABLES.get(key)
+            if entry is not None and entry[0] is reference:
+                del _COMPILED_CALLABLES[key]
+
+    reference = weakref.ref(executable, remove)
+    with _COMPILED_CALLABLES_LOCK:
+        _COMPILED_CALLABLES[key] = (reference, compiled)
 
 
 def dtype_to_elem_type(dtype_str: str):
@@ -62,16 +92,18 @@ def has_hw_bf16_convert(arch: str) -> bool:
 
 def run_compiled(executable, *args) -> None:
     """Compile-and-run once, then dispatch through the cached callable."""
-    compiled = getattr(executable, "_cf", None)
+    compiled = _cached_callable(executable)
     if compiled is not None:
         compiled(*args)
         return
     with FLYDSL_BUILD_LOCK:
-        if getattr(executable, "_cf", None) is None:
+        compiled = _cached_callable(executable)
+        if compiled is None:
             # flyc.compile performs the first launch as well as the codegen.
-            executable._cf = flyc.compile(executable, *args)
+            compiled = flyc.compile(executable, *args)
+            _cache_callable(executable, compiled)
             return
-    executable._cf(*args)
+    compiled(*args)
 
 
 _BUFFER_COPY_OPS = {
@@ -164,6 +196,8 @@ def make_reduction_storage(red_slots: int):
     return SharedStorage
 
 
+# API-stability waiver: FlyDSL has no stable update_dpp/ds_swizzle wrapper;
+# these raw ROCDL ops avoid LDS traffic and barriers in this hot reduction.
 def _dpp_shuffle_xor(value, offset: int):
     """Exchange an fp32 value within each 16-lane DPP row."""
     raw = value.ir_value()
@@ -207,8 +241,9 @@ def shuffle_reduce_add(value, lanes: int, shuffle_width, fast_math):
         elif lanes in (32, 64) and offset == 16:
             peer = _ds_swizzle_xor(result, offset)
         else:
-            peer = result.shuffle_xor(offset, shuffle_width)
-        result = result.addf(peer, fastmath=fast_math)
+            peer = fx.gpu.shuffle_xor(result, offset, shuffle_width)
+        with fx.arith.fastmath(fast_math):
+            result = result + peer
     return result
 
 

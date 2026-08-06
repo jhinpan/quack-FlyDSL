@@ -21,7 +21,7 @@ from flydsl.autotune import (
     _toolchain_fingerprint,
     _tuning_enabled,
 )
-from flydsl.compiler.jit_function import CompiledFunction
+from flydsl.compiler import CompiledFunction
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import Constexpr
 from flydsl.utils import env
