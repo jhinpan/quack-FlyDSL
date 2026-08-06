@@ -520,15 +520,13 @@ def build_rmsnorm_bwd_two_stage_module(
                 combined_dweight = []
                 for lane in range_constexpr(values_per_thread):
                     value = final_dweight[lane]
-                    combined_dweight.append(
-                        value.addf(
-                            value.shuffle_xor(
-                                partial_threads_per_row,
-                                WARP_SIZE,
-                            ),
-                            fastmath=fast_math,
+                    with arith.fastmath(fast_math):
+                        combined = value + gpu.shuffle_xor(
+                            value,
+                            partial_threads_per_row,
+                            WARP_SIZE,
                         )
-                    )
+                    combined_dweight.append(combined)
                 final_dweight = fx.Vector.from_elements(
                     combined_dweight,
                     fx.Float32,
@@ -537,15 +535,13 @@ def build_rmsnorm_bwd_two_stage_module(
                 combined_dbias = []
                 for lane in range_constexpr(values_per_thread):
                     value = final_dbias[lane]
-                    combined_dbias.append(
-                        value.addf(
-                            value.shuffle_xor(
-                                partial_threads_per_row,
-                                WARP_SIZE,
-                            ),
-                            fastmath=fast_math,
+                    with arith.fastmath(fast_math):
+                        combined = value + gpu.shuffle_xor(
+                            value,
+                            partial_threads_per_row,
+                            WARP_SIZE,
                         )
-                    )
+                    combined_dbias.append(combined)
                 final_dbias = fx.Vector.from_elements(
                     combined_dbias,
                     fx.Float32,
@@ -1203,10 +1199,12 @@ def build_rmsnorm_bwd_two_stage_module(
             if const_expr(compute_dweight):
                 reduced_dweight = dweight_total
                 for offset in (32, 16, 8):
-                    reduced_dweight = reduced_dweight.addf(
-                        reduced_dweight.shuffle_xor(offset, WARP_SIZE),
-                        fastmath=fast_math,
-                    )
+                    with arith.fastmath(fast_math):
+                        reduced_dweight = reduced_dweight + gpu.shuffle_xor(
+                            reduced_dweight,
+                            offset,
+                            WARP_SIZE,
+                        )
                 if wave_lane < parameter_reduce_cols:
                     fx.memref_store(
                         reduced_dweight,
@@ -1216,10 +1214,12 @@ def build_rmsnorm_bwd_two_stage_module(
             if const_expr(compute_dbias):
                 reduced_dbias = dbias_total
                 for offset in (32, 16, 8):
-                    reduced_dbias = reduced_dbias.addf(
-                        reduced_dbias.shuffle_xor(offset, WARP_SIZE),
-                        fastmath=fast_math,
-                    )
+                    with arith.fastmath(fast_math):
+                        reduced_dbias = reduced_dbias + gpu.shuffle_xor(
+                            reduced_dbias,
+                            offset,
+                            WARP_SIZE,
+                        )
                 if wave_lane < parameter_reduce_cols:
                     fx.memref_store(
                         reduced_dbias,
@@ -1237,10 +1237,12 @@ def build_rmsnorm_bwd_two_stage_module(
                         fx.Float32(0.0),
                     )
                     for offset in (16, 8):
-                        total = total.addf(
-                            total.shuffle_xor(offset, WARP_SIZE),
-                            fastmath=fast_math,
-                        )
+                        with arith.fastmath(fast_math):
+                            total = total + gpu.shuffle_xor(
+                                total,
+                                offset,
+                                WARP_SIZE,
+                            )
                     if wave_lane < parameter_reduce_cols:
                         store_scalar(
                             dweight_copy,
@@ -1259,10 +1261,12 @@ def build_rmsnorm_bwd_two_stage_module(
                         fx.Float32(0.0),
                     )
                     for offset in (16, 8):
-                        total = total.addf(
-                            total.shuffle_xor(offset, WARP_SIZE),
-                            fastmath=fast_math,
-                        )
+                        with arith.fastmath(fast_math):
+                            total = total + gpu.shuffle_xor(
+                                total,
+                                offset,
+                                WARP_SIZE,
+                            )
                     if wave_lane < parameter_reduce_cols:
                         store_scalar(
                             dbias_copy,

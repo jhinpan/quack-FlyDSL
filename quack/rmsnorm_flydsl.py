@@ -89,7 +89,7 @@ def _normalize_arch(arch: str) -> str:
 
 def _flydsl_compile_target() -> tuple[str, str]:
     """Ask FlyDSL what it will actually generate code for."""
-    from flydsl.compiler.backends import get_backend
+    from flydsl.compiler import get_backend
 
     target = get_backend().target
     return target.backend, _normalize_arch(target.arch)
@@ -480,7 +480,7 @@ def _launch_rmsnorm_fwd(
                 )
                 if measured_waves_per_eu is not None:
                     built.compile_hints = {
-                        **getattr(built, "compile_hints", {}),
+                        **built.compile_hints,
                         "waves_per_eu": measured_waves_per_eu,
                     }
                 return built
