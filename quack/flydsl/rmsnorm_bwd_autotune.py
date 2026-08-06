@@ -4,6 +4,7 @@
 
 import os
 from dataclasses import dataclass
+from functools import cache
 
 import torch
 from flydsl.autotune import Config, _env_fingerprint, _toolchain_fingerprint
@@ -31,6 +32,11 @@ _MAX_WORKSPACE_BYTES = 4 * 1024**3
 _CORRECTNESS_ROWS = 16
 _SMALL_N_MAX = 1024
 _SMALL_N_PROGRAMS_PER_CU = (2, 4, 6, 8, 12)
+
+
+@cache
+def _cached_toolchain_fingerprint() -> str:
+    return _toolchain_fingerprint()
 
 
 def _call_values(args, kwargs):
@@ -395,15 +401,13 @@ class RmsNormBwdAutotuner(RmsNormAutotuner):
             self._active_call.bwd_expected = None
 
     def _hot_key(self, args, kwargs):
-        if self._toolchain_key is None:
-            self._toolchain_key = _toolchain_fingerprint()
         explicit = (args[12],) + tuple(kwargs[name] for name in self.key[1:])
         effective_hints = self.fn._effective_compile_hints()
         return (
             ("explicit", explicit),
             ("device", args[0].device.type, args[0].device.index),
             ("env", _env_fingerprint()),
-            ("toolchain", self._toolchain_key),
+            ("toolchain", _cached_toolchain_fingerprint()),
             ("device_fingerprint", os.environ.get("FLYDSL_GPU_ARCH", "")),
             ("compile_hints", _typed_identity(effective_hints)),
             ("process_context", self._process_context_key()),
