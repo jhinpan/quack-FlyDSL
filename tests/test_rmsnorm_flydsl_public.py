@@ -14,7 +14,12 @@ import torch
 if torch.version.hip is None:
     pytest.skip("FlyDSL RMSNorm requires a ROCm PyTorch build", allow_module_level=True)
 
-pytest.importorskip("flydsl.compiler")
+try:
+    import flydsl.compiler  # noqa: F401
+except ModuleNotFoundError as exc:
+    if exc.name != "flydsl":
+        raise
+    pytest.skip("flydsl is not installed", allow_module_level=True)
 
 ROOT = Path(__file__).resolve().parents[1]
 EPS = 1e-6
