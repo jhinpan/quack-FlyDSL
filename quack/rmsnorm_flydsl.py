@@ -15,6 +15,9 @@ import os
 import torch
 
 from quack.flydsl.rmsnorm_autotune import (
+    _PERSISTENT_FWD_CONFIGS as _FWD_PERSISTENT_CONFIGS,
+)
+from quack.flydsl.rmsnorm_autotune import (
     RMSNORM_AUTOTUNE_SCHEMA_VERSION,
     _rmsnorm_fwd_tuner,
 )
@@ -44,17 +47,6 @@ _SUPPORTED_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 # gfx942 is wave64 and should work, but until it executes on real hardware it
 # is not claimed here.
 _SUPPORTED_ARCHES = frozenset({"gfx950"})
-# Measured on MI355X for the large-batch, plain BF16/FP32 inference cells.
-# Values are (threads per row, row groups per block, persistent blocks per CU,
-# output cache modifier, single pass, packed-flat rows, waves per EU). Every
-# knob specializes the same generic feature builder.
-_FWD_PERSISTENT_CONFIGS = {
-    256: (32, 8, 9, None, False, False, None),
-    512: (64, 1, 56, None, False, False, None),
-    1024: (64, 2, 64, 3, True, True, 7),
-    4096: (512, 1, 56, None, False, False, None),
-    8192: (512, 1, 56, None, False, False, None),
-}
 # Row counts cross the Int32 kernel ABI here; reject before FlyDSL's argument
 # packing raises a struct.error from inside the dispatch.
 _MAX_ROWS = 2**31 - 1
@@ -97,7 +89,7 @@ def _normalize_arch(arch: str) -> str:
 
 def _flydsl_compile_target() -> tuple[str, str]:
     """Ask FlyDSL what it will actually generate code for."""
-    from flydsl.compiler.backends import get_backend
+    from flydsl.compiler import get_backend
 
     target = get_backend().target
     return target.backend, _normalize_arch(target.arch)
@@ -488,7 +480,7 @@ def _launch_rmsnorm_fwd(
                 )
                 if measured_waves_per_eu is not None:
                     built.compile_hints = {
-                        **getattr(built, "compile_hints", {}),
+                        **built.compile_hints,
                         "waves_per_eu": measured_waves_per_eu,
                     }
                 return built

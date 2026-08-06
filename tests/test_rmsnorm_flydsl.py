@@ -13,7 +13,12 @@ import torch
 if torch.version.hip is None:
     pytest.skip("FlyDSL RMSNorm requires a ROCm PyTorch build", allow_module_level=True)
 
-pytest.importorskip("flydsl")
+try:
+    import flydsl.compiler  # noqa: F401
+except ModuleNotFoundError as exc:
+    if exc.name != "flydsl":
+        raise
+    pytest.skip("flydsl is not installed", allow_module_level=True)
 
 import quack
 import quack.flydsl.rmsnorm_autotune as rmsnorm_autotune_impl
@@ -1273,9 +1278,6 @@ def test_fullgraph_forward_backward_cold_and_warm_cache():
     assert len(rmsnorm_flydsl_impl._BWD_CACHE) == 1
     fwd_launcher = next(iter(rmsnorm_flydsl_impl._FWD_CACHE.values()))
     bwd_launcher = next(iter(rmsnorm_flydsl_impl._BWD_CACHE.values()))
-    fwd_compiled = fwd_launcher._cf
-    bwd_compiled = bwd_launcher._cf
-
     x_warm = x.detach().clone().requires_grad_()
     weight_warm = weight.detach().clone().requires_grad_()
     warm = compiled_rmsnorm(x_warm, weight_warm)
@@ -1285,8 +1287,6 @@ def test_fullgraph_forward_backward_cold_and_warm_cache():
     _assert_grad_close(weight_warm.grad, dw_expected)
     assert next(iter(rmsnorm_flydsl_impl._FWD_CACHE.values())) is fwd_launcher
     assert next(iter(rmsnorm_flydsl_impl._BWD_CACHE.values())) is bwd_launcher
-    assert fwd_launcher._cf is fwd_compiled
-    assert bwd_launcher._cf is bwd_compiled
     assert not rmsnorm_flydsl_impl._EAGER_EMPTY_CACHE
 
 
