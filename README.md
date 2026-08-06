@@ -28,6 +28,10 @@ pip install 'quack-kernels[jax]'
 - CUDA toolkit 12.9+
 - Python 3.12
 
+There is also an opt-in ROCm RMSNorm backend built on FlyDSL, for MI355X
+(gfx950). See [ROCm / FlyDSL](#rocm--flydsl-) below; it has its own extra and a
+shared `from quack import rmsnorm` entry point.
+
 ## Kernels 🐥
 
 - 🦆 RMSNorm forward + backward
@@ -49,6 +53,66 @@ JAX bindings are also available for some kernels (see [docs/jax.md](docs/jax.md)
 ```
 from quack.softmax_jax import softmax
 ```
+
+## ROCm / FlyDSL 🐥
+
+RMSNorm forward and backward also run on AMD MI355X (gfx950) through a backend
+built on [FlyDSL](https://github.com/ROCm/FlyDSL). It is opt-in and does not
+change the CUDA path.
+
+```
+pip install 'quack-kernels[flydsl]'
+```
+
+The same public import selects CuTe on a CUDA build and FlyDSL on a ROCm build:
+
+```
+from quack import rmsnorm
+```
+
+Importing `quack` alone does not load FlyDSL; the backend is resolved when
+`rmsnorm` is first accessed. Selection is strict: unsupported inputs or
+architectures raise an actionable error rather than silently falling back to a
+different implementation.
+
+**Use it in eager code.** Under `torch.compile` the kernel is an opaque custom
+op, so Inductor cannot fuse RMSNorm into neighbouring kernels the way it fuses
+plain PyTorch. Measured on a transformer block with two RMSNorms around two
+matmuls, this backend is 1.35x faster than eager PyTorch and 1.57x slower than
+compiled PyTorch.
+
+What this backend does not do yet:
+
+- rows wider than 262144, or any row length that is not a multiple of 8 — use
+  `torch.nn.functional.rms_norm` for those
+- gfx950 only; other architectures are rejected rather than assumed to work
+- layernorm, and the lower-level `rmsnorm_fwd` / `rmsnorm_bwd` entry points
+
+The FlyDSL-specific advanced entry point
+`quack.rmsnorm_flydsl.rmsnorm_autotuned` provides forward and backward
+autotuning and searches only when `FLYDSL_AUTOTUNE=1` is set. Design notes and
+measured results are in [AI/flydsl_rmsnorm_notes.md](AI/flydsl_rmsnorm_notes.md).
+
+Reproduce the complete 11-shape forward/backward comparison with one command:
+
+```bash
+HIP_VISIBLE_DEVICES=<idle-gfx950-gpu> PYTHONPATH=$PWD \
+  python benchmarks/reproduce_rmsnorm_flydsl.py \
+  --output-dir /root/artifacts/rmsnorm-$(git rev-parse --short HEAD)
+```
+
+The runner compares analytical FlyDSL, autotuned FlyDSL, and `torch.compile`
+in one process, correctness-gates every cell, runs both device profiles and
+order-balanced public timing, and rejects a noisy bandwidth canary. The output
+directory contains the raw CSVs, joined strict-gate contracts, autotune
+artifacts, `environment.json`, `summary.json`, the exact reproduction command,
+and the complete log. It also verifies that `quack` resolves to this checkout
+instead of an installed wheel.
+
+The package extra intentionally accepts the FlyDSL 0.3 API line
+(`flydsl>=0.3,<0.4`). Always quote the exact distribution build recorded in
+`environment.json`; a nightly such as `0.3.0.dev765` is not the exact
+`0.3.0` release even though `flydsl.__version__` reports `0.3.0`.
 
 ## Documentations
 
