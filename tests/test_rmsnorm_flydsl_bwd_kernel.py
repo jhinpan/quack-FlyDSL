@@ -8,7 +8,7 @@ import torch
 if torch.version.hip is None:
     pytest.skip("FlyDSL RMSNorm requires a ROCm PyTorch build", allow_module_level=True)
 
-pytest.importorskip("flydsl")
+pytest.importorskip("flydsl.compiler")
 
 from quack.flydsl.rmsnorm_bwd_kernel import (
     build_rmsnorm_bwd_two_stage_module,
