@@ -77,6 +77,12 @@ HIP_VISIBLE_DEVICES=<idle-gfx950-gpu> PYTHONPATH=$PWD \
   --output-dir /root/artifacts/rmsnorm-$(git rev-parse --short HEAD)
 ```
 
+Each artifact records the installed FlyDSL distribution version at
+`versions.flydsl_distribution` and the resolved module origin at
+`imports.flydsl_module_origin`. These fields replace the integration artifact's
+`versions.flydsl_module` and `imports.flydsl` fields; consumers should migrate
+to the new keys. The reproducer does not read FlyDSL module version/path APIs.
+
 ## Documentations
 
 - [JAX interface](docs/jax.md) — optional `jax` + `jax-tvm-ffi` bindings, see `quack/softmax_jax.py` for an example.

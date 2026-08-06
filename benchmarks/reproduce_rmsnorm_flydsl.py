@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import importlib.metadata
+import importlib.util
 import json
 import math
 import os
@@ -55,13 +56,6 @@ def _git(repo_root: Path, *args: str) -> str:
 
 def _write_json(path: Path, value) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
-
-
-def _distribution_version(name: str) -> str | None:
-    try:
-        return importlib.metadata.version(name)
-    except importlib.metadata.PackageNotFoundError:
-        return None
 
 
 def _aggregate(profile, controlled) -> dict:
@@ -178,8 +172,13 @@ def main() -> None:
     os.environ["FLYDSL_AUTOTUNE_CACHE_DIR"] = str(cache_dir)
     os.environ["FLYDSL_AUTOTUNE_CONFIG_DIR"] = str(config_dir)
 
-    import flydsl
     import torch
+
+    flydsl_distribution_version = importlib.metadata.version("flydsl")
+    flydsl_spec = importlib.util.find_spec("flydsl")
+    if flydsl_spec is None or flydsl_spec.origin is None:
+        raise RuntimeError("unable to resolve the FlyDSL module origin")
+    flydsl_module_origin = str(Path(flydsl_spec.origin).resolve())
 
     benchmark = importlib.import_module("benchmark_rmsnorm_flydsl")
     rmsnorm_module = importlib.import_module("quack.rmsnorm_flydsl")
@@ -210,14 +209,13 @@ def main() -> None:
         "git_diff": dirty,
         "imports": {
             "quack_rmsnorm_flydsl": str(imported_path),
-            "flydsl": str(Path(flydsl.__file__).resolve()),
+            "flydsl_module_origin": flydsl_module_origin,
         },
         "versions": {
             "python": platform.python_version(),
             "torch": torch.__version__,
             "torch_hip": torch.version.hip,
-            "flydsl_module": flydsl.__version__,
-            "flydsl_distribution": _distribution_version("flydsl"),
+            "flydsl_distribution": flydsl_distribution_version,
         },
         "gpu": {
             "name": properties.name,
@@ -253,8 +251,8 @@ def main() -> None:
                 print(f"PIN git={environment['git_commit']} arch={arch}")
                 print(
                     "PIN flydsl "
-                    f"module={flydsl.__version__} "
-                    f"distribution={_distribution_version('flydsl')}"
+                    f"distribution={flydsl_distribution_version} "
+                    f"module_origin={flydsl_module_origin}"
                 )
                 frames["profile"]["fwd"] = benchmark.run_profiled_shapes(
                     benchmark.MN_PAIRS,
