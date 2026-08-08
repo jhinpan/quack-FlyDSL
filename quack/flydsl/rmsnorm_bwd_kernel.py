@@ -320,7 +320,6 @@ def build_rmsnorm_bwd_two_stage_module(
                     dresidual_out_per_access * dresidual_out_bits,
                     dresidual_out_bits,
                 )
-        f32_copy = buffer_copy_atom(32, 32)
         workspace_copy = buffer_copy_atom(workspace_per_access * 32, 32)
 
         # The weight does not vary by row, so it is loaded once per block and
@@ -389,7 +388,7 @@ def build_rmsnorm_bwd_two_stage_module(
                     )
 
             rstd_index = fx.Int32(row) * fx.Int32(num_heads) + head if per_head else row
-            rstd = load_scalar(f32_copy, fx.Float32, rstd_div, rstd_index)
+            rstd = load_scalar(rstd_div, rstd_index)
 
             # Hold the row in registers across the reduction so it is read once.
             thread_sum = fx.Float32(0.0)
@@ -679,9 +678,8 @@ def build_rmsnorm_bwd_two_stage_module(
         source_copy = buffer_copy_atom(source_per_access * source_bits, source_bits)
         dy_copy = buffer_copy_atom(dy_per_access * dy_bits, dy_bits)
         weight_copy = buffer_copy_atom(weight_per_access * weight_bits, weight_bits)
-        f32_copy = buffer_copy_atom(32, 32)
         rstd_index = row * fx.Int32(num_heads) + head if per_head else row
-        rstd = load_scalar(f32_copy, fx.Float32, rstd_div, rstd_index)
+        rstd = load_scalar(rstd_div, rstd_index)
 
         thread_sum = fx.Float32(0.0)
         for tile_i in range(wide_full_tiles):
@@ -743,14 +741,7 @@ def build_rmsnorm_bwd_two_stage_module(
 
         correction = block_reduce_add(thread_sum) / float(n)
         if tid == 0:
-            store_scalar(
-                f32_copy,
-                fx.Float32,
-                fx.Float32,
-                correction_div,
-                linear_program,
-                correction,
-            )
+            store_scalar(correction_div, linear_program, correction)
 
     @flyc.kernel(known_block_size=[block_threads, 1, 1])
     def rmsnorm_bwd_wide_partial_kernel(
@@ -799,7 +790,6 @@ def build_rmsnorm_bwd_two_stage_module(
                     dresidual_out_per_access * dresidual_out_bits,
                     dresidual_out_bits,
                 )
-        f32_copy = buffer_copy_atom(32, 32)
         workspace_copy = buffer_copy_atom(workspace_per_access * 32, 32)
 
         rstd_div = fx.logical_divide(
@@ -896,7 +886,7 @@ def build_rmsnorm_bwd_two_stage_module(
                     )
 
             scalar_index = fx.Int32(row) * fx.Int32(num_heads) + head if per_head else fx.Int32(row)
-            rstd = load_scalar(f32_copy, fx.Float32, rstd_div, scalar_index)
+            rstd = load_scalar(rstd_div, scalar_index)
             source = load_dtype_vec(
                 source_copy,
                 source_dtype,
@@ -915,12 +905,7 @@ def build_rmsnorm_bwd_two_stage_module(
             )
             x_hat = source * rstd
             if const_expr(compute_input_grad):
-                correction = load_scalar(
-                    f32_copy,
-                    fx.Float32,
-                    correction_div,
-                    scalar_index,
-                )
+                correction = load_scalar(correction_div, scalar_index)
                 wdy = dy * weight_local if has_weight else dy
                 total = (wdy - x_hat * correction) * rstd
                 if const_expr(has_dresidual_out):
@@ -1054,7 +1039,6 @@ def build_rmsnorm_bwd_two_stage_module(
         parameter_column = safe_index % n if per_head else safe_index
         if const_expr(compute_dweight):
             dweight_elem_dtype = dtype_to_elem_type(weight_dtype_str)
-            dweight_copy = buffer_copy_atom(weight_bits, weight_bits)
             dweight_buffer = (
                 row_buffer(dweight_tensor, parameter_head, weight_bits, n)
                 if per_head
@@ -1066,7 +1050,6 @@ def build_rmsnorm_bwd_two_stage_module(
             )
         if const_expr(compute_dbias):
             dbias_elem_dtype = dtype_to_elem_type(dbias_dtype_str)
-            dbias_copy = buffer_copy_atom(dbias_bits, dbias_bits)
             dbias_buffer = (
                 row_buffer(dbias_tensor, parameter_head, dbias_bits, n)
                 if per_head
@@ -1077,7 +1060,6 @@ def build_rmsnorm_bwd_two_stage_module(
                 fx.make_layout(1, 1),
             )
         output_index = parameter_column if per_head else parameter_index
-        f32_copy = buffer_copy_atom(32, 32)
         # One descriptor for the whole workspace, built once and indexed flat.
         # Per-row descriptors cannot be hoisted out of the loop below, and the
         # row a lane reads depends on its lane, so building them inside would
@@ -1105,16 +1087,12 @@ def build_rmsnorm_bwd_two_stage_module(
             workspace_row = safe_row * num_heads + parameter_head if per_head else safe_row
             if const_expr(compute_dweight):
                 value = load_scalar(
-                    f32_copy,
-                    fx.Float32,
                     workspace_div,
                     (dweight_workspace_row_offset + workspace_row) * n + parameter_column,
                 )
                 dweight_total = dweight_total + partial_valid.select(value, fx.Float32(0.0))
             if const_expr(compute_dbias):
                 value = load_scalar(
-                    f32_copy,
-                    fx.Float32,
                     workspace_div,
                     (dbias_workspace_row_offset + workspace_row) * n + parameter_column,
                 )
@@ -1163,9 +1141,6 @@ def build_rmsnorm_bwd_two_stage_module(
                     total = shuffle_reduce_add(partial, WARP_SIZE, WARP_SIZE, fast_math)
                     if lane == 0:
                         store_scalar(
-                            dweight_copy,
-                            dweight_elem_dtype,
-                            dweight_elem_dtype,
                             dweight_div,
                             output_index,
                             total if weight_dtype_str == "f32" else total.to(dweight_elem_dtype),
@@ -1181,9 +1156,6 @@ def build_rmsnorm_bwd_two_stage_module(
                     total = shuffle_reduce_add(partial, WARP_SIZE, WARP_SIZE, fast_math)
                     if lane == 0:
                         store_scalar(
-                            dbias_copy,
-                            dbias_elem_dtype,
-                            dbias_elem_dtype,
                             dbias_div,
                             output_index,
                             total if dbias_dtype_str == "f32" else total.to(dbias_elem_dtype),
@@ -1245,9 +1217,6 @@ def build_rmsnorm_bwd_two_stage_module(
                             )
                     if wave_lane < parameter_reduce_cols:
                         store_scalar(
-                            dweight_copy,
-                            dweight_elem_dtype,
-                            dweight_elem_dtype,
                             dweight_div,
                             output_index,
                             total if weight_dtype_str == "f32" else total.to(dweight_elem_dtype),
@@ -1269,9 +1238,6 @@ def build_rmsnorm_bwd_two_stage_module(
                             )
                     if wave_lane < parameter_reduce_cols:
                         store_scalar(
-                            dbias_copy,
-                            dbias_elem_dtype,
-                            dbias_elem_dtype,
                             dbias_div,
                             output_index,
                             total if dbias_dtype_str == "f32" else total.to(dbias_elem_dtype),
@@ -1311,9 +1277,6 @@ def build_rmsnorm_bwd_two_stage_module(
                     if const_expr(compute_dweight):
                         total = fx.memref_load(shared_partial, column_lane)
                         store_scalar(
-                            dweight_copy,
-                            dweight_elem_dtype,
-                            dweight_elem_dtype,
                             dweight_div,
                             output_index,
                             total if weight_dtype_str == "f32" else total.to(dweight_elem_dtype),
@@ -1324,9 +1287,6 @@ def build_rmsnorm_bwd_two_stage_module(
                             dbias_shared_offset + column_lane,
                         )
                         store_scalar(
-                            dbias_copy,
-                            dbias_elem_dtype,
-                            dbias_elem_dtype,
                             dbias_div,
                             output_index,
                             total if dbias_dtype_str == "f32" else total.to(dbias_elem_dtype),
