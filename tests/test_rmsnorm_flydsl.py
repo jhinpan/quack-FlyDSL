@@ -2550,6 +2550,59 @@ def test_a_wave32_build_target_is_rejected():
         require_wave64("gfx1100")
 
 
+def test_buffer_copy_atom_uses_generic_width_api(monkeypatch):
+    from quack.flydsl import rmsnorm_common
+
+    copy_op = object()
+    copy_atom = object()
+    calls = []
+
+    def make_buffer_copy(bit_size, cache_modifier=0):
+        calls.append(("buffer", bit_size, cache_modifier))
+        return copy_op
+
+    def make_copy_atom(actual_copy_op, elem_bits):
+        calls.append(("atom", actual_copy_op, elem_bits))
+        return copy_atom
+
+    monkeypatch.setattr(rmsnorm_common.fx.rocdl, "BufferCopy", make_buffer_copy)
+    monkeypatch.setattr(rmsnorm_common.fx, "make_copy_atom", make_copy_atom)
+
+    assert rmsnorm_common.buffer_copy_atom(64, 16, cache_modifier=2) is copy_atom
+    assert calls == [("buffer", 64, 2), ("atom", copy_op, 16)]
+
+
+def test_buffer_copy_atom_rejects_unsupported_width():
+    from quack.flydsl.rmsnorm_common import buffer_copy_atom
+
+    with pytest.raises(ValueError, match="24-bit"):
+        buffer_copy_atom(24, 16)
+
+
+def test_scalar_helpers_use_direct_tensor_indexing():
+    from quack.flydsl.rmsnorm_common import load_scalar, store_scalar
+
+    class IndexedTensor:
+        def __init__(self):
+            self.values = {3: "loaded"}
+            self.events = []
+
+        def __getitem__(self, index):
+            self.events.append(("load", index))
+            return self.values[index]
+
+        def __setitem__(self, index, value):
+            self.events.append(("store", index, value))
+            self.values[index] = value
+
+    tensor = IndexedTensor()
+    assert load_scalar(tensor, 3) == "loaded"
+    store_scalar(tensor, 4, "stored")
+
+    assert tensor.values[4] == "stored"
+    assert tensor.events == [("load", 3), ("store", 4, "stored")]
+
+
 def test_concurrent_first_calls_build_one_launcher():
     _clear_caches()
     weight = torch.randn(1024, device="cuda", dtype=torch.float32)
