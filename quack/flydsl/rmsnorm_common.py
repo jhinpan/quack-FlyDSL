@@ -13,7 +13,6 @@ import weakref
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import const_expr, range_constexpr
-from flydsl.expr.typing import full
 from flydsl.runtime.device import is_rdna_arch
 
 from .rmsnorm_config import ACCESS_BITS, WAVE_SIZE
@@ -106,15 +105,6 @@ def run_compiled(executable, *args) -> None:
     compiled(*args)
 
 
-_BUFFER_COPY_OPS = {
-    8: fx.rocdl.BufferCopy8b,
-    16: fx.rocdl.BufferCopy16b,
-    32: fx.rocdl.BufferCopy32b,
-    64: fx.rocdl.BufferCopy64b,
-    128: fx.rocdl.BufferCopy128b,
-}
-
-
 def buffer_copy_atom(access_bits: int, elem_bits: int, cache_modifier: int = 0):
     """Copy atom that moves ``access_bits`` at a time.
 
@@ -123,11 +113,9 @@ def buffer_copy_atom(access_bits: int, elem_bits: int, cache_modifier: int = 0):
     divide it rather than dropping to scalar. ``cache_modifier=2`` selects the
     CDNA non-temporal form; zero keeps the ordinary cached access.
     """
-    try:
-        copy_op = _BUFFER_COPY_OPS[access_bits]
-    except KeyError:
-        raise ValueError(f"no buffer copy for a {access_bits}-bit access") from None
-    return fx.make_copy_atom(copy_op(cache_modifier), elem_bits)
+    if access_bits not in (8, 16, 32, 64, 128):
+        raise ValueError(f"no buffer copy for a {access_bits}-bit access")
+    return fx.make_copy_atom(fx.rocdl.BufferCopy(access_bits, cache_modifier), elem_bits)
 
 
 def vector_access_plan(vecsize: int, dtype_width: int) -> tuple[int, int]:
@@ -247,19 +235,12 @@ def shuffle_reduce_add(value, lanes: int, shuffle_width, fast_math):
     return result
 
 
-def load_scalar(copy_atom, elem_dtype, divided_tensor, index):
-    view = fx.slice(divided_tensor, (None, index))
-    register = fx.make_rmem_tensor(1, elem_dtype)
-    fx.copy_atom_call(copy_atom, view, register)
-    return fx.memref_load_vec(register)[0]
+def load_scalar(tensor, index):
+    return tensor[index]
 
 
-def store_scalar(copy_atom, elem_dtype, store_dtype, divided_tensor, index, value):
-    register = fx.make_rmem_tensor(1, elem_dtype)
-    tensor = full(1, store_dtype(value), store_dtype)
-    fx.memref_store_vec(tensor, register)
-    view = fx.slice(divided_tensor, (None, index))
-    fx.copy_atom_call(copy_atom, register, view)
+def store_scalar(tensor, index, value):
+    tensor[index] = value
 
 
 def load_vec(copy_atom, vec_width, elem_dtype, divided_tensor, index):
