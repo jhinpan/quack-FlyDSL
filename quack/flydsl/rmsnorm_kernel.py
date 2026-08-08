@@ -336,7 +336,6 @@ def build_rmsnorm_module(
                 num_records_bytes=num_programs * fx.Int32(4),
             )
             rstd_div = fx.logical_divide(rstd_buffer, fx.make_layout(1, 1))
-            f32_copy = buffer_copy_atom(32, 32)
 
         if const_expr(persistent_rows):
             # This is the same generic feature kernel under a compile-time
@@ -680,14 +679,7 @@ def build_rmsnorm_module(
         # Keep the compile-time branch separate from the traced lane predicate.
         if const_expr(store_rstd):  # noqa: SIM102
             if lane == 0:
-                store_scalar(
-                    f32_copy,
-                    fx.Float32,
-                    fx.Float32,
-                    rstd_div,
-                    program,
-                    rrms,
-                )
+                store_scalar(rstd_div, program, rrms)
 
         if const_expr(runtime_wide_loop):
             for tile_i in range(wide_full_tiles):
