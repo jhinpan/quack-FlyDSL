@@ -125,7 +125,7 @@ class RmsNormRowConfig:
         dtype_width: int,
         max_num_threads: int = MAX_TUNED_NUM_THREADS,
     ) -> "RmsNormRowConfig":
-        """Use the narrowest wave-aligned group that avoids an epilogue reload."""
+        """Avoid reloads, then add one width step past the base block ceiling."""
         if dtype_width not in SUPPORTED_DTYPE_WIDTHS:
             raise ValueError(f"unsupported element width: {dtype_width} bits")
         vecsize = math.gcd(N, ACCESS_BITS // dtype_width)
@@ -136,6 +136,8 @@ class RmsNormRowConfig:
             max(required_threads, MIN_NUM_THREADS),
             max_num_threads,
         )
+        if MAX_NUM_THREADS <= num_threads < max_num_threads:
+            num_threads = min(num_threads * 2, max_num_threads)
         return cls.with_num_threads(
             N,
             dtype_width,
