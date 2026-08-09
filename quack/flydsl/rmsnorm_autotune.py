@@ -29,20 +29,17 @@ from flydsl.utils import env
 from .rmsnorm_common import FLYDSL_BUILD_LOCK
 from .rmsnorm_config import (
     MAX_TUNED_NUM_THREADS,
+    REGISTER_CACHE_ELEMS,
+    WAVE_SIZE,
     RmsNormRowConfig,
     batch_short_rows,
+    multi_row_block_rows,
 )
 from .rmsnorm_kernel import rmsnorm_direct
 
-RMSNORM_AUTOTUNE_SCHEMA_VERSION = 5
+RMSNORM_AUTOTUNE_SCHEMA_VERSION = 6
 _WAVES_PER_EU = (None, 1, 2, 4)
-_PERSISTENT_FWD_CONFIGS = {
-    256: (32, 8, 9, None, False, False, None),
-    512: (64, 1, 56, None, False, False, None),
-    1024: (64, 2, 64, 3, True, True, 7),
-    4096: (512, 1, 56, None, False, False, None),
-    8192: (512, 1, 56, None, False, False, None),
-}
+_CACHE_POLICY_CANDIDATES = ((2, 2),)
 _L2_TARGET_RATIO = 3
 _L2_TIMED_CALLS = 200
 _L2_MAX_BUFFER_SETS = _L2_TIMED_CALLS
@@ -82,12 +79,18 @@ def _row_candidates(n: int, dtype_width: int) -> list[int]:
         # 512 is above what the heuristic may pick: it wins only when the row
         # is wide and there are many of them, and only the tuner sees M.
         candidates.update((64, 128, 256, 512))
-        # At N=32768, 1024 lanes bring the per-thread fragment back to the
-        # existing 32-element register budget, removing the epilogue reload.
-        # Neighboring rows either already fit at 512 or still stream, so keep
-        # the full-workgroup candidate target-only until separately measured.
-        if n == 32768:
-            candidates.add(1024)
+        # Add the first wider workgroup that restores the bounded register
+        # fragment. This is a resource rule, not a benchmark-shape lookup.
+        for threads in (1024,):
+            config = RmsNormRowConfig.with_num_threads(
+                n,
+                dtype_width,
+                threads,
+                max_num_threads=MAX_TUNED_NUM_THREADS,
+            )
+            if config.elems_per_thread <= REGISTER_CACHE_ELEMS:
+                candidates.add(threads)
+                break
 
     legal = []
     for threads in sorted(candidates):
@@ -114,18 +117,20 @@ def rmsnorm_search_configs(*args, **kwargs) -> list[Config]:
     dtype_width = 32 if kwargs["input_dtype_str"] == "f32" else 16
     configs = []
     seen = set()
-    for threads in _row_candidates(n, dtype_width):
-        for waves_per_eu in _WAVES_PER_EU:
-            identity = (threads, waves_per_eu)
-            if identity in seen:
-                continue
+
+    def append(**options):
+        identity = tuple(sorted(options.items()))
+        if identity not in seen:
             seen.add(identity)
-            configs.append(Config(threads_per_row=threads, waves_per_eu=waves_per_eu))
-    persistent = _PERSISTENT_FWD_CONFIGS.get(n)
-    if (
-        persistent is not None
-        and len(args) >= 8
-        and int(args[7]) == 32768
+            configs.append(Config(**options))
+
+    threads_candidates = _row_candidates(n, dtype_width)
+    for threads in threads_candidates:
+        for waves_per_eu in _WAVES_PER_EU:
+            append(threads_per_row=threads, waves_per_eu=waves_per_eu)
+
+    plain_bf16 = (
+        len(args) >= 8
         and kwargs.get("input_dtype_str") == "bf16"
         and kwargs.get("output_dtype_str") == "bf16"
         and kwargs.get("weight_dtype_str") == "f32"
@@ -136,34 +141,65 @@ def rmsnorm_search_configs(*args, **kwargs) -> list[Config]:
         and not kwargs.get("store_rstd", False)
         and not kwargs.get("per_head", False)
         and kwargs.get("num_heads", 1) == 1
-    ):
+    )
+    if not plain_bf16:
+        return configs
+
+    # Cache-policy exploration is explicit and shape-independent. Keep one
+    # variant per policy at the analytical width to bound compile/search cost.
+    default_threads = rmsnorm_default_config(*args, **kwargs).kwargs["threads_per_row"]
+    for input_modifier, output_modifier in _CACHE_POLICY_CANDIDATES:
+        append(
+            threads_per_row=default_threads,
+            input_cache_modifier=input_modifier,
+            output_cache_modifier=output_modifier,
+        )
+
+    if args[0].stride(0) != n:
+        return configs
+
+    m = int(args[7])
+    num_cus = torch.cuda.get_device_properties(args[0].device).multi_processor_count
+    persistent_threads = max(
         (
+            threads
+            for threads in threads_candidates
+            if threads <= WAVE_SIZE
+            and RmsNormRowConfig.with_num_threads(
+                n,
+                dtype_width,
+                threads,
+                max_num_threads=MAX_TUNED_NUM_THREADS,
+            ).reload_from
+            != "gmem"
+        ),
+        default=None,
+    )
+    for threads in threads_candidates:
+        if threads != persistent_threads:
+            continue
+        row = RmsNormRowConfig.with_num_threads(
+            n,
+            dtype_width,
             threads,
-            row_groups_per_block,
-            programs_per_cu,
-            output_cache_modifier,
-            persistent_single_pass,
-            packed_flat_rows,
-            waves_per_eu,
-        ) = persistent
-        if packed_flat_rows and args[0].stride(0) != n:
-            return configs
-        num_cus = torch.cuda.get_device_properties(args[0].device).multi_processor_count
-        available_blocks = (int(args[7]) + row_groups_per_block - 1) // row_groups_per_block
-        candidate = {
-            "threads_per_row": threads,
-            "row_groups_per_block": row_groups_per_block,
-            "persistent_programs": min(available_blocks, num_cus * programs_per_cu),
-        }
-        if output_cache_modifier is not None:
-            candidate["output_cache_modifier"] = output_cache_modifier
-        if persistent_single_pass:
-            candidate["persistent_single_pass"] = True
-        if packed_flat_rows:
-            candidate["packed_flat_rows"] = True
-        if waves_per_eu is not None:
-            candidate["waves_per_eu"] = waves_per_eu
-        configs.append(Config(**candidate))
+            max_num_threads=MAX_TUNED_NUM_THREADS,
+        )
+        if threads > WAVE_SIZE or row.reload_from == "gmem":
+            continue
+        row_groups_per_block = multi_row_block_rows(threads)
+        if row_groups_per_block <= 1:
+            continue
+        available_blocks = (m + row_groups_per_block - 1) // row_groups_per_block
+        if available_blocks < num_cus:
+            continue
+        append(
+            threads_per_row=threads,
+            row_groups_per_block=row_groups_per_block,
+            persistent_programs=available_blocks,
+            output_cache_modifier=3,
+            persistent_single_pass=True,
+            packed_flat_rows=True,
+        )
     return configs
 
 
