@@ -21,6 +21,8 @@ except ModuleNotFoundError as exc:
     pytest.skip("flydsl is not installed", allow_module_level=True)
 
 import quack
+import quack.flydsl.autotune_harness as autotune_harness_impl
+import quack.flydsl.rmsnorm_arch as rmsnorm_arch_impl
 import quack.flydsl.rmsnorm_autotune as rmsnorm_autotune_impl
 import quack.flydsl.rmsnorm_bwd_autotune as rmsnorm_bwd_autotune_impl
 import quack.rmsnorm_flydsl as rmsnorm_flydsl_impl
@@ -813,12 +815,11 @@ def test_paired_raw_io_honors_row_pitch():
     _assert_grad_close(weight.grad, dweight_expected)
 
 
-def test_n256_target_pins_measured_forward_and_backward_geometries():
-    """The public path uses both measured winners without tuner dispatch."""
+def test_n256_default_uses_generic_forward_and_backward_geometry():
     _clear_caches()
     torch.manual_seed(30)
     x = torch.randn(
-        (32768, 256),
+        (2048, 256),
         device="cuda",
         dtype=torch.bfloat16,
         requires_grad=True,
@@ -834,56 +835,29 @@ def test_n256_target_pins_measured_forward_and_backward_geometries():
         _reference(inference_x, inference_weight, 1e-6),
     )
 
-    assert {key[-2:] for key in rmsnorm_flydsl_impl._BWD_CACHE} == {(2048, 8)}
-    expected_blocks = min(
-        (x.shape[0] + 7) // 8,
-        torch.cuda.get_device_properties(x.device).multi_processor_count * 9,
+    expected_programs = rmsnorm_flydsl_impl._select_rmsnorm_bwd_programs(
+        x.shape[0],
+        x.shape[1],
+        "bf16",
+        x.device,
     )
-    persistent_geometries = {
-        key[-8:-5] for key in rmsnorm_flydsl_impl._FWD_CACHE if key[-6] is not None
-    }
-    assert persistent_geometries == {(32, 8, expected_blocks)}
+    assert {key[-1] for key in rmsnorm_flydsl_impl._BWD_CACHE} == {expected_programs}
+    assert len(rmsnorm_flydsl_impl._FWD_CACHE) == 2
 
 
-def test_n1024_target_packs_two_rows_per_persistent_block():
+def test_n1024_default_reuses_one_launcher_across_off_ladder_row_counts():
     _clear_caches()
     torch.manual_seed(30)
-    x = torch.randn((32768, 1024), device="cuda", dtype=torch.bfloat16)
     weight = torch.randn(1024, device="cuda", dtype=torch.float32)
+    outputs = []
+    for rows in (63, 65):
+        x = torch.randn((rows, 1024), device="cuda", dtype=torch.bfloat16)
+        actual = rmsnorm(x, weight)
+        _assert_close(actual, _reference(x, weight, 1e-6))
+        outputs.append(actual)
 
-    actual = rmsnorm(x, weight)
-    row_indices = torch.tensor(
-        [0, 1, 2, 63, 127, 1023, 16383, 32766, 32767],
-        device=x.device,
-    )
-    _assert_close(
-        actual.index_select(0, row_indices),
-        _reference(x.index_select(0, row_indices), weight, 1e-6),
-    )
-
-    expected_blocks = min(
-        (x.shape[0] + 1) // 2,
-        torch.cuda.get_device_properties(x.device).multi_processor_count * 64,
-    )
-    assert {key[-8:-1] for key in rmsnorm_flydsl_impl._FWD_CACHE} == {
-        (64, 2, expected_blocks, 3, True, True, 7)
-    }
-
-    _clear_caches()
-    padded_storage = torch.randn(
-        (32768, 1027),
-        device="cuda",
-        dtype=torch.bfloat16,
-    )
-    padded = padded_storage[:, :1024]
-    padded_actual = rmsnorm(padded, weight)
-    _assert_close(
-        padded_actual.index_select(0, row_indices),
-        _reference(padded.index_select(0, row_indices), weight, 1e-6),
-    )
-    assert {key[-8:-1] for key in rmsnorm_flydsl_impl._FWD_CACHE} == {
-        (64, None, None, None, False, False, None)
-    }
+    assert [output.shape[0] for output in outputs] == [63, 65]
+    assert len(rmsnorm_flydsl_impl._FWD_CACHE) == 1
 
 
 def test_compiled_rmsnorm_switches_from_plain_to_per_head():
@@ -1085,7 +1059,6 @@ def _clear_caches():
     rmsnorm_flydsl_impl._FWD_AUTOTUNED_FAST_CACHE.clear()
     rmsnorm_flydsl_impl._BWD_AUTOTUNED_FAST_CACHE.clear()
     rmsnorm_flydsl_impl._EAGER_EMPTY_CACHE.clear()
-    rmsnorm_flydsl_impl._FWD_CU_COUNT_CACHE.clear()
     rmsnorm_flydsl_impl._BWD_CU_COUNT_CACHE.clear()
     rmsnorm_flydsl_impl._DEVICE_ARCH_CACHE.clear()
     rmsnorm_flydsl_impl._AUTOTUNE_ARCH_CACHE.clear()
@@ -1390,8 +1363,8 @@ def _direct_autotune_call_args(
     return args, kwargs
 
 
-def test_autotune_schema_five_and_candidates_retain_the_heuristic():
-    assert rmsnorm_autotune_impl.RMSNORM_AUTOTUNE_SCHEMA_VERSION == 5
+def test_autotune_schema_six_and_candidates_retain_the_heuristic():
+    assert rmsnorm_autotune_impl.RMSNORM_AUTOTUNE_SCHEMA_VERSION == 6
     for n, dtype_name in ((128, "bf16"), (512, "bf16"), (2048, "bf16"), (4096, "f32")):
         default = rmsnorm_autotune_impl.rmsnorm_default_config(
             n=n,
@@ -1408,35 +1381,8 @@ def test_autotune_schema_five_and_candidates_retain_the_heuristic():
         )
 
 
-@pytest.mark.parametrize(
-    (
-        "n",
-        "threads",
-        "blocks_per_cu",
-        "rows_per_block",
-        "output_cache_modifier",
-        "persistent_single_pass",
-        "packed_flat_rows",
-        "waves_per_eu",
-    ),
-    [
-        (256, 32, 9, 8, None, False, False, None),
-        (512, 64, 56, 1, None, False, False, None),
-        (1024, 64, 64, 2, 3, True, True, 7),
-    ],
-)
-def test_autotune_offers_persistent_candidate_for_supported_plain_shape(
-    n,
-    threads,
-    blocks_per_cu,
-    rows_per_block,
-    output_cache_modifier,
-    persistent_single_pass,
-    packed_flat_rows,
-    waves_per_eu,
-):
-    args, kwargs = _direct_autotune_call_args(n=n)
-    args = args[:7] + (32768,) + args[8:]
+def test_autotune_offers_geometry_driven_persistent_candidates_off_ladder():
+    args, kwargs = _direct_autotune_call_args(rows=4097, n=1024)
     kwargs.update(
         input_dtype_str="bf16",
         output_dtype_str="bf16",
@@ -1444,22 +1390,15 @@ def test_autotune_offers_persistent_candidate_for_supported_plain_shape(
     )
 
     candidates = rmsnorm_autotune_impl.rmsnorm_search_configs(*args, **kwargs)
-    num_cus = torch.cuda.get_device_properties(args[0].device).multi_processor_count
+    persistent = [config for config in candidates if config.kwargs.get("packed_flat_rows")]
 
-    matching = [
-        config
-        for config in candidates
-        if config.kwargs.get("persistent_programs")
-        == min((32768 + rows_per_block - 1) // rows_per_block, num_cus * blocks_per_cu)
-        and config.kwargs["threads_per_row"] == threads
-    ]
-    assert len(matching) == 1
-    candidate = matching[0]
-    assert candidate.kwargs["row_groups_per_block"] == rows_per_block
-    assert candidate.kwargs.get("output_cache_modifier") == output_cache_modifier
-    assert candidate.kwargs.get("persistent_single_pass", False) is persistent_single_pass
-    assert candidate.kwargs.get("packed_flat_rows", False) is packed_flat_rows
-    assert candidate.waves_per_eu == waves_per_eu
+    assert len(persistent) == 1
+    candidate = persistent[0]
+    row_groups = candidate.kwargs["row_groups_per_block"]
+    assert row_groups > 1
+    assert candidate.kwargs["persistent_programs"] == (4097 + row_groups - 1) // row_groups
+    assert candidate.kwargs["output_cache_modifier"] == 3
+    assert candidate.kwargs["persistent_single_pass"] is True
 
 
 def test_l2_rotation_clones_preserve_metadata_aliases_and_distinct_addresses():
@@ -1564,7 +1503,13 @@ def test_gfx950_cache_authority_uses_the_triton_benchmark_capacity():
 
 def test_wide_autotune_candidates_all_use_the_reload_path():
     configs = rmsnorm_search_configs(n=262144, input_dtype_str="bf16")
-    assert {config.kwargs["threads_per_row"] for config in configs} == {64, 128, 256, 512}
+    assert {config.kwargs["threads_per_row"] for config in configs} == {
+        64,
+        128,
+        256,
+        512,
+        1024,
+    }
     for candidate in configs:
         row = RmsNormRowConfig.with_num_threads(
             262144,
@@ -1575,10 +1520,8 @@ def test_wide_autotune_candidates_all_use_the_reload_path():
         assert row.reload_from == "gmem"
 
 
-def test_n32768_autotune_alone_offers_a_single_read_1024_thread_config():
+def test_register_budget_offers_1024_threads_without_shape_pins():
     target = rmsnorm_search_configs(n=32768, input_dtype_str="bf16")
-    neighbors = {n: rmsnorm_search_configs(n=n, input_dtype_str="bf16") for n in (16384, 65536)}
-
     assert {config.kwargs["threads_per_row"] for config in target} == {
         64,
         128,
@@ -1586,10 +1529,6 @@ def test_n32768_autotune_alone_offers_a_single_read_1024_thread_config():
         512,
         1024,
     }
-    assert all(
-        1024 not in {config.kwargs["threads_per_row"] for config in configs}
-        for configs in neighbors.values()
-    )
     row = RmsNormRowConfig.with_num_threads(
         32768,
         16,
@@ -1597,6 +1536,8 @@ def test_n32768_autotune_alone_offers_a_single_read_1024_thread_config():
         max_num_threads=MAX_TUNED_NUM_THREADS,
     )
     assert row.reload_from is None
+    assert RmsNormRowConfig.from_register_budget(65536, 16).reload_from == "gmem"
+    assert "n == 32768" not in inspect.getsource(rmsnorm_autotune_impl._row_candidates)
 
 
 def _direct_bwd_autotune_call_args(m=64, n=512):
@@ -1679,7 +1620,22 @@ def test_backward_autotune_candidates_cover_row_and_grid_axes(n):
     )
     assert min(programs for _, programs, _ in identities) < 1536
     assert len({programs for _, programs, _ in identities}) >= 3
-    assert len({cols for _, _, cols in identities}) >= 2
+    num_cus = torch.cuda.get_device_properties(args[0].device).multi_processor_count
+    assert all(
+        cols
+        == rmsnorm_bwd_parameter_reduce_cols(
+            n,
+            programs,
+            target_blocks=num_cus,
+        )
+        for _threads, programs, cols in identities
+    )
+    reduce_configs = rmsnorm_bwd_autotune_impl._reduce_stage_configs(
+        rmsnorm_bwd_autotune_impl._call_values(args, kwargs),
+        default,
+    )
+    assert len({config.kwargs["parameter_reduce_cols"] for config in reduce_configs}) >= 2
+    assert rmsnorm_bwd_autotune_impl.RMSNORM_BWD_AUTOTUNE_SCHEMA_VERSION == 4
 
 
 @pytest.mark.parametrize(
@@ -1764,7 +1720,8 @@ def test_autotuned_backward_searches_once_then_reuses_pinned_winner(tmp_path, mo
     args, kwargs = _direct_bwd_autotune_call_args()
 
     tuner(*args, **kwargs)
-    assert completed == 2
+    staged_candidates = completed
+    assert staged_candidates > 2
     assert len(tuner.cache) == len(tuner._hot_cache) == 1
     artifacts = list((tmp_path / "artifacts").glob("*.json"))
     assert len(artifacts) == 1
@@ -1779,7 +1736,7 @@ def test_autotuned_backward_searches_once_then_reuses_pinned_winner(tmp_path, mo
     )
     tuner(*args, **kwargs)
 
-    assert completed == 2
+    assert completed == staged_candidates
     torch.testing.assert_close(args[6], first_dx, rtol=0.0, atol=0.0)
     torch.testing.assert_close(args[8], first_dweight, rtol=0.0, atol=0.0)
 
@@ -2158,7 +2115,7 @@ def test_graph_failure_fallback_remains_l2_cold_and_multi_address(tmp_path, monk
         raise RuntimeError("graph unavailable in test")
 
     observed = []
-    real_fallback = rmsnorm_autotune_impl._event_l2_rotate_bench
+    real_fallback = autotune_harness_impl._event_l2_rotate_bench
 
     def checked_fallback(compiled, positional_sets, plan, **kwargs):
         pointers = [positional[0].data_ptr() for positional in positional_sets]
@@ -2168,7 +2125,7 @@ def test_graph_failure_fallback_remains_l2_cold_and_multi_address(tmp_path, monk
         return real_fallback(compiled, positional_sets, plan, **kwargs)
 
     monkeypatch.setattr(torch.cuda, "CUDAGraph", graph_failure)
-    monkeypatch.setattr(rmsnorm_autotune_impl, "_event_l2_rotate_bench", checked_fallback)
+    monkeypatch.setattr(autotune_harness_impl, "_event_l2_rotate_bench", checked_fallback)
 
     x = torch.randn((8, 512), device="cuda", dtype=torch.bfloat16)
     weight = torch.randn(512, device=x.device, dtype=torch.float32)
@@ -2451,7 +2408,7 @@ def test_autotuned_runtime_change_cannot_reuse_a_loaded_callable(monkeypatch):
 def test_compile_target_must_match_the_device(monkeypatch):
     """FlyDSL's own target is the authority, not the ARCH environment."""
     _clear_caches()
-    monkeypatch.setattr(rmsnorm_flydsl_impl, "_flydsl_compile_target", lambda: ("rocm", "gfx90a"))
+    monkeypatch.setattr(rmsnorm_arch_impl, "_flydsl_compile_target", lambda: ("rocm", "gfx90a"))
     with pytest.raises(ValueError, match="mixed architectures"):
         rmsnorm_flydsl_impl._validate_arch(torch.device("cuda", 0))
 
@@ -2462,7 +2419,7 @@ def test_runtime_helper_arch_must_match_the_device(monkeypatch, env_name):
     monkeypatch.delenv("FLYDSL_GPU_ARCH", raising=False)
     monkeypatch.delenv("HSA_OVERRIDE_GFX_VERSION", raising=False)
     monkeypatch.setenv(env_name, "gfx90a")
-    monkeypatch.setattr(rmsnorm_flydsl_impl, "_flydsl_compile_target", lambda: ("rocm", "gfx950"))
+    monkeypatch.setattr(rmsnorm_arch_impl, "_flydsl_compile_target", lambda: ("rocm", "gfx950"))
 
     with pytest.raises(ValueError, match="runtime helpers"):
         rmsnorm_flydsl_impl._validate_arch(torch.device("cuda", 0))
@@ -2480,18 +2437,18 @@ def test_runtime_helper_arch_must_match_the_device(monkeypatch, env_name):
 def test_autotuned_arch_cache_revalidates_target_environment(monkeypatch, env_name):
     _clear_caches()
     device = torch.device("cuda", 0)
-    monkeypatch.setattr(rmsnorm_flydsl_impl, "_flydsl_compile_target", lambda: ("rocm", "gfx950"))
+    monkeypatch.setattr(rmsnorm_arch_impl, "_flydsl_compile_target", lambda: ("rocm", "gfx950"))
     assert rmsnorm_flydsl_impl._validated_autotune_arch(device) == "gfx950"
 
     monkeypatch.setenv(env_name, "changed")
-    monkeypatch.setattr(rmsnorm_flydsl_impl, "_flydsl_compile_target", lambda: ("rocm", "gfx90a"))
+    monkeypatch.setattr(rmsnorm_arch_impl, "_flydsl_compile_target", lambda: ("rocm", "gfx90a"))
     with pytest.raises(ValueError, match="mixed architectures"):
         rmsnorm_flydsl_impl._validated_autotune_arch(device)
 
 
 def test_non_rocm_compile_backend_is_rejected(monkeypatch):
     _clear_caches()
-    monkeypatch.setattr(rmsnorm_flydsl_impl, "_flydsl_compile_target", lambda: ("cuda", "sm_90"))
+    monkeypatch.setattr(rmsnorm_arch_impl, "_flydsl_compile_target", lambda: ("cuda", "sm_90"))
     with pytest.raises(RuntimeError, match="ROCm backend"):
         rmsnorm_flydsl_impl._validate_arch(torch.device("cuda", 0))
 
@@ -2505,10 +2462,10 @@ def test_the_device_query_is_memoized_but_the_compile_target_is_not(monkeypatch)
     _clear_caches()
     device_queries = []
     target_queries = []
-    real_target = rmsnorm_flydsl_impl._flydsl_compile_target
+    real_target = rmsnorm_arch_impl._flydsl_compile_target
     real_properties = torch.cuda.get_device_properties
     monkeypatch.setattr(
-        rmsnorm_flydsl_impl,
+        rmsnorm_arch_impl,
         "_flydsl_compile_target",
         lambda: (target_queries.append(1), real_target())[1],
     )
@@ -2536,7 +2493,7 @@ def test_a_compile_target_change_is_caught_on_the_next_build(monkeypatch):
     weight = torch.randn(512, device="cuda", dtype=torch.float32)
     rmsnorm(torch.randn((8, 512), device="cuda", dtype=torch.bfloat16), weight)
 
-    monkeypatch.setattr(rmsnorm_flydsl_impl, "_flydsl_compile_target", lambda: ("rocm", "gfx90a"))
+    monkeypatch.setattr(rmsnorm_arch_impl, "_flydsl_compile_target", lambda: ("rocm", "gfx90a"))
     with pytest.raises(ValueError, match="mixed architectures"):
         rmsnorm(torch.randn((8, 256), device="cuda", dtype=torch.bfloat16), weight[:256])
 
@@ -3810,7 +3767,7 @@ def test_every_operand_rejects_an_overlapping_view(operand):
 
 def test_unsupported_architectures_are_named(monkeypatch):
     _clear_caches()
-    monkeypatch.setattr(rmsnorm_flydsl_impl, "_normalize_arch", lambda _: "gfx90a")
+    monkeypatch.setattr(rmsnorm_arch_impl, "_normalize_arch", lambda _: "gfx90a")
     with pytest.raises(ValueError, match="gfx950"):
         rmsnorm_flydsl_impl._validate_arch(torch.device("cuda", 0))
 

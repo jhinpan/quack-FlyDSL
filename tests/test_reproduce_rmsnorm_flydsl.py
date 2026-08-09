@@ -2,7 +2,9 @@
 
 """Focused orchestration tests for the RMSNorm FlyDSL reproducer."""
 
+import ast
 import importlib.util
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -82,6 +84,56 @@ class _MiniBenchmark:
             ("controlled", operation, forced_tuning, tuple(providers), id(winner), False)
         )
         return f"controlled-{operation}"
+
+
+def _summary(geomean=1.0, strict=1):
+    result = {}
+    for operation in ("fwd", "bwd"):
+        result[operation] = {}
+        for provider in ("flydsl", "flydsl_tuned"):
+            result[operation][provider] = {}
+            for scope in ("device", "public"):
+                result[operation][provider][f"{scope}_geomean_speedup_vs_torch"] = geomean
+                result[operation][provider][f"{scope}_strict_gate_passes"] = strict
+    return result
+
+
+def test_outcome_policy_keeps_the_strict_gate_and_adds_ties():
+    assert reproducer._classify_outcome(1.03, True) == "WIN"
+    assert reproducer._classify_outcome(1.03, False) == "TIE"
+    assert reproducer._classify_outcome(0.99, True) == "TIE"
+    assert reproducer._classify_outcome(0.97, True) == "LOSS"
+
+
+def test_summary_comparison_records_drift_and_strict_stability(tmp_path):
+    baseline = _summary(geomean=1.0, strict=3)
+    current = _summary(geomean=1.01, strict=3)
+    baseline_path = tmp_path / "summary.json"
+    baseline_path.write_text(json.dumps(baseline))
+
+    comparison = reproducer._compare_summary(current, baseline_path)
+
+    assert comparison["strict_counts_unchanged"] is True
+    assert comparison["geomean_drift_percent_range"] == pytest.approx([1.0, 1.0])
+
+
+def test_generalization_matrix_covers_distinct_off_ladder_row_regimes():
+    source = (ROOT / "benchmarks" / "benchmark_rmsnorm_flydsl.py").read_text()
+    module = ast.parse(source)
+    assignment = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "GENERALIZATION_PAIRS"
+            for target in node.targets
+        )
+    )
+    pairs = ast.literal_eval(assignment.value)
+
+    assert len(pairs) >= 5
+    assert len({m for m, _n in pairs}) == len(pairs)
+    assert all(m != 32768 for m, _n in pairs)
 
 
 def test_profile_then_controlled_reuses_winners_without_retuning_and_restores_env(

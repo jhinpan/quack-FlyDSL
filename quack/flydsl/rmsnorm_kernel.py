@@ -58,6 +58,7 @@ def build_rmsnorm_module(
     arch: str | None = None,
     row_config: RmsNormRowConfig | None = None,
     row_groups_per_block: int | None = None,
+    input_cache_modifier: int | None = None,
     output_cache_modifier: int | None = None,
     persistent_single_pass: bool = False,
     packed_flat_rows: bool = False,
@@ -97,7 +98,7 @@ def build_rmsnorm_module(
         config = (
             RmsNormRowConfig.for_lane_group(n, input_bits)
             if batched
-            else RmsNormRowConfig.from_analytical_heuristic(n, input_bits)
+            else RmsNormRowConfig.from_register_budget(n, input_bits)
         )
     threads_per_row = config.num_threads
     default_row_groups = multi_row_block_rows(threads_per_row) if batched else 1
@@ -119,21 +120,8 @@ def build_rmsnorm_module(
     last_tile = config.num_tiles - 1
     reload_from_gmem = config.reload_from == "gmem"
     runtime_wide_loop = reload_from_gmem
-    plain_bf16_f32 = (
-        input_dtype_str == output_dtype_str == "bf16"
-        and weight_dtype_str == "f32"
-        and has_weight
-        and not has_bias
-        and not has_residual
-        and not store_residual
-        and not store_rstd
-        and not per_head
-    )
-    non_temporal_input = plain_bf16_f32 and n in (4096, 8192)
-    non_temporal_output = plain_bf16_f32 and n in (256, 512, 2048, 8192)
-    output_modifier = (
-        int(non_temporal_output) * 2 if output_cache_modifier is None else output_cache_modifier
-    )
+    input_modifier = 0 if input_cache_modifier is None else input_cache_modifier
+    output_modifier = 0 if output_cache_modifier is None else output_cache_modifier
     wide_full_tiles = num_vecs // threads_per_row
     wide_tail_vecs = num_vecs % threads_per_row
     # ``persistent_programs`` is the persistent block count. A block can own
@@ -302,7 +290,7 @@ def build_rmsnorm_module(
         input_copy = buffer_copy_atom(
             input_per_access * input_bits,
             input_bits,
-            cache_modifier=2 if non_temporal_input else 0,
+            cache_modifier=input_modifier,
         )
         output_copy = buffer_copy_atom(
             output_per_access * output_bits,
@@ -954,6 +942,7 @@ def rmsnorm_direct(
     threads_per_row: fx.Constexpr[int],
     persistent_programs: fx.Constexpr[int] = 0,
     row_groups_per_block: fx.Constexpr[int] = 0,
+    input_cache_modifier: fx.Constexpr[int] = -1,
     output_cache_modifier: fx.Constexpr[int] = -1,
     persistent_single_pass: fx.Constexpr[bool] = False,
     packed_flat_rows: fx.Constexpr[bool] = False,
@@ -984,6 +973,7 @@ def rmsnorm_direct(
         arch=arch,
         row_config=row_config,
         row_groups_per_block=(row_groups_per_block if row_groups_per_block > 0 else None),
+        input_cache_modifier=(input_cache_modifier if input_cache_modifier >= 0 else None),
         output_cache_modifier=(output_cache_modifier if output_cache_modifier >= 0 else None),
         persistent_single_pass=persistent_single_pass,
         packed_flat_rows=packed_flat_rows,
