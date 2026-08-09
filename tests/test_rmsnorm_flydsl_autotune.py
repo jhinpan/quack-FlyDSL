@@ -13,6 +13,7 @@ if torch.version.hip is None:
 pytest.importorskip("flydsl.compiler")
 
 import quack.flydsl.rmsnorm_autotune as autotune
+from quack.flydsl import autotune_harness
 from quack.flydsl.rmsnorm_config import (
     MAX_TUNED_NUM_THREADS,
     REGISTER_CACHE_ELEMS,
@@ -50,6 +51,29 @@ def _direct_call(*, rows=4, n=512, has_bias=False):
         "stream": torch.cuda.current_stream(x.device).cuda_stream,
     }
     return args, kwargs
+
+
+def test_forward_autotuner_specializes_shared_harness_without_reverse_import():
+    assert issubclass(autotune.RmsNormAutotuner, autotune_harness.FlydslL2Autotuner)
+    assert "_compiled_callable" in autotune_harness.FlydslL2Autotuner.__dict__
+    assert "_contextual_decision_key" in autotune_harness.FlydslL2Autotuner.__dict__
+    assert "_compiled_callable" not in autotune.RmsNormAutotuner.__dict__
+    assert "_contextual_decision_key" not in autotune.RmsNormAutotuner.__dict__
+    assert "_bench_one" in autotune.RmsNormAutotuner.__dict__
+    assert "rmsnorm_autotune" not in inspect.getsource(autotune_harness)
+
+
+def test_moved_private_helpers_remain_compatible_reexports():
+    for name in (
+        "FLYDSL_BUILD_LOCK",
+        "_CacheAuthority",
+        "_L2RotationPlan",
+        "_clone_tensor_arguments",
+        "_typed_identity",
+        "_with_runtime_stream",
+    ):
+        assert getattr(autotune, name) is getattr(autotune_harness, name)
+    assert autotune.l2_cold_bench is autotune_harness.l2_cold_bench
 
 
 @pytest.mark.parametrize(
