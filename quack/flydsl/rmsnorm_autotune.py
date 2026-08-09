@@ -63,7 +63,7 @@ def _row_candidates(n: int, dtype_width: int) -> list[int]:
     heuristic = (
         RmsNormRowConfig.for_lane_group(n, dtype_width)
         if batch_short_rows(n, dtype_width)
-        else RmsNormRowConfig.from_analytical_heuristic(n, dtype_width)
+        else RmsNormRowConfig.from_register_budget(n, dtype_width)
     )
     ceiling = 64 if batch_short_rows(n, dtype_width) else MAX_TUNED_NUM_THREADS
     candidates = {heuristic.num_threads}
@@ -203,7 +203,7 @@ def rmsnorm_default_config(*args, **kwargs) -> Config:
     config = (
         RmsNormRowConfig.for_lane_group(n, dtype_width)
         if batch_short_rows(n, dtype_width)
-        else RmsNormRowConfig.from_analytical_heuristic(n, dtype_width)
+        else RmsNormRowConfig.from_register_budget(n, dtype_width)
     )
     return Config(threads_per_row=config.num_threads)
 
