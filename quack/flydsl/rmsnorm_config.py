@@ -119,6 +119,31 @@ class RmsNormRowConfig:
         )
 
     @classmethod
+    def from_register_budget(
+        cls,
+        N: int,
+        dtype_width: int,
+        max_num_threads: int = MAX_TUNED_NUM_THREADS,
+    ) -> "RmsNormRowConfig":
+        """Use the narrowest wave-aligned group that avoids an epilogue reload."""
+        if dtype_width not in SUPPORTED_DTYPE_WIDTHS:
+            raise ValueError(f"unsupported element width: {dtype_width} bits")
+        vecsize = math.gcd(N, ACCESS_BITS // dtype_width)
+        num_vecs = N // vecsize
+        vectors_per_thread = max(1, REGISTER_CACHE_ELEMS // vecsize)
+        required_threads = next_power_of_two(-(-num_vecs // vectors_per_thread))
+        num_threads = min(
+            max(required_threads, MIN_NUM_THREADS),
+            max_num_threads,
+        )
+        return cls.with_num_threads(
+            N,
+            dtype_width,
+            num_threads,
+            max_num_threads=max_num_threads,
+        )
+
+    @classmethod
     def for_lane_group(cls, N: int, dtype_width: int) -> "RmsNormRowConfig":
         """Cover a row with a group of lanes inside one wavefront.
 
