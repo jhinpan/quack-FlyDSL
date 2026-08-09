@@ -49,6 +49,17 @@ MN_PAIRS = [
     (8192, 262144),
 ]
 
+# A compact anti-overfit ladder: several row-count regimes without repeating
+# the canonical M=32768-heavy search matrix. Run it with analytical providers
+# unless explicitly investigating tuner generalization.
+GENERALIZATION_PAIRS = [
+    (63, 256),
+    (511, 1024),
+    (4097, 2048),
+    (8191, 4096),
+    (16385, 8192),
+]
+
 DTYPE_MAP = {
     "bfloat16": torch.bfloat16,
     "float16": torch.float16,
@@ -828,6 +839,11 @@ def main():
     )
     parser.add_argument("--M", type=int, default=None, help="Bench a single M (requires --N)")
     parser.add_argument("--N", type=int, default=None, help="Bench a single N (requires --M)")
+    parser.add_argument(
+        "--generalization",
+        action="store_true",
+        help="Use the compact off-ladder M/N matrix instead of the canonical shapes",
+    )
     parser.add_argument("--save_path", default=None)
     parser.add_argument(
         "--providers",
@@ -862,6 +878,8 @@ def main():
 
     if (args.M is None) != (args.N is None):
         parser.error("--M and --N must be given together")
+    if args.generalization and args.M is not None:
+        parser.error("--generalization cannot be combined with --M/--N")
     if args.backward and args.features != "plain":
         parser.error("--features fused is forward only")
     if "flydsl_tuned" in args.providers and os.environ.get("FLYDSL_AUTOTUNE") != "1":
@@ -875,7 +893,7 @@ def main():
         if args.features != "plain":
             parser.error("controlled modes support only --features plain")
         if args.controlled_all and args.M is not None:
-            parser.error("--controlled-all uses the full shape ladder; omit --M/--N")
+            parser.error("--controlled-all uses a shape ladder; omit --M/--N")
         positive = {
             "--rounds": args.rounds,
             "--rotation_buffers": args.rotation_buffers,
@@ -909,14 +927,18 @@ def main():
         }
         if args.controlled_all:
             run_controlled_shapes(
-                MN_PAIRS,
+                GENERALIZATION_PAIRS if args.generalization else MN_PAIRS,
                 save_path=args.save_path,
                 **kwargs,
             )
         else:
             run_controlled(M, N, **kwargs)
         return
-    x_vals = [(args.M, args.N)] if args.M is not None else None
+    x_vals = (
+        [(args.M, args.N)]
+        if args.M is not None
+        else (GENERALIZATION_PAIRS if args.generalization else None)
+    )
 
     torch.manual_seed(0)
 

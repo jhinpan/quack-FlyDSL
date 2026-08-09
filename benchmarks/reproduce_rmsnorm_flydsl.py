@@ -29,6 +29,7 @@ from pathlib import Path
 
 PROVIDERS = ["flydsl", "flydsl_tuned", "torch_compile"]
 EXPECTED_SHAPES = 11
+PARITY_BAND = (0.98, 1.02)
 
 
 class _Tee:
@@ -56,6 +57,49 @@ def _git(repo_root: Path, *args: str) -> str:
 
 def _write_json(path: Path, value) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def _classify_outcome(speedup: float, interval_win: bool) -> str:
+    if speedup >= PARITY_BAND[1] and interval_win:
+        return "WIN"
+    if speedup < PARITY_BAND[0]:
+        return "LOSS"
+    return "TIE"
+
+
+def _outcome_counts(values) -> dict[str, int]:
+    return {name: values.count(name) for name in ("WIN", "TIE", "LOSS")}
+
+
+def _compare_summary(current: dict, baseline_path: Path) -> dict:
+    path = baseline_path / "summary.json" if baseline_path.is_dir() else baseline_path
+    baseline = json.loads(path.read_text())
+    metrics = {}
+    drifts = []
+    strict_unchanged = True
+    for operation in ("fwd", "bwd"):
+        for provider in ("flydsl", "flydsl_tuned"):
+            for scope in ("device", "public"):
+                geomean = f"{scope}_geomean_speedup_vs_torch"
+                strict = f"{scope}_strict_gate_passes"
+                old_value = float(baseline[operation][provider][geomean])
+                new_value = float(current[operation][provider][geomean])
+                drift = 100.0 * (new_value / old_value - 1.0)
+                old_strict = int(baseline[operation][provider][strict])
+                new_strict = int(current[operation][provider][strict])
+                key = f"{operation}.{provider}.{scope}"
+                metrics[key] = {
+                    "geomean_drift_percent": drift,
+                    "strict_delta": new_strict - old_strict,
+                }
+                drifts.append(drift)
+                strict_unchanged &= new_strict == old_strict
+    return {
+        "baseline": str(path.resolve()),
+        "geomean_drift_percent_range": [min(drifts), max(drifts)],
+        "strict_counts_unchanged": strict_unchanged,
+        "metrics": metrics,
+    }
 
 
 @contextmanager
@@ -143,6 +187,14 @@ def _aggregate(profile, controlled) -> dict:
             public_intervals = (
                 ours_public["public_p90_us"] < torch_public["public_p10_us"]
             ).tolist()
+            device_outcomes = [
+                _classify_outcome(value, interval)
+                for value, interval in zip(device_speedups, device_intervals)
+            ]
+            public_outcomes = [
+                _classify_outcome(value, interval)
+                for value, interval in zip(public_speedups, public_intervals)
+            ]
             operation_result[provider] = {
                 "device_geomean_speedup_vs_torch": math.exp(
                     sum(math.log(value) for value in device_speedups) / len(device_speedups)
@@ -152,6 +204,7 @@ def _aggregate(profile, controlled) -> dict:
                     value >= 1.02 and interval
                     for value, interval in zip(device_speedups, device_intervals)
                 ),
+                "device_outcomes": _outcome_counts(device_outcomes),
                 "public_geomean_speedup_vs_torch": math.exp(
                     sum(math.log(value) for value in public_speedups) / len(public_speedups)
                 ),
@@ -160,6 +213,7 @@ def _aggregate(profile, controlled) -> dict:
                     value >= 1.02 and interval
                     for value, interval in zip(public_speedups, public_intervals)
                 ),
+                "public_outcomes": _outcome_counts(public_outcomes),
             }
         result[operation] = operation_result
     return result
@@ -191,6 +245,13 @@ def _parse_args() -> argparse.Namespace:
         "--allow-dirty",
         action="store_true",
         help="Allow an uncommitted checkout; the diff is still recorded.",
+    )
+    parser.add_argument(
+        "--stability-baseline",
+        action="append",
+        default=[],
+        type=Path,
+        help="Prior artifact directory or summary.json to compare; may be repeated",
     )
     return parser.parse_args()
 
@@ -276,6 +337,7 @@ def main() -> None:
     with _benchmark_environment(cache_dir, config_dir):
         _run_reproducer(args, repo_root, output_dir, dirty)
 
+
 def _run_reproducer(args, repo_root: Path, output_dir: Path, dirty: str) -> None:
     import torch
 
@@ -324,6 +386,7 @@ def _run_reproducer(args, repo_root: Path, output_dir: Path, dirty: str) -> None
             "name": properties.name,
             "architecture": arch,
             "index_within_visible_devices": 0,
+            "visibility": os.environ.get("HIP_VISIBLE_DEVICES", ""),
             "total_memory_bytes": properties.total_memory,
             "multiprocessor_count": properties.multi_processor_count,
         },
@@ -336,6 +399,12 @@ def _run_reproducer(args, repo_root: Path, output_dir: Path, dirty: str) -> None
             "controlled_rounds": args.controlled_rounds,
             "rotation_buffers": args.rotation_buffers,
             "contention_canary_quiet_range": [0.95, 1.05],
+            "outcome_policy": {
+                "parity_band": list(PARITY_BAND),
+                "win": "speedup >= 1.02 and provider p90 < torch p10",
+                "loss": "speedup < 0.98",
+                "tie": "all remaining outcomes",
+            },
             "tuned_winner_policy": {
                 "profile": "forced tuning into output-local caches",
                 "controlled": "forced tuning disabled; in-process winners reused",
@@ -369,6 +438,9 @@ def _run_reproducer(args, repo_root: Path, output_dir: Path, dirty: str) -> None
                 _validate_frame(frame, f"{kind}-{operation}", expected_rows)
         summary = _aggregate(frames["profile"], frames["controlled"])
         _write_json(output_dir / "summary.json", summary)
+        stability = [
+            _compare_summary(summary, baseline_path) for baseline_path in args.stability_baseline
+        ]
         environment.update(
             {
                 "status": "passed",
@@ -378,6 +450,7 @@ def _run_reproducer(args, repo_root: Path, output_dir: Path, dirty: str) -> None
                     for kind, operations in frames.items()
                 },
                 "summary": summary,
+                "stability": stability,
             }
         )
         _write_json(environment_path, environment)
