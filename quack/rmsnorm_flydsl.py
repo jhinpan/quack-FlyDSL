@@ -904,48 +904,97 @@ def _launch_rmsnorm_bwd_autotuned(
     per_head: bool,
     num_heads: int,
 ) -> None:
-    """Launch through the backward tuner's row/grid-aware compiled cache."""
+    """Launch through the resolved backward winner without tuner redispatch."""
     m, n = source.shape[0], source.shape[-1]
-    workspace = torch.empty(0, device=source.device, dtype=torch.float32)
+    source_dtype_str = _dtype_to_str(source.dtype)
+    dy_dtype_str = _dtype_to_str(dout.dtype)
+    dx_dtype_str = _dtype_to_str(dx.dtype)
+    dresidual_dtype_str = _dtype_to_str(dresidual.dtype)
+    dresidual_out_dtype_str = _dtype_to_str(dresidual_out.dtype)
+    weight_dtype_str = _dtype_to_str(weight.dtype)
+    dbias_dtype_str = _dtype_to_str(dbias.dtype)
+    fast_key = (
+        _rmsnorm_bwd_tuner.fast_context_token(),
+        source.device.index,
+        m,
+        n,
+        source_dtype_str,
+        dy_dtype_str,
+        dx_dtype_str,
+        dresidual_dtype_str,
+        dresidual_out_dtype_str,
+        weight_dtype_str,
+        dbias_dtype_str,
+        has_weight,
+        has_bias,
+        compute_dweight,
+        compute_dbias,
+        compute_input_grad,
+        store_dx,
+        store_dresidual,
+        has_residual,
+        has_dresidual_out,
+        per_head,
+        num_heads,
+    )
+    workspace = _eager_empty(source.device, torch.float32)
+    args = (
+        source,
+        weight,
+        dout,
+        dresidual_out,
+        rstd,
+        rstd,
+        dx,
+        dresidual,
+        dweight,
+        dbias,
+        workspace,
+        workspace.view(-1),
+        m,
+        weight_offset,
+    )
+    kwargs = {
+        "n": n,
+        "source_dtype_str": source_dtype_str,
+        "dy_dtype_str": dy_dtype_str,
+        "dx_dtype_str": dx_dtype_str,
+        "dresidual_dtype_str": dresidual_dtype_str,
+        "dresidual_out_dtype_str": dresidual_out_dtype_str,
+        "weight_dtype_str": weight_dtype_str,
+        "dbias_dtype_str": dbias_dtype_str,
+        "has_weight": has_weight,
+        "has_bias": has_bias,
+        "compute_dweight": compute_dweight,
+        "compute_dbias": compute_dbias,
+        "compute_input_grad": compute_input_grad,
+        "store_dx": store_dx,
+        "store_dresidual": store_dresidual,
+        "has_residual": has_residual,
+        "has_dresidual_out": has_dresidual_out,
+        "per_head": per_head,
+        "num_heads": num_heads,
+    }
+    forced = _env_flag_enabled("FLYDSL_AUTOTUNE")
+    compile_only = _env_flag_enabled("COMPILE_ONLY")
     with torch.cuda.device(source.device):
-        _rmsnorm_bwd_tuner(
-            source,
-            weight,
-            dout,
-            dresidual_out,
-            rstd,
-            rstd,
-            dx,
-            dresidual,
-            dweight,
-            dbias,
-            workspace,
-            workspace.view(-1),
-            m,
-            weight_offset,
-            n=n,
-            source_dtype_str=_dtype_to_str(source.dtype),
-            dy_dtype_str=_dtype_to_str(dout.dtype),
-            dx_dtype_str=_dtype_to_str(dx.dtype),
-            dresidual_dtype_str=_dtype_to_str(dresidual.dtype),
-            dresidual_out_dtype_str=_dtype_to_str(dresidual_out.dtype),
-            weight_dtype_str=_dtype_to_str(weight.dtype),
-            dbias_dtype_str=_dtype_to_str(dbias.dtype),
-            has_weight=has_weight,
-            has_bias=has_bias,
-            compute_dweight=compute_dweight,
-            compute_dbias=compute_dbias,
-            compute_input_grad=compute_input_grad,
-            store_dx=store_dx,
-            store_dresidual=store_dresidual,
-            has_residual=has_residual,
-            has_dresidual_out=has_dresidual_out,
-            per_head=per_head,
-            num_heads=num_heads,
+        if not forced and not compile_only:
+            fast_entry = _BWD_AUTOTUNED_FAST_CACHE.get(fast_key)
+            if fast_entry is not None:
+                config, compiled, constexpr_suffix = fast_entry
+                runtime_args = _rmsnorm_bwd_tuner._candidate_arguments(config, args, kwargs)
+                compiled(*(runtime_args + constexpr_suffix + (_current_raw_stream(source.device),)))
+                return
+
+        kwargs.update(
             arch=_validated_autotune_arch(source.device),
             schema_version=RMSNORM_BWD_AUTOTUNE_SCHEMA_VERSION,
             stream=_current_raw_stream(source.device),
         )
+        _rmsnorm_bwd_tuner(*args, **kwargs)
+        resolved = _rmsnorm_bwd_tuner.resolved_fast_entry(args, kwargs)
+        if resolved is not None:
+            _BWD_AUTOTUNED_FAST_CACHE[fast_key] = resolved
 
 
 @torch.library.custom_op(

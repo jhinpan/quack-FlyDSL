@@ -25,6 +25,8 @@ ROOT = Path(__file__).resolve().parents[1]
 EPS = 1e-6
 quack = importlib.import_module("quack")
 rmsnorm = quack.rmsnorm
+rmsnorm_flydsl_impl = importlib.import_module("quack.rmsnorm_flydsl")
+rmsnorm_autotuned = rmsnorm_flydsl_impl.rmsnorm_autotuned
 
 
 def _reference(
@@ -170,6 +172,36 @@ def test_backward_matches_reference_and_is_deterministic():
     _assert_close(first[0], output_ref.to(first[0].dtype))
     _assert_grad_close(first[1], dx_ref.to(first[1].dtype))
     _assert_grad_close(first[2], dweight_ref.to(first[2].dtype))
+    for original, repeated in zip(first, second):
+        torch.testing.assert_close(original, repeated, rtol=0.0, atol=0.0)
+
+
+def test_autotuned_backward_reuses_resolved_callable(monkeypatch):
+    tuner = rmsnorm_flydsl_impl._rmsnorm_bwd_tuner
+    rmsnorm_flydsl_impl._FWD_AUTOTUNED_FAST_CACHE.clear()
+    rmsnorm_flydsl_impl._BWD_AUTOTUNED_FAST_CACHE.clear()
+    tuner.cache.clear()
+    tuner._hot_cache.clear()
+    torch.manual_seed(3)
+    x = torch.randn((64, 512), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(512, device=x.device, dtype=torch.float32)
+    dout = torch.randn_like(x)
+
+    def run():
+        x_i = x.detach().clone().requires_grad_(True)
+        weight_i = weight.detach().clone().requires_grad_(True)
+        output = rmsnorm_autotuned(x_i, weight_i)
+        output.backward(dout)
+        return output.detach(), x_i.grad, weight_i.grad
+
+    first = run()
+    assert len(rmsnorm_flydsl_impl._BWD_AUTOTUNED_FAST_CACHE) == 1
+
+    def forbid_tuner_entry(*args, **kwargs):
+        raise AssertionError("warm backward call re-entered the tuner")
+
+    monkeypatch.setattr(type(tuner), "__call__", forbid_tuner_entry)
+    second = run()
     for original, repeated in zip(first, second):
         torch.testing.assert_close(original, repeated, rtol=0.0, atol=0.0)
 

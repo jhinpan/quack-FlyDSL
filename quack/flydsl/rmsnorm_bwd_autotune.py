@@ -413,6 +413,15 @@ class RmsNormBwdAutotuner(RmsNormAutotuner):
             ("process_context", self._process_context_key()),
         )
 
+    def resolved_fast_entry(self, args, kwargs):
+        """Return a direct-launch entry with backward constexpr arguments."""
+        hot_entry = self._hot_cache.get(self._hot_key(args, kwargs))
+        if hot_entry is None:
+            return None
+        config, compiled, _constexpr_suffix = hot_entry
+        positional = self._positional_arguments(config, args, kwargs)
+        return config, compiled, positional[len(args) : -1]
+
     def _candidate_arguments(self, config, args, kwargs):
         values = _call_values(args, kwargs)
         mutable = list(args)

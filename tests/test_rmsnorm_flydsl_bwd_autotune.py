@@ -158,3 +158,18 @@ def test_selected_default_config_launch_matches_reference():
         atol=3e-2,
     )
     torch.testing.assert_close(args[8], dweight_ref, rtol=5e-3, atol=5e-3)
+
+
+def test_resolved_fast_entry_exposes_backward_constexpr_suffix(monkeypatch):
+    tuner = autotune._rmsnorm_bwd_tuner
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    tuner._hot_cache.clear()
+    args, kwargs = _direct_call(m=19, n=760)
+
+    tuner(*args, **kwargs)
+    resolved = tuner.resolved_fast_entry(args, kwargs)
+
+    assert resolved is not None
+    config, _compiled, constexpr_suffix = resolved
+    positional = tuner._positional_arguments(config, args, kwargs)
+    assert constexpr_suffix == positional[len(args) : -1]
