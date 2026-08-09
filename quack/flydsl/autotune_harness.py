@@ -604,11 +604,46 @@ class FlydslL2Autotuner(Autotuner):
             # Non-forced cache/default calls remain fully concurrent.
             bench_context = _AUTOTUNE_BENCH_LOCK if tuning else nullcontext()
             with bench_context:
+                if tuning:
+                    return self._forced_tune(*args, **kwargs)
                 return super().__call__(*args, **kwargs)
         finally:
             self._active_call.value = None
             self._active_call.hot_key = None
             self._active_call.rotation_plan = None
+
+    def _forced_tune(self, *args, **kwargs):
+        key = self._make_key(args, kwargs)
+        artifact = self._artifact_ref(args, kwargs, required=True)
+        config, best_time = self._tune_configs(args, kwargs)
+        print(f"[autotune] best: {config} ({best_time:.3f} ms)")
+        if artifact is not None:
+            self._emit_artifact(config, artifact, args, kwargs)
+        self.cache[key] = config
+        self._save_disk_cache()
+        return self._run_config(config, args, kwargs)
+
+    def _tune_configs(self, args, kwargs):
+        configs = self.configs(*args, **kwargs) if callable(self.configs) else self.configs
+        configs = self._prune(configs, args, kwargs)
+        return self._select_result(self._benchmark_configs(configs, args, kwargs), args, kwargs)
+
+    def _benchmark_configs(self, configs, args, kwargs):
+        print(f"[autotune] tuning {len(configs)} configs...")
+        results = []
+        for index, config in enumerate(configs):
+            try:
+                elapsed = self._bench_one(config, args, kwargs)
+                results.append((config, elapsed))
+                print(f"  [{index + 1}/{len(configs)}] {config} -> {elapsed:.3f} ms")
+            except Exception as error:  # noqa: BLE001 - one bad candidate must not abort a search
+                print(f"  [{index + 1}/{len(configs)}] {config} -> FAILED: {error}")
+        if not results:
+            raise RuntimeError("All autotune configs failed")
+        return results
+
+    def _select_result(self, results, args, kwargs):
+        return min(results, key=lambda item: item[1])
 
     def _call_hot_entry(self, hot_entry, args, kwargs):
         config, compiled, _payload = hot_entry
