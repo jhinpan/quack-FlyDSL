@@ -438,6 +438,25 @@ class RmsNormAutotuner(FlydslL2Autotuner):
             ("process_context", self._process_context_key()),
         )
 
+    def _inference_sibling(self, args, kwargs):
+        if not kwargs.get("store_rstd", False):
+            return None
+        inference_kwargs = dict(kwargs)
+        inference_kwargs["store_rstd"] = False
+        key = self._contextual_decision_key(args, inference_kwargs)
+        return self.cache.get(key)
+
+    def _tune_configs(self, args, kwargs):
+        sibling = self._inference_sibling(args, kwargs)
+        if sibling is None:
+            return super()._tune_configs(args, kwargs)
+        candidate = Config(
+            threads_per_row=sibling.kwargs["threads_per_row"],
+            waves_per_eu=sibling.waves_per_eu,
+        )
+        results = self._benchmark_configs([candidate], args, kwargs)
+        return self._select_result(results, args, kwargs)
+
     def _bench_one(self, config, args, kwargs):
         """Compile one candidate untimed, then benchmark only its fast callable."""
         merged = dict(kwargs)

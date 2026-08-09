@@ -6,6 +6,7 @@ import inspect
 
 import pytest
 import torch
+from flydsl.autotune import Config
 
 if torch.version.hip is None:
     pytest.skip("FlyDSL RMSNorm requires a ROCm PyTorch build", allow_module_level=True)
@@ -176,6 +177,36 @@ def test_decision_key_partitions_shapes_and_features_but_not_runtime_eps():
     assert tuner._contextual_decision_key(eps_args, kwargs) == base
     assert tuner.key[:2] == ["m", "n"]
     assert {"has_bias", "has_residual", "store_residual", "store_rstd"} <= set(tuner.key)
+
+
+def test_training_search_reuses_the_profiled_inference_geometry(monkeypatch):
+    tuner = autotune._rmsnorm_fwd_tuner
+    args, inference_kwargs = _direct_call(rows=4097, n=1024)
+    inference_key = tuner._contextual_decision_key(args, inference_kwargs)
+    tuner.cache[inference_key] = Config(
+        threads_per_row=64,
+        row_groups_per_block=4,
+        persistent_programs=1025,
+        output_cache_modifier=3,
+        persistent_single_pass=True,
+        packed_flat_rows=True,
+        waves_per_eu=2,
+    )
+    training_kwargs = dict(inference_kwargs)
+    training_kwargs["store_rstd"] = True
+    seen = []
+
+    def benchmark(configs, call_args, call_kwargs):
+        seen.extend(configs)
+        return [(configs[0], 1.0)]
+
+    monkeypatch.setattr(tuner, "_benchmark_configs", benchmark)
+    selected, _elapsed = tuner._tune_configs(args, training_kwargs)
+
+    assert len(seen) == 1
+    assert selected.kwargs == {"threads_per_row": 64}
+    assert selected.waves_per_eu == 2
+    tuner.cache.pop(inference_key)
 
 
 def test_selected_config_launch_passes_the_correctness_gate(tmp_path, monkeypatch):
