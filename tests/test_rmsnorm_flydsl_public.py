@@ -3,6 +3,7 @@
 """Focused public-contract coverage for the FlyDSL RMSNorm backend."""
 
 import importlib
+import inspect
 import subprocess
 import sys
 import textwrap
@@ -137,6 +138,21 @@ def test_forward_matches_fp32_reference():
     assert actual.shape == x.shape
     assert actual.dtype == x.dtype
     _assert_close(actual, expected)
+
+
+def test_default_launch_policy_contains_no_benchmark_shape_literals():
+    policy = "\n".join(
+        inspect.getsource(function)
+        for function in (
+            rmsnorm_flydsl_impl._launch_rmsnorm_fwd,
+            rmsnorm_flydsl_impl._launch_rmsnorm_bwd,
+            rmsnorm_flydsl_impl._rmsnorm_impl,
+        )
+    )
+
+    assert "32768" not in policy
+    assert "_FWD_PERSISTENT_CONFIGS" not in policy
+    assert "measured_" not in policy
 
 
 def test_backward_matches_reference_and_is_deterministic():
