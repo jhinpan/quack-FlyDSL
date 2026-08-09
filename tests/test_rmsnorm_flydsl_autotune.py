@@ -128,7 +128,9 @@ def test_wide_candidate_uses_register_budget_not_exact_n():
 
     assert 1024 in candidates
     assert config.elems_per_thread <= REGISTER_CACHE_ELEMS
-    assert 1024 not in autotune._row_candidates(65536, 16)
+    wide = RmsNormRowConfig.from_register_budget(65536, 16)
+    assert wide.num_threads == 1024
+    assert wide.reload_from == "gmem"
     assert "n == 32768" not in inspect.getsource(autotune._row_candidates)
 
 
