@@ -98,7 +98,7 @@ def build_rmsnorm_module(
         config = (
             RmsNormRowConfig.for_lane_group(n, input_bits)
             if batched
-            else RmsNormRowConfig.from_analytical_heuristic(n, input_bits)
+            else RmsNormRowConfig.from_register_budget(n, input_bits)
         )
     threads_per_row = config.num_threads
     default_row_groups = multi_row_block_rows(threads_per_row) if batched else 1
