@@ -2,6 +2,8 @@
 
 """Direct correctness coverage for the FlyDSL RMSNorm forward builder."""
 
+import inspect
+
 import pytest
 import torch
 
@@ -84,6 +86,14 @@ def _assert_bf16_close(actual, expected):
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
 
 
+def test_default_cache_policy_contains_no_exact_row_lengths():
+    source = inspect.getsource(build_rmsnorm_module)
+
+    assert "non_temporal_input" not in source
+    assert "non_temporal_output" not in source
+    assert "n in (" not in source
+
+
 def test_bf16_input_fp32_weight_matches_fp32_reference():
     torch.manual_seed(0)
     x = torch.randn((3, 512), device="cuda", dtype=torch.bfloat16)
@@ -158,6 +168,7 @@ def test_packed_persistent_n1024_handles_an_odd_row_tail():
             max_num_threads=MAX_TUNED_NUM_THREADS,
         ),
         row_groups_per_block=2,
+        input_cache_modifier=2,
         output_cache_modifier=2,
         persistent_single_pass=True,
         packed_flat_rows=True,

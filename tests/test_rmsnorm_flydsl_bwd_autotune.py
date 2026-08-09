@@ -4,6 +4,7 @@
 
 import pytest
 import torch
+from flydsl.autotune import Config
 
 if torch.version.hip is None:
     pytest.skip("FlyDSL RMSNorm requires a ROCm PyTorch build", allow_module_level=True)
@@ -92,7 +93,18 @@ def test_candidates_have_legal_axes_and_retain_the_default(n):
     assert len(identities) == len(set(identities))
     assert _identity(autotune.rmsnorm_bwd_default_config(*args, **kwargs)) in identities
     assert len({programs for _, programs, _ in identities}) >= 3
-    assert len({cols for _, _, cols in identities}) >= 2
+    num_cus = torch.cuda.get_device_properties(args[0].device).multi_processor_count
+    for _threads, programs, cols in identities:
+        assert cols == rmsnorm_bwd_parameter_reduce_cols(
+            n,
+            programs,
+            target_blocks=num_cus,
+        )
+    reduce_configs = autotune._reduce_stage_configs(
+        autotune._call_values(args, kwargs),
+        autotune.rmsnorm_bwd_default_config(*args, **kwargs),
+    )
+    assert len({_identity(config)[2] for config in reduce_configs}) >= 2
 
     dtype_width = dtype_to_elem_bits(kwargs["source_dtype_str"])
     for threads, programs, cols in identities:
@@ -131,7 +143,81 @@ def test_default_geometry_is_deterministic_and_analytical():
         ),
     )
 
+    assert autotune.RMSNORM_BWD_AUTOTUNE_SCHEMA_VERSION == 4
     assert _identity(first) == _identity(second) == expected
+
+
+def test_tie_band_prefers_the_analytical_incumbent():
+    args, kwargs = _direct_call(m=2048, n=1024)
+    tuner = autotune._rmsnorm_bwd_tuner
+    incumbent = autotune.rmsnorm_bwd_default_config(*args, **kwargs)
+    alternative = autotune._reduce_stage_configs(
+        autotune._call_values(args, kwargs),
+        incumbent,
+    )[0]
+    if _identity(alternative) == _identity(incumbent):
+        alternative = autotune._reduce_stage_configs(
+            autotune._call_values(args, kwargs),
+            incumbent,
+        )[-1]
+
+    selected, _elapsed = tuner._select_stable(
+        [(alternative, 1.0), (incumbent, 1.019)],
+        args,
+        kwargs,
+        incumbent,
+    )
+
+    assert _identity(selected) == _identity(incumbent)
+
+
+def test_staged_canonical_search_stays_within_candidate_budget():
+    total = 0
+    for n in (256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144):
+        args, kwargs = _direct_call(m=1, n=n)
+        args = (*args[:12], 32768, *args[13:])
+        row_grid = autotune.rmsnorm_bwd_search_configs(*args, **kwargs)
+        reduce_count = max(
+            len(
+                autotune._reduce_stage_configs(
+                    autotune._call_values(args, kwargs),
+                    config,
+                )
+            )
+            for config in row_grid
+        )
+        total += len(row_grid) + reduce_count - 1
+
+    assert total <= 160
+
+
+def test_rotation_plan_is_reused_across_reduce_column_candidates(monkeypatch):
+    args, kwargs = _direct_call(m=19, n=760)
+    tuner = autotune._rmsnorm_bwd_tuner
+    base = autotune.rmsnorm_bwd_default_config(*args, **kwargs)
+    alternative = Config(
+        threads_per_row=base.kwargs["threads_per_row"],
+        num_programs=base.kwargs["num_programs"],
+        parameter_reduce_cols=max(1, base.kwargs["parameter_reduce_cols"] // 2),
+    )
+    built = []
+    expected = object()
+    plan = object()
+
+    def build(*build_args, **build_kwargs):
+        built.append((build_args, build_kwargs))
+        return plan
+
+    monkeypatch.setattr(autotune, "_build_l2_rotation_plan", build)
+    tuner._active_call.bwd_plans = {}
+    try:
+        first = tuner._rotation_plan(base, args, kwargs, args, expected)
+        second = tuner._rotation_plan(alternative, args, kwargs, args, expected)
+    finally:
+        tuner._active_call.bwd_plans = None
+
+    assert first is second is plan
+    assert len(built) == 1
 
 
 def test_selected_default_config_launch_matches_reference():

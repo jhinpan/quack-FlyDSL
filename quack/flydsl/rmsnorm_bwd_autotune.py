@@ -9,8 +9,8 @@ from functools import cache
 import torch
 from flydsl.autotune import Config, _env_fingerprint, _toolchain_fingerprint
 
-from .rmsnorm_autotune import (
-    RmsNormAutotuner,
+from .autotune_harness import (
+    FlydslL2Autotuner,
     _build_l2_rotation_plan,
     _clone_tensor_arguments,
     _typed_identity,
@@ -27,11 +27,12 @@ from .rmsnorm_bwd_kernel import (
 from .rmsnorm_common import dtype_to_elem_bits
 from .rmsnorm_config import WAVE_SIZE, RmsNormRowConfig, next_power_of_two
 
-RMSNORM_BWD_AUTOTUNE_SCHEMA_VERSION = 3
+RMSNORM_BWD_AUTOTUNE_SCHEMA_VERSION = 4
 _MAX_WORKSPACE_BYTES = 4 * 1024**3
 _CORRECTNESS_ROWS = 16
 _SMALL_N_MAX = 1024
 _SMALL_N_PROGRAMS_PER_CU = (2, 4, 6, 8, 12)
+_TIE_BAND = 0.02
 
 
 @cache
@@ -159,38 +160,62 @@ def _workspace_bytes(values, num_programs: int) -> int:
     return max(1, rows) * int(values["n"]) * 4
 
 
-def rmsnorm_bwd_search_configs(*args, **kwargs) -> list[Config]:
-    values = _call_values(args, kwargs)
-    n = int(values["n"])
-    dtype_width = dtype_to_elem_bits(values["source_dtype_str"])
+def _workspace_budget(values) -> int:
     device = values["source_tensor"].device
     with torch.cuda.device(device):
         free_bytes, _ = torch.cuda.mem_get_info(device)
-    budget = min(_MAX_WORKSPACE_BYTES, int(free_bytes * 0.25))
+    return min(_MAX_WORKSPACE_BYTES, int(free_bytes * 0.25))
+
+
+def _row_grid_configs(values) -> list[Config]:
+    n = int(values["n"])
+    dtype_width = dtype_to_elem_bits(values["source_dtype_str"])
+    device = values["source_tensor"].device
+    num_cus = torch.cuda.get_device_properties(device).multi_processor_count
+    budget = _workspace_budget(values)
     configs = []
     seen = set()
     for threads in _threads_candidates(n, dtype_width):
         for num_programs in _program_candidates(values, threads):
             if _workspace_bytes(values, num_programs) > budget:
                 continue
-            for parameter_reduce_cols in _parameter_reduce_cols_candidates(
-                values,
+            parameter_reduce_cols = rmsnorm_bwd_parameter_reduce_cols(
+                int(values["num_heads"]) * n,
                 num_programs,
-            ):
-                identity = (threads, num_programs, parameter_reduce_cols)
-                if identity in seen:
-                    continue
-                seen.add(identity)
-                configs.append(
-                    Config(
-                        threads_per_row=threads,
-                        num_programs=num_programs,
-                        parameter_reduce_cols=parameter_reduce_cols,
-                    )
+                target_blocks=num_cus,
+            )
+            identity = (threads, num_programs, parameter_reduce_cols)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            configs.append(
+                Config(
+                    threads_per_row=threads,
+                    num_programs=num_programs,
+                    parameter_reduce_cols=parameter_reduce_cols,
                 )
+            )
     if not configs:
         raise RuntimeError("RMSNorm backward autotuning found no workspace-legal configs")
     return configs
+
+
+def _reduce_stage_configs(values, row_grid_config: Config) -> list[Config]:
+    threads = int(row_grid_config.kwargs["threads_per_row"])
+    num_programs = int(row_grid_config.kwargs["num_programs"])
+    return [
+        Config(
+            threads_per_row=threads,
+            num_programs=num_programs,
+            parameter_reduce_cols=parameter_reduce_cols,
+        )
+        for parameter_reduce_cols in _parameter_reduce_cols_candidates(values, num_programs)
+    ]
+
+
+def rmsnorm_bwd_search_configs(*args, **kwargs) -> list[Config]:
+    """Return the row/grid stage; reduce columns are searched after it wins."""
+    return _row_grid_configs(_call_values(args, kwargs))
 
 
 def rmsnorm_bwd_default_config(*args, **kwargs) -> Config:
@@ -392,13 +417,74 @@ def _candidate_correctness_gate(compiled, positional_sets, plan):
     plan.bench_stream.synchronize()
 
 
-class RmsNormBwdAutotuner(RmsNormAutotuner):
+class RmsNormBwdAutotuner(FlydslL2Autotuner):
+    benchmark_name = "RMSNorm backward"
+
     def __call__(self, *args, **kwargs):
         self._active_call.bwd_expected = None
+        self._active_call.bwd_plans = {}
         try:
             return super().__call__(*args, **kwargs)
         finally:
             self._active_call.bwd_expected = None
+            self._active_call.bwd_plans = None
+
+    @staticmethod
+    def _config_identity(config):
+        return tuple(
+            int(config.kwargs[name])
+            for name in ("threads_per_row", "num_programs", "parameter_reduce_cols")
+        )
+
+    def _select_stable(self, results, args, kwargs, incumbent):
+        values = _call_values(args, kwargs)
+        best_time = min(elapsed for _config, elapsed in results)
+        near = [
+            (config, elapsed)
+            for config, elapsed in results
+            if elapsed <= best_time * (1.0 + _TIE_BAND)
+        ]
+        incumbent_identity = self._config_identity(incumbent)
+        for config, elapsed in near:
+            if self._config_identity(config) == incumbent_identity:
+                return config, elapsed
+        return min(
+            near,
+            key=lambda item: (
+                _workspace_bytes(values, int(item[0].kwargs["num_programs"])),
+                self._config_identity(item[0]),
+            ),
+        )
+
+    def _select_result(self, results, args, kwargs):
+        return self._select_stable(
+            results,
+            args,
+            kwargs,
+            rmsnorm_bwd_default_config(*args, **kwargs),
+        )
+
+    def _tune_configs(self, args, kwargs):
+        row_grid_configs = self.configs(*args, **kwargs)
+        row_grid_configs = self._prune(row_grid_configs, args, kwargs)
+        row_grid_results = self._benchmark_configs(row_grid_configs, args, kwargs)
+        row_grid_winner = self._select_result(row_grid_results, args, kwargs)
+
+        values = _call_values(args, kwargs)
+        reduce_configs = _reduce_stage_configs(values, row_grid_winner[0])
+        winner_identity = self._config_identity(row_grid_winner[0])
+        reduce_configs = [
+            config for config in reduce_configs if self._config_identity(config) != winner_identity
+        ]
+        reduce_results = (
+            self._benchmark_configs(reduce_configs, args, kwargs) if reduce_configs else []
+        )
+        return self._select_stable(
+            [row_grid_winner, *reduce_results],
+            args,
+            kwargs,
+            row_grid_winner[0],
+        )
 
     def _hot_key(self, args, kwargs):
         explicit = (args[12],) + tuple(kwargs[name] for name in self.key[1:])
@@ -483,6 +569,33 @@ class RmsNormBwdAutotuner(RmsNormAutotuner):
             for name, parameter in self._signature.parameters.items()
         )
 
+    def _rotation_plan(self, config, args, kwargs, candidate_args, expected):
+        values = _call_values(args, kwargs)
+        row = RmsNormRowConfig.with_num_threads(
+            int(values["n"]),
+            dtype_to_elem_bits(values["source_dtype_str"]),
+            int(config.kwargs["threads_per_row"]),
+            max_num_threads=TWO_STAGE_MAX_NUM_THREADS,
+        )
+        plan_key = (
+            int(config.kwargs["num_programs"]),
+            row.reload_from == "gmem" and bool(values["compute_input_grad"]),
+        )
+        plans = self._active_call.bwd_plans
+        plan = plans.get(plan_key)
+        if plan is None:
+            plan = _build_l2_rotation_plan(
+                candidate_args,
+                kwargs,
+                read_bytes_fn=_cache_read_bytes,
+                clone_fn=_clone_backward_arguments,
+                reference_fn=lambda _args, _kwargs: expected,
+                validate_addresses_fn=_validate_addresses,
+                benchmark_name=self.benchmark_name,
+            )
+            plans[plan_key] = plan
+        return plan
+
     def _bench_one(self, config, args, kwargs):
         candidate_args = self._candidate_arguments(config, args, kwargs)
         compiled, positional, _ = self._compiled_callable(config, args, kwargs)
@@ -496,14 +609,7 @@ class RmsNormBwdAutotuner(RmsNormAutotuner):
         if expected is None:
             expected = _backward_reference(args, kwargs)
             self._active_call.bwd_expected = expected
-        plan = _build_l2_rotation_plan(
-            candidate_args,
-            kwargs,
-            read_bytes_fn=_cache_read_bytes,
-            clone_fn=_clone_backward_arguments,
-            reference_fn=lambda _args, _kwargs: expected,
-            validate_addresses_fn=_validate_addresses,
-        )
+        plan = self._rotation_plan(config, args, kwargs, candidate_args, expected)
         positional_sets = [
             self._positional_arguments(config, set_args, set_kwargs)
             for set_args, set_kwargs in zip(plan.arg_sets, plan.kwarg_sets)
