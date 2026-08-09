@@ -465,7 +465,7 @@ class RmsNormBwdAutotuner(FlydslL2Autotuner):
         )
 
     def _tune_configs(self, args, kwargs):
-        row_grid_configs = self.configs(*args, **kwargs)
+        row_grid_configs = self.configs(*args, **kwargs) if callable(self.configs) else self.configs
         row_grid_configs = self._prune(row_grid_configs, args, kwargs)
         row_grid_results = self._benchmark_configs(row_grid_configs, args, kwargs)
         row_grid_winner = self._select_result(row_grid_results, args, kwargs)
