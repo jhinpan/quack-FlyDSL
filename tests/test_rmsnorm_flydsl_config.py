@@ -198,6 +198,25 @@ def test_tuned_n32768_config_uses_one_legal_full_workgroup():
     assert c.reload_from is None
 
 
+@pytest.mark.parametrize(
+    ("N", "threads", "reload_from"),
+    [
+        (1024, 64, None),
+        (2048, 64, None),
+        (4096, 128, None),
+        (8192, 256, None),
+        (16384, 512, None),
+        (32768, 1024, None),
+        (65536, 1024, "gmem"),
+    ],
+)
+def test_register_budget_geometry_uses_resources_not_shape_pins(N, threads, reload_from):
+    c = RmsNormRowConfig.from_register_budget(N, 16)
+
+    assert c.num_threads == threads
+    assert c.reload_from == reload_from
+
+
 @pytest.mark.parametrize("threads", [0, 3, 512])
 def test_explicit_thread_configs_reject_illegal_blocks(threads):
     with pytest.raises(ValueError, match="num_threads"):
