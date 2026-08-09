@@ -2,6 +2,8 @@
 
 """Focused contracts for the standalone RMSNorm forward autotuner."""
 
+import inspect
+
 import pytest
 import torch
 
@@ -13,6 +15,7 @@ pytest.importorskip("flydsl.compiler")
 import quack.flydsl.rmsnorm_autotune as autotune
 from quack.flydsl.rmsnorm_config import (
     MAX_TUNED_NUM_THREADS,
+    REGISTER_CACHE_ELEMS,
     RmsNormRowConfig,
     batch_short_rows,
 )
@@ -75,24 +78,52 @@ def test_candidates_are_legal_unique_and_retain_the_default(n, dtype_name):
         assert row.num_vecs >= threads
 
 
-def test_n1024_candidate_matches_the_measured_persistent_identity():
-    args, kwargs = _direct_call(rows=1, n=1024)
-    args = args[:7] + (32768,) + args[8:]
+def test_persistent_candidates_follow_geometry_for_off_ladder_rows():
+    for rows in (4097, 8193):
+        args, kwargs = _direct_call(rows=rows, n=1024)
+        configs = autotune.rmsnorm_search_configs(*args, **kwargs)
+        persistent = [config for config in configs if config.kwargs.get("packed_flat_rows")]
+
+        assert persistent
+        for config in persistent:
+            row_groups = config.kwargs["row_groups_per_block"]
+            assert row_groups > 1
+            assert config.kwargs["output_cache_modifier"] == 3
+            assert config.kwargs["persistent_single_pass"] is True
+            assert config.kwargs["persistent_programs"] == (rows + row_groups - 1) // row_groups
+
+
+def test_wide_candidate_uses_register_budget_not_exact_n():
+    candidates = autotune._row_candidates(32768, 16)
+    config = RmsNormRowConfig.with_num_threads(
+        32768,
+        16,
+        1024,
+        max_num_threads=MAX_TUNED_NUM_THREADS,
+    )
+
+    assert 1024 in candidates
+    assert config.elems_per_thread <= REGISTER_CACHE_ELEMS
+    assert 1024 not in autotune._row_candidates(65536, 16)
+    assert "n == 32768" not in inspect.getsource(autotune._row_candidates)
+
+
+def test_cache_policy_candidates_are_explicit_and_shape_independent():
+    args, kwargs = _direct_call(rows=4097, n=2048)
     configs = autotune.rmsnorm_search_configs(*args, **kwargs)
-    num_cus = torch.cuda.get_device_properties(args[0].device).multi_processor_count
-    expected = {
-        "threads_per_row": 64,
-        "row_groups_per_block": 2,
-        "persistent_programs": min(16384, num_cus * 64),
-        "output_cache_modifier": 3,
-        "persistent_single_pass": True,
-        "packed_flat_rows": True,
+    policies = {
+        (
+            config.kwargs.get("input_cache_modifier", 0),
+            config.kwargs.get("output_cache_modifier", 0),
+        )
+        for config in configs
     }
 
-    matching = [
-        config for config in configs if config.kwargs == expected and config.waves_per_eu == 7
-    ]
-    assert len(matching) == 1
+    assert autotune.RMSNORM_AUTOTUNE_SCHEMA_VERSION == 6
+    assert {(0, 0), (2, 2)} <= policies
+    source = inspect.getsource(autotune.rmsnorm_search_configs)
+    assert "_PERSISTENT_FWD_CONFIGS" not in source
+    assert "32768" not in source
 
 
 def test_decision_key_partitions_shapes_and_features_but_not_runtime_eps():
