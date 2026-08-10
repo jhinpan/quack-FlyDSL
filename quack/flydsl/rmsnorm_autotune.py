@@ -63,7 +63,10 @@ _PACKED_CACHE_POLICY_CANDIDATES = ((0, 0), (0, 2), (0, 3), (2, 2))
 _CORRECTNESS_ROWS = 16
 _RERANK_RELATIVE_BAND = 0.10
 _RERANK_ABSOLUTE_BAND_MS = 0.005
-_RERANK_FINAL_TIE_BAND = 0.02
+_RERANK_FINAL_TIE_BAND = 0.05
+_HOST_BOUND_MIN_MS = 0.03
+_HOST_BOUND_MAX_MS = 0.10
+_HOST_BOUND_TIE_BAND = 0.25
 _RERANK_CALLS = 64
 _RERANK_SAMPLES = 3
 
@@ -507,8 +510,8 @@ class RmsNormAutotuner(FlydslL2Autotuner):
 
     def _deployment_time(self, config, args, kwargs, plan):
         compiled, _positional, _ = self._compiled_callable(config, args, kwargs)
-        arg_sets = plan.arg_sets[:2]
-        kwarg_sets = plan.kwarg_sets[:2]
+        arg_sets = plan.arg_sets[:1]
+        kwarg_sets = plan.kwarg_sets[:1]
         positional_sets = [
             self._positional_arguments(config, set_args, set_kwargs)
             for set_args, set_kwargs in zip(arg_sets, kwarg_sets)
@@ -552,11 +555,19 @@ class RmsNormAutotuner(FlydslL2Autotuner):
         for config, elapsed in reranked:
             print(f"  [rerank] {config} -> {elapsed:.3f} ms")
         best_time = min(elapsed for _config, elapsed in reranked)
+        tie_band = (
+            _HOST_BOUND_TIE_BAND
+            if _HOST_BOUND_MIN_MS <= best_time <= _HOST_BOUND_MAX_MS
+            else _RERANK_FINAL_TIE_BAND
+        )
         final = [
             (config, elapsed)
             for config, elapsed in reranked
-            if elapsed <= best_time * (1.0 + _RERANK_FINAL_TIE_BAND)
+            if elapsed <= best_time * (1.0 + tie_band)
         ]
+        for config, elapsed in final:
+            if self._config_identity(config) == incumbent_identity:
+                return config, elapsed
         persistent = [
             (config, elapsed)
             for config, elapsed in final
@@ -567,9 +578,6 @@ class RmsNormAutotuner(FlydslL2Autotuner):
                 persistent,
                 key=lambda item: (item[1], self._config_identity(item[0])),
             )
-        for config, elapsed in final:
-            if self._config_identity(config) == incumbent_identity:
-                return config, elapsed
         return min(final, key=lambda item: (item[1], self._config_identity(item[0])))
 
     def _bench_one(self, config, args, kwargs):
