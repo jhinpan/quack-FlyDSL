@@ -181,23 +181,8 @@ def rmsnorm_search_configs(*args, **kwargs) -> list[Config]:
 
     m = int(args[7])
     num_cus = torch.cuda.get_device_properties(args[0].device).multi_processor_count
-    persistent_threads = max(
-        (
-            threads
-            for threads in threads_candidates
-            if threads <= WAVE_SIZE
-            and RmsNormRowConfig.with_num_threads(
-                n,
-                dtype_width,
-                threads,
-                max_num_threads=MAX_TUNED_NUM_THREADS,
-            ).reload_from
-            != "gmem"
-        ),
-        default=None,
-    )
     for threads in threads_candidates:
-        if threads != persistent_threads:
+        if threads > WAVE_SIZE:
             continue
         row = RmsNormRowConfig.with_num_threads(
             n,
@@ -205,7 +190,7 @@ def rmsnorm_search_configs(*args, **kwargs) -> list[Config]:
             threads,
             max_num_threads=MAX_TUNED_NUM_THREADS,
         )
-        if threads > WAVE_SIZE or row.reload_from == "gmem":
+        if row.reload_from == "gmem":
             continue
         max_row_groups = multi_row_block_rows(threads)
         row_group_candidates = {
