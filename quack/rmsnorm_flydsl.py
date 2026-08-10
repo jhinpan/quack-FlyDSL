@@ -1581,26 +1581,46 @@ def _rmsnorm_impl(
             and resolved_public[1] == _public_runtime_guard()
         ):
             with torch.cuda.device(x.device):
-                _launch_resolved_fwd_entry(
-                    resolved_public[2],
-                    x,
-                    weight,
-                    absent,
-                    x,
-                    out,
-                    residual_out,
-                    rstd,
-                    m,
-                    eps,
-                    weight_offset,
-                    has_weight=True,
-                    has_bias=False,
-                    has_residual=False,
-                    store_residual=False,
-                    store_rstd=False,
-                    per_head=False,
-                    num_heads=1,
-                )
+                if _is_generic_forward_config(resolved_public[2][0]):
+                    _launch_rmsnorm_fwd(
+                        x,
+                        weight,
+                        absent,
+                        x,
+                        out,
+                        residual_out,
+                        rstd,
+                        eps,
+                        weight_offset,
+                        has_weight=True,
+                        has_bias=False,
+                        has_residual=False,
+                        store_residual=False,
+                        store_rstd=False,
+                        per_head=False,
+                        num_heads=1,
+                    )
+                else:
+                    _launch_resolved_fwd_entry(
+                        resolved_public[2],
+                        x,
+                        weight,
+                        absent,
+                        x,
+                        out,
+                        residual_out,
+                        rstd,
+                        m,
+                        eps,
+                        weight_offset,
+                        has_weight=True,
+                        has_bias=False,
+                        has_residual=False,
+                        store_residual=False,
+                        store_rstd=False,
+                        per_head=False,
+                        num_heads=1,
+                    )
             return out
         use_generic_winner = (
             autotuned
