@@ -163,6 +163,19 @@ def test_repeated_metadata_reuses_validated_input_plan(monkeypatch):
     assert calls == 2
 
 
+def test_plain_inference_fast_path_is_shape_generic(monkeypatch):
+    x = torch.randn((63, 2048), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(2048, device=x.device, dtype=torch.float32)
+    expected, _ = _reference(x, weight)
+
+    def forbid_layout(_tensor):
+        raise AssertionError("plain packed inference entered layout canonicalization")
+
+    monkeypatch.setattr(rmsnorm_flydsl_impl, "_packed_rows", forbid_layout)
+    _assert_close(rmsnorm(x, weight), expected)
+    _assert_close(rmsnorm_autotuned(x, weight), expected)
+
+
 def test_resolved_generic_winner_uses_the_lower_overhead_public_launcher(monkeypatch):
     calls = []
     validation_entry = (("metadata",), ("result",))

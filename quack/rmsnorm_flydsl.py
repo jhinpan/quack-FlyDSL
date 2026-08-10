@@ -1531,6 +1531,55 @@ def _rmsnorm_impl(
             return out, added.to(residual_out_dtype)
         return out
 
+    plain_eager_inference = (
+        not torch.compiler.is_compiling()
+        and x.ndim == 2
+        and x.stride() == (n, 1)
+        and weight is not None
+        and weight.ndim == 1
+        and weight.stride() == (1,)
+        and bias is None
+        and residual is None
+        and out_dtype is None
+        and residual_dtype is None
+        and not prenorm
+        and not (torch.is_grad_enabled() and (x.requires_grad or weight.requires_grad))
+    )
+    if plain_eager_inference:
+        absent = _eager_empty(x.device, x.dtype)
+        residual_out = _eager_empty(x.device, x.dtype)
+        rstd = _eager_empty(x.device, torch.float32)
+        out = torch.empty_like(x)
+        use_generic_winner = (
+            autotuned
+            and not _env_flag_enabled("FLYDSL_AUTOTUNE")
+            and _FWD_PUBLIC_GENERIC_LAST[0] is _VALIDATED_INPUT_LAST[0]
+        )
+        launch = (
+            _launch_rmsnorm_fwd
+            if not autotuned or use_generic_winner
+            else _launch_rmsnorm_fwd_autotuned
+        )
+        launch(
+            x,
+            weight,
+            absent,
+            x,
+            out,
+            residual_out,
+            rstd,
+            eps,
+            weight_offset,
+            has_weight=True,
+            has_bias=False,
+            has_residual=False,
+            store_residual=False,
+            store_rstd=False,
+            per_head=False,
+            num_heads=1,
+        )
+        return out
+
     last_shape = (num_heads, n) if per_head else (n,)
     x_flat = _packed_rows(x.reshape(-1, *last_shape))
 
