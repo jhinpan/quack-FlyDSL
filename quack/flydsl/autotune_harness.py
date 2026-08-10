@@ -50,6 +50,7 @@ _FAST_CONTEXT_ENV_VARS = (
     "ARCH",
     "HSA_OVERRIDE_GFX_VERSION",
     "COMPILE_ONLY",
+    "QUACK_RMSNORM_EXHAUSTIVE_WAVES",
 )
 _FAST_CONTEXT_ENV_VARS_BYTES = tuple(os.fsencode(name) for name in _FAST_CONTEXT_ENV_VARS)
 
@@ -626,7 +627,9 @@ class FlydslL2Autotuner(Autotuner):
     def _tune_configs(self, args, kwargs):
         configs = self.configs(*args, **kwargs) if callable(self.configs) else self.configs
         configs = self._prune(configs, args, kwargs)
-        return self._select_result(self._benchmark_configs(configs, args, kwargs), args, kwargs)
+        results = self._benchmark_configs(configs, args, kwargs)
+        selected = self._select_result(results, args, kwargs)
+        return self._rerank_result(results, selected, args, kwargs)
 
     def _benchmark_configs(self, configs, args, kwargs):
         print(f"[autotune] tuning {len(configs)} configs...")
@@ -644,6 +647,9 @@ class FlydslL2Autotuner(Autotuner):
 
     def _select_result(self, results, args, kwargs):
         return min(results, key=lambda item: item[1])
+
+    def _rerank_result(self, results, selected, args, kwargs):
+        return selected
 
     def _call_hot_entry(self, hot_entry, args, kwargs):
         config, compiled, _payload = hot_entry
