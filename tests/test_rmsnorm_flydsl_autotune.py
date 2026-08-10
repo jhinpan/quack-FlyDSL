@@ -118,6 +118,22 @@ def test_persistent_candidates_follow_geometry_for_off_ladder_rows():
             assert config.kwargs["persistent_programs"] == (rows + row_groups - 1) // row_groups
 
 
+def test_persistent_row_loop_candidates_use_generic_grid_fractions():
+    rows = 4097
+    args, kwargs = _direct_call(rows=rows, n=512)
+    configs = autotune.rmsnorm_search_configs(*args, **kwargs)
+    num_cus = torch.cuda.get_device_properties(args[0].device).multi_processor_count
+    row_loop = {
+        config.kwargs["persistent_programs"]
+        for config in configs
+        if config.kwargs.get("persistent_programs")
+        and config.kwargs.get("row_groups_per_block") == 1
+        and not config.kwargs.get("persistent_single_pass")
+    }
+
+    assert row_loop == set(autotune._persistent_program_candidates(rows, num_cus))
+
+
 def test_wide_candidate_uses_register_budget_not_exact_n():
     candidates = autotune._row_candidates(32768, 16)
     config = RmsNormRowConfig.with_num_threads(
@@ -256,6 +272,40 @@ def test_deployment_rerank_rejects_a_cold_only_cache_winner(monkeypatch):
         tuner._active_call.rotation_plan = None
 
     assert tuner._config_identity(selected) == tuner._config_identity(incumbent)
+
+
+def test_deployment_tie_prefers_a_generic_persistent_schedule(monkeypatch):
+    tuner = autotune._rmsnorm_fwd_tuner
+    args, kwargs = _direct_call(rows=4097, n=512)
+    incumbent = autotune.rmsnorm_default_config(*args, **kwargs)
+    persistent = Config(
+        threads_per_row=incumbent.kwargs["threads_per_row"],
+        row_groups_per_block=1,
+        persistent_programs=2048,
+    )
+    deployment_times = {
+        tuner._config_identity(incumbent): 0.0100,
+        tuner._config_identity(persistent): 0.0101,
+    }
+    monkeypatch.setattr(
+        tuner,
+        "_deployment_time",
+        lambda config, call_args, call_kwargs, plan: deployment_times[
+            tuner._config_identity(config)
+        ],
+    )
+    tuner._active_call.rotation_plan = object()
+    try:
+        selected, _elapsed = tuner._rerank_result(
+            [(incumbent, 0.0100), (persistent, 0.0101)],
+            (incumbent, 0.0100),
+            args,
+            kwargs,
+        )
+    finally:
+        tuner._active_call.rotation_plan = None
+
+    assert tuner._config_identity(selected) == tuner._config_identity(persistent)
 
 
 def test_selected_config_launch_passes_the_correctness_gate(tmp_path, monkeypatch):
