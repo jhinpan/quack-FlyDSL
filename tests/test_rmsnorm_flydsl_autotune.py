@@ -146,11 +146,26 @@ def test_cache_policy_candidates_are_explicit_and_shape_independent():
         for config in configs
     }
 
-    assert autotune.RMSNORM_AUTOTUNE_SCHEMA_VERSION == 6
+    assert autotune.RMSNORM_AUTOTUNE_SCHEMA_VERSION == 7
     assert {(0, 0), (2, 2)} <= policies
     source = inspect.getsource(autotune.rmsnorm_search_configs)
     assert "_PERSISTENT_FWD_CONFIGS" not in source
     assert "32768" not in source
+
+
+def test_waves_search_is_pruned_by_default_and_exhaustive_on_request(monkeypatch):
+    tuner = autotune._rmsnorm_fwd_tuner
+    args, kwargs = _direct_call(rows=64, n=4096)
+    monkeypatch.delenv("QUACK_RMSNORM_EXHAUSTIVE_WAVES", raising=False)
+    default = autotune.rmsnorm_search_configs(n=4096, input_dtype_str="bf16")
+    default_key = tuner._contextual_decision_key(args, kwargs)
+    monkeypatch.setenv("QUACK_RMSNORM_EXHAUSTIVE_WAVES", "1")
+    exhaustive = autotune.rmsnorm_search_configs(n=4096, input_dtype_str="bf16")
+    exhaustive_key = tuner._contextual_decision_key(args, kwargs)
+
+    assert {config.waves_per_eu for config in default} == {None, 4}
+    assert {config.waves_per_eu for config in exhaustive} == {None, 1, 2, 4}
+    assert default_key != exhaustive_key
 
 
 def test_decision_key_partitions_shapes_and_features_but_not_runtime_eps():

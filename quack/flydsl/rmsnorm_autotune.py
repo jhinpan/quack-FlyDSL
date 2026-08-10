@@ -54,8 +54,10 @@ _typed_identity = _autotune_harness._typed_identity
 _unique_tensor_bytes = _autotune_harness._unique_tensor_bytes
 _with_runtime_stream = _autotune_harness._with_runtime_stream
 
-RMSNORM_AUTOTUNE_SCHEMA_VERSION = 6
-_WAVES_PER_EU = (None, 1, 2, 4)
+RMSNORM_AUTOTUNE_SCHEMA_VERSION = 7
+_WAVES_PER_EU = (None, 4)
+_EXHAUSTIVE_WAVES_PER_EU = (None, 1, 2, 4)
+_EXHAUSTIVE_WAVES_ENV = "QUACK_RMSNORM_EXHAUSTIVE_WAVES"
 _CACHE_POLICY_CANDIDATES = ((2, 2),)
 _CORRECTNESS_ROWS = 16
 _RERANK_RELATIVE_BAND = 0.03
@@ -63,6 +65,11 @@ _RERANK_ABSOLUTE_BAND_MS = 0.002
 _RERANK_FINAL_TIE_BAND = 0.02
 _RERANK_CALLS = 64
 _RERANK_SAMPLES = 3
+
+
+def _waves_per_eu_candidates():
+    value = os.environ.get(_EXHAUSTIVE_WAVES_ENV, "").strip().lower()
+    return _EXHAUSTIVE_WAVES_PER_EU if value in {"1", "true", "yes", "on"} else _WAVES_PER_EU
 
 
 def _row_candidates(n: int, dtype_width: int) -> list[int]:
@@ -125,7 +132,7 @@ def rmsnorm_search_configs(*args, **kwargs) -> list[Config]:
 
     threads_candidates = _row_candidates(n, dtype_width)
     for threads in threads_candidates:
-        for waves_per_eu in _WAVES_PER_EU:
+        for waves_per_eu in _waves_per_eu_candidates():
             append(threads_per_row=threads, waves_per_eu=waves_per_eu)
 
     plain_bf16 = (
@@ -409,6 +416,13 @@ class RmsNormAutotuner(FlydslL2Autotuner):
     """Forward RMSNorm specialization of the shared FlyDSL L2 harness."""
 
     benchmark_name = "RMSNorm"
+
+    @staticmethod
+    def _process_context_key():
+        return (
+            *FlydslL2Autotuner._process_context_key(),
+            ("exhaustive_waves", os.environ.get(_EXHAUSTIVE_WAVES_ENV, "")),
+        )
 
     def _call_hot_entry(self, hot_entry, args, kwargs):
         _config, compiled, constexpr_suffix = hot_entry
