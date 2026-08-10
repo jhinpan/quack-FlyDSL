@@ -49,6 +49,7 @@ _FWD_CACHE: dict[tuple, object] = {}
 _BWD_CACHE: dict[tuple, object] = {}
 _FWD_AUTOTUNED_FAST_CACHE: dict[tuple, tuple] = {}
 _BWD_AUTOTUNED_FAST_CACHE: dict[tuple, tuple] = {}
+_FWD_AUTOTUNED_LAST: list[tuple[tuple, tuple] | None] = [None]
 _BWD_CU_COUNT_CACHE: dict[torch.device, int] = {}
 _DEVICE_ARCH_CACHE: dict[int, str] = {}
 _AUTOTUNE_ARCH_CACHE: dict[tuple, str] = {}
@@ -447,6 +448,41 @@ def _launch_rmsnorm_fwd_autotuned(
 ) -> None:
     """Launch through the tuner's ABI/config/device-aware CompiledFunction cache."""
     m, n = x.shape[0], x.shape[-1]
+    forced = _env_flag_enabled("FLYDSL_AUTOTUNE")
+    compile_only = _env_flag_enabled("COMPILE_ONLY")
+    context_token = _rmsnorm_fwd_tuner.fast_context_token()
+    last_key = (
+        context_token,
+        x.device.index,
+        m,
+        n,
+        x.dtype,
+        out.dtype,
+        weight.dtype,
+        bias.dtype,
+        residual.dtype,
+        residual_out.dtype,
+        has_weight,
+        has_bias,
+        has_residual,
+        store_residual,
+        store_rstd,
+        per_head,
+        num_heads,
+    )
+    last_entry = _FWD_AUTOTUNED_LAST[0]
+    if not forced and not compile_only and last_entry is not None and last_entry[0] == last_key:
+        with torch.cuda.device(x.device):
+            _config, compiled, constexpr_suffix = last_entry[1]
+            compiled(
+                *(
+                    (x, weight, bias, residual, out, residual_out, rstd, m, eps, weight_offset)
+                    + constexpr_suffix
+                    + (_current_raw_stream(x.device),)
+                )
+            )
+        return
+
     input_dtype_str = _dtype_to_str(x.dtype)
     output_dtype_str = _dtype_to_str(out.dtype)
     weight_dtype_str = _dtype_to_str(weight.dtype)
@@ -454,7 +490,7 @@ def _launch_rmsnorm_fwd_autotuned(
     residual_dtype_str = _dtype_to_str(residual.dtype)
     residual_out_dtype_str = _dtype_to_str(residual_out.dtype)
     fast_key = (
-        _rmsnorm_fwd_tuner.fast_context_token(),
+        context_token,
         x.device.index,
         m,
         n,
@@ -472,12 +508,11 @@ def _launch_rmsnorm_fwd_autotuned(
         per_head,
         num_heads,
     )
-    forced = _env_flag_enabled("FLYDSL_AUTOTUNE")
-    compile_only = _env_flag_enabled("COMPILE_ONLY")
     with torch.cuda.device(x.device):
         if not forced and not compile_only:
             fast_entry = _FWD_AUTOTUNED_FAST_CACHE.get(fast_key)
             if fast_entry is not None:
+                _FWD_AUTOTUNED_LAST[0] = (last_key, fast_entry)
                 _config, compiled, constexpr_suffix = fast_entry
                 compiled(
                     *(
@@ -538,6 +573,7 @@ def _launch_rmsnorm_fwd_autotuned(
         resolved = _rmsnorm_fwd_tuner.resolved_fast_entry(args, kwargs)
         if resolved is not None:
             _FWD_AUTOTUNED_FAST_CACHE[fast_key] = resolved
+            _FWD_AUTOTUNED_LAST[0] = (last_key, resolved)
 
 
 @torch.library.custom_op(
