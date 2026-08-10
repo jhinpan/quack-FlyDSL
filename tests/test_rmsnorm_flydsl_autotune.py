@@ -292,7 +292,7 @@ def test_deployment_tie_prefers_a_generic_persistent_schedule(monkeypatch):
     )
     deployment_times = {
         tuner._config_identity(incumbent): 0.0100,
-        tuner._config_identity(persistent): 0.0101,
+        tuner._config_identity(persistent): 0.0090,
     }
     monkeypatch.setattr(
         tuner,
@@ -304,8 +304,8 @@ def test_deployment_tie_prefers_a_generic_persistent_schedule(monkeypatch):
     tuner._active_call.rotation_plan = object()
     try:
         selected, _elapsed = tuner._rerank_result(
-            [(incumbent, 0.0100), (persistent, 0.0101)],
-            (incumbent, 0.0100),
+            [(incumbent, 0.0100), (persistent, 0.0090)],
+            (persistent, 0.0090),
             args,
             kwargs,
         )
@@ -313,6 +313,42 @@ def test_deployment_tie_prefers_a_generic_persistent_schedule(monkeypatch):
         tuner._active_call.rotation_plan = None
 
     assert tuner._config_identity(selected) == tuner._config_identity(persistent)
+
+
+def test_host_bound_regime_keeps_the_generic_public_path(monkeypatch):
+    tuner = autotune._rmsnorm_fwd_tuner
+    args, kwargs = _direct_call(rows=4097, n=2048)
+    incumbent = autotune.rmsnorm_default_config(*args, **kwargs)
+    persistent = Config(
+        threads_per_row=64,
+        row_groups_per_block=2,
+        persistent_programs=2049,
+        persistent_single_pass=True,
+        packed_flat_rows=True,
+    )
+    deployment_times = {
+        tuner._config_identity(incumbent): 0.047,
+        tuner._config_identity(persistent): 0.038,
+    }
+    monkeypatch.setattr(
+        tuner,
+        "_deployment_time",
+        lambda config, call_args, call_kwargs, plan: deployment_times[
+            tuner._config_identity(config)
+        ],
+    )
+    tuner._active_call.rotation_plan = object()
+    try:
+        selected, _elapsed = tuner._rerank_result(
+            [(incumbent, 0.047), (persistent, 0.038)],
+            (persistent, 0.038),
+            args,
+            kwargs,
+        )
+    finally:
+        tuner._active_call.rotation_plan = None
+
+    assert tuner._config_identity(selected) == tuner._config_identity(incumbent)
 
 
 def test_selected_config_launch_passes_the_correctness_gate(tmp_path, monkeypatch):
