@@ -10,10 +10,8 @@ and this backend does not alter Quack's existing CUDA/CuTe dispatch. The
 
 import torch
 
-from quack.flydsl import rmsnorm_arch as _rmsnorm_arch
 from quack.flydsl import rmsnorm_launch as _rmsnorm_launch
-from quack.flydsl import rmsnorm_layout as _rmsnorm_layout
-from quack.flydsl import rmsnorm_validate as _rmsnorm_validate
+from quack.flydsl import rmsnorm_preflight as _rmsnorm_preflight
 from quack.flydsl.rmsnorm_common import EPS
 
 __all__ = ["rmsnorm", "rmsnorm_autotuned"]
@@ -22,25 +20,28 @@ _EAGER_EMPTY_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
 
 # Preserve the facade's existing private lookup surface. Mutable caches are
 # aliases, not copies, so callers clearing them still affect the owning module.
-_SUPPORTED_DTYPES = _rmsnorm_validate._SUPPORTED_DTYPES
-_MAX_ROWS = _rmsnorm_validate._MAX_ROWS
-MAX_N = _rmsnorm_validate.MAX_N
-N_ALIGNMENT = _rmsnorm_validate.N_ALIGNMENT
-_validate_inputs = _rmsnorm_validate._validate_inputs
+_SUPPORTED_DTYPES = _rmsnorm_preflight._SUPPORTED_DTYPES
+_MAX_ROWS = _rmsnorm_preflight._MAX_ROWS
+MAX_N = _rmsnorm_preflight.MAX_N
+N_ALIGNMENT = _rmsnorm_preflight.N_ALIGNMENT
+_VALIDATED_INPUT_LAST = _rmsnorm_preflight._VALIDATED_INPUT_LAST
+_validate_inputs = _rmsnorm_preflight._validate_inputs
+_validation_tensor_metadata = _rmsnorm_preflight._validation_tensor_metadata
+_validated_inputs = _rmsnorm_preflight._validated_inputs
 
-_packed_rows = _rmsnorm_layout._packed_rows
-_unambiguous_layout = _rmsnorm_layout._unambiguous_layout
-_rows_are_disjoint_and_packed = _rmsnorm_layout._rows_are_disjoint_and_packed
+_packed_rows = _rmsnorm_preflight._packed_rows
+_unambiguous_layout = _rmsnorm_preflight._unambiguous_layout
+_rows_are_disjoint_and_packed = _rmsnorm_preflight._rows_are_disjoint_and_packed
 
-_SUPPORTED_ARCHES = _rmsnorm_arch._SUPPORTED_ARCHES
-_DEVICE_ARCH_CACHE = _rmsnorm_arch._DEVICE_ARCH_CACHE
-_AUTOTUNE_ARCH_CACHE = _rmsnorm_arch._AUTOTUNE_ARCH_CACHE
-_AUTOTUNE_TARGET_ENV_VARS = _rmsnorm_arch._AUTOTUNE_TARGET_ENV_VARS
-_normalize_arch = _rmsnorm_arch._normalize_arch
-_flydsl_compile_target = _rmsnorm_arch._flydsl_compile_target
-_flydsl_runtime_arch = _rmsnorm_arch._flydsl_runtime_arch
-_validate_arch = _rmsnorm_arch._validate_arch
-_validated_autotune_arch = _rmsnorm_arch._validated_autotune_arch
+_SUPPORTED_ARCHES = _rmsnorm_preflight._SUPPORTED_ARCHES
+_DEVICE_ARCH_CACHE = _rmsnorm_preflight._DEVICE_ARCH_CACHE
+_AUTOTUNE_ARCH_CACHE = _rmsnorm_preflight._AUTOTUNE_ARCH_CACHE
+_AUTOTUNE_TARGET_ENV_VARS = _rmsnorm_preflight._AUTOTUNE_TARGET_ENV_VARS
+_normalize_arch = _rmsnorm_preflight._normalize_arch
+_flydsl_compile_target = _rmsnorm_preflight._flydsl_compile_target
+_flydsl_runtime_arch = _rmsnorm_preflight._flydsl_runtime_arch
+_validate_arch = _rmsnorm_preflight._validate_arch
+_validated_autotune_arch = _rmsnorm_preflight._validated_autotune_arch
 
 RMSNORM_AUTOTUNE_SCHEMA_VERSION = _rmsnorm_launch.RMSNORM_AUTOTUNE_SCHEMA_VERSION
 RMSNORM_BWD_AUTOTUNE_SCHEMA_VERSION = _rmsnorm_launch.RMSNORM_BWD_AUTOTUNE_SCHEMA_VERSION
@@ -57,6 +58,9 @@ _FWD_CACHE = _rmsnorm_launch._FWD_CACHE
 _BWD_CACHE = _rmsnorm_launch._BWD_CACHE
 _FWD_AUTOTUNED_FAST_CACHE = _rmsnorm_launch._FWD_AUTOTUNED_FAST_CACHE
 _BWD_AUTOTUNED_FAST_CACHE = _rmsnorm_launch._BWD_AUTOTUNED_FAST_CACHE
+_FWD_AUTOTUNED_LAST = _rmsnorm_launch._FWD_AUTOTUNED_LAST
+_FWD_PUBLIC_GENERIC_LAST = _rmsnorm_launch._FWD_PUBLIC_GENERIC_LAST
+_FWD_PUBLIC_RESOLVED_LAST = _rmsnorm_launch._FWD_PUBLIC_RESOLVED_LAST
 _BWD_CU_COUNT_CACHE = _rmsnorm_launch._BWD_CU_COUNT_CACHE
 _dtype_to_str = _rmsnorm_launch._dtype_to_str
 _current_raw_stream = _rmsnorm_launch._current_raw_stream
@@ -64,6 +68,10 @@ _env_flag_enabled = _rmsnorm_launch._env_flag_enabled
 _build_cached = _rmsnorm_launch._build_cached
 _select_rmsnorm_bwd_programs = _rmsnorm_launch._select_rmsnorm_bwd_programs
 _launch_rmsnorm_fwd = _rmsnorm_launch._launch_rmsnorm_fwd
+_is_generic_forward_config = _rmsnorm_launch._is_generic_forward_config
+_public_runtime_guard = _rmsnorm_launch._public_runtime_guard
+_forward_public_key = _rmsnorm_launch._forward_public_key
+_launch_resolved_fwd_entry = _rmsnorm_launch._launch_resolved_fwd_entry
 _launch_rmsnorm_fwd_autotuned = _rmsnorm_launch._launch_rmsnorm_fwd_autotuned
 _launch_rmsnorm_bwd = _rmsnorm_launch._launch_rmsnorm_bwd
 _launch_rmsnorm_bwd_autotuned = _rmsnorm_launch._launch_rmsnorm_bwd_autotuned
@@ -505,7 +513,7 @@ def _rmsnorm_impl(
     autotuned: bool,
 ) -> torch.Tensor:
     """Apply RMSNorm over the last dimension using the FlyDSL backend."""
-    m, n, num_heads, per_head, eps, weight_offset = _validate_inputs(
+    m, n, num_heads, per_head, eps, weight_offset = _validated_inputs(
         x,
         weight,
         bias,
@@ -534,6 +542,105 @@ def _rmsnorm_impl(
         out = normalized.to(output_dtype)
         if prenorm:
             return out, added.to(residual_out_dtype)
+        return out
+
+    plain_eager_inference = (
+        not torch.compiler.is_compiling()
+        and x.ndim == 2
+        and x.stride() == (n, 1)
+        and weight is not None
+        and weight.ndim == 1
+        and weight.stride() == (1,)
+        and bias is None
+        and residual is None
+        and out_dtype is None
+        and residual_dtype is None
+        and not prenorm
+        and not (torch.is_grad_enabled() and (x.requires_grad or weight.requires_grad))
+    )
+    if plain_eager_inference:
+        absent = _eager_empty(x.device, x.dtype)
+        residual_out = _eager_empty(x.device, x.dtype)
+        rstd = _eager_empty(x.device, torch.float32)
+        out = torch.empty_like(x)
+        resolved_public = _FWD_PUBLIC_RESOLVED_LAST[0]
+        if (
+            autotuned
+            and not _env_flag_enabled("FLYDSL_AUTOTUNE")
+            and resolved_public is not None
+            and resolved_public[0] is _VALIDATED_INPUT_LAST[0]
+            and resolved_public[1] == _public_runtime_guard()
+        ):
+            with torch.cuda.device(x.device):
+                if _is_generic_forward_config(resolved_public[2][0]):
+                    _launch_rmsnorm_fwd(
+                        x,
+                        weight,
+                        absent,
+                        x,
+                        out,
+                        residual_out,
+                        rstd,
+                        eps,
+                        weight_offset,
+                        has_weight=True,
+                        has_bias=False,
+                        has_residual=False,
+                        store_residual=False,
+                        store_rstd=False,
+                        per_head=False,
+                        num_heads=1,
+                    )
+                else:
+                    _launch_resolved_fwd_entry(
+                        resolved_public[2],
+                        x,
+                        weight,
+                        absent,
+                        x,
+                        out,
+                        residual_out,
+                        rstd,
+                        m,
+                        eps,
+                        weight_offset,
+                        has_weight=True,
+                        has_bias=False,
+                        has_residual=False,
+                        store_residual=False,
+                        store_rstd=False,
+                        per_head=False,
+                        num_heads=1,
+                    )
+            return out
+        use_generic_winner = (
+            autotuned
+            and not _env_flag_enabled("FLYDSL_AUTOTUNE")
+            and _FWD_PUBLIC_GENERIC_LAST[0] is _VALIDATED_INPUT_LAST[0]
+        )
+        launch = (
+            _launch_rmsnorm_fwd
+            if not autotuned or use_generic_winner
+            else _launch_rmsnorm_fwd_autotuned
+        )
+        launch(
+            x,
+            weight,
+            absent,
+            x,
+            out,
+            residual_out,
+            rstd,
+            eps,
+            weight_offset,
+            has_weight=True,
+            has_bias=False,
+            has_residual=False,
+            store_residual=False,
+            store_rstd=False,
+            per_head=False,
+            num_heads=1,
+        )
         return out
 
     last_shape = (num_heads, n) if per_head else (n,)
@@ -566,7 +673,16 @@ def _rmsnorm_impl(
             else _eager_empty(x.device, residual_out_dtype)
         )
         rstd = _eager_empty(x.device, torch.float32)
-        launch = _launch_rmsnorm_fwd_autotuned if autotuned else _launch_rmsnorm_fwd
+        use_generic_winner = (
+            autotuned
+            and not _env_flag_enabled("FLYDSL_AUTOTUNE")
+            and _FWD_PUBLIC_GENERIC_LAST[0] is _VALIDATED_INPUT_LAST[0]
+        )
+        launch = (
+            _launch_rmsnorm_fwd
+            if not autotuned or use_generic_winner
+            else _launch_rmsnorm_fwd_autotuned
+        )
         launch(
             x_flat,
             weight_arg,

@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from flydsl.autotune import Config
 
 if torch.version.hip is None:
     pytest.skip("FlyDSL RMSNorm requires a ROCm PyTorch build", allow_module_level=True)
@@ -27,6 +28,8 @@ EPS = 1e-6
 quack = importlib.import_module("quack")
 rmsnorm = quack.rmsnorm
 rmsnorm_flydsl_impl = importlib.import_module("quack.rmsnorm_flydsl")
+rmsnorm_launch = importlib.import_module("quack.flydsl.rmsnorm_launch")
+rmsnorm_preflight = importlib.import_module("quack.flydsl.rmsnorm_preflight")
 rmsnorm_autotuned = rmsnorm_flydsl_impl.rmsnorm_autotuned
 
 
@@ -140,6 +143,149 @@ def test_forward_matches_fp32_reference():
     _assert_close(actual, expected)
 
 
+def test_repeated_metadata_reuses_validated_input_plan(monkeypatch):
+    rmsnorm_preflight._VALIDATED_INPUT_LAST[0] = None
+    calls = 0
+    real_validate = rmsnorm_preflight._validate_inputs
+
+    def count_validate(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_validate(*args, **kwargs)
+
+    monkeypatch.setattr(rmsnorm_preflight, "_validate_inputs", count_validate)
+    weight = torch.randn(512, device="cuda", dtype=torch.float32)
+    for _ in range(2):
+        x = torch.randn((64, 512), device="cuda", dtype=torch.bfloat16)
+        rmsnorm(x, weight)
+    assert calls == 1
+
+    x = torch.randn((64, 512), device="cuda", dtype=torch.bfloat16)
+    rmsnorm(x, weight, eps=1e-5)
+    assert calls == 2
+
+
+def test_plain_inference_fast_path_is_shape_generic(monkeypatch):
+    x = torch.randn((63, 2048), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(2048, device=x.device, dtype=torch.float32)
+    expected, _ = _reference(x, weight)
+
+    def forbid_layout(_tensor):
+        raise AssertionError("plain packed inference entered layout canonicalization")
+
+    monkeypatch.setattr(rmsnorm_flydsl_impl, "_packed_rows", forbid_layout)
+    _assert_close(rmsnorm(x, weight), expected)
+    _assert_close(rmsnorm_autotuned(x, weight), expected)
+
+
+def test_resolved_generic_winner_uses_the_lower_overhead_public_launcher(monkeypatch):
+    calls = []
+    validation_entry = (("metadata",), ("result",))
+    rmsnorm_preflight._VALIDATED_INPUT_LAST[0] = validation_entry
+    rmsnorm_launch._FWD_PUBLIC_GENERIC_LAST[0] = None
+    rmsnorm_launch._FWD_PUBLIC_RESOLVED_LAST[0] = None
+    monkeypatch.setattr(
+        rmsnorm_launch,
+        "_launch_rmsnorm_fwd",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+    tensor = object()
+    rmsnorm_launch._launch_resolved_fwd_entry(
+        (Config(threads_per_row=64), None, None),
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+        64,
+        1e-6,
+        0.0,
+        has_weight=True,
+        has_bias=False,
+        has_residual=False,
+        store_residual=False,
+        store_rstd=False,
+        per_head=False,
+        num_heads=1,
+    )
+
+    assert len(calls) == 1
+    assert rmsnorm_launch._FWD_PUBLIC_GENERIC_LAST[0] is validation_entry
+
+
+def test_plain_inference_uses_resolved_public_entry_before_tuner_keys(monkeypatch):
+    rmsnorm_preflight._VALIDATED_INPUT_LAST[0] = None
+    rmsnorm_launch._FWD_PUBLIC_RESOLVED_LAST[0] = None
+    x = torch.randn((64, 512), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(512, device=x.device, dtype=torch.float32)
+    rmsnorm_preflight._validated_inputs(
+        x,
+        weight,
+        None,
+        None,
+        None,
+        None,
+        EPS,
+        False,
+        0.0,
+    )
+    calls = []
+    config = Config(
+        threads_per_row=64,
+        input_cache_modifier=2,
+        output_cache_modifier=2,
+    )
+    rmsnorm_launch._FWD_PUBLIC_RESOLVED_LAST[0] = (
+        rmsnorm_preflight._VALIDATED_INPUT_LAST[0],
+        rmsnorm_launch._public_runtime_guard(),
+        (config, lambda *args: calls.append(args), ()),
+    )
+
+    def forbid_context():
+        raise AssertionError("rebuilt tuner context")
+
+    monkeypatch.setattr(
+        rmsnorm_launch._rmsnorm_fwd_tuner,
+        "fast_context_token",
+        forbid_context,
+    )
+
+    rmsnorm_autotuned(x, weight)
+
+    assert len(calls) == 1
+
+
+def test_autotuned_forward_last_hit_bypasses_tuner_on_runtime_stream(monkeypatch):
+    tuner = rmsnorm_launch._rmsnorm_fwd_tuner
+    rmsnorm_launch._FWD_AUTOTUNED_FAST_CACHE.clear()
+    rmsnorm_launch._FWD_AUTOTUNED_LAST[0] = None
+    rmsnorm_launch._FWD_PUBLIC_GENERIC_LAST[0] = None
+    rmsnorm_launch._FWD_PUBLIC_RESOLVED_LAST[0] = None
+    rmsnorm_preflight._VALIDATED_INPUT_LAST[0] = None
+    tuner.cache.clear()
+    tuner._hot_cache.clear()
+    torch.manual_seed(4)
+    x = torch.randn((64, 512), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(512, device=x.device, dtype=torch.float32)
+
+    first = rmsnorm_autotuned(x, weight)
+    assert rmsnorm_launch._FWD_AUTOTUNED_LAST[0] is not None
+
+    def forbid_tuner_entry(*args, **kwargs):
+        raise AssertionError("warm forward call re-entered the tuner")
+
+    monkeypatch.setattr(type(tuner), "__call__", forbid_tuner_entry)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        second = rmsnorm_autotuned(x, weight)
+    stream.synchronize()
+
+    torch.testing.assert_close(second, first, rtol=0.0, atol=0.0)
+
+
 def test_default_launch_policy_contains_no_benchmark_shape_literals():
     policy = "\n".join(
         inspect.getsource(function)
@@ -195,6 +341,7 @@ def test_backward_matches_reference_and_is_deterministic():
 def test_autotuned_backward_reuses_resolved_callable(monkeypatch):
     tuner = rmsnorm_flydsl_impl._rmsnorm_bwd_tuner
     rmsnorm_flydsl_impl._FWD_AUTOTUNED_FAST_CACHE.clear()
+    rmsnorm_flydsl_impl._FWD_AUTOTUNED_LAST[0] = None
     rmsnorm_flydsl_impl._BWD_AUTOTUNED_FAST_CACHE.clear()
     tuner.cache.clear()
     tuner._hot_cache.clear()
