@@ -1,0 +1,115 @@
+name: FlyDSL compatibility
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/flydsl-compat.yml"
+      - "pyproject.toml"
+      - "quack/__init__.py"
+      - "quack/rmsnorm.py"
+      - "quack/rmsnorm_flydsl.py"
+      - "quack/flydsl/**"
+      - "benchmarks/reproduce_rmsnorm_flydsl.py"
+  push:
+    paths:
+      - ".github/workflows/flydsl-compat.yml"
+      - "pyproject.toml"
+      - "quack/__init__.py"
+      - "quack/rmsnorm.py"
+      - "quack/rmsnorm_flydsl.py"
+      - "quack/flydsl/**"
+      - "benchmarks/reproduce_rmsnorm_flydsl.py"
+  schedule:
+    - cron: "17 8 * * 1"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: flydsl-compat-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  static-contract:
+    name: static contract (${{ matrix.lane }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: exact-0.3.0
+            spec: flydsl==0.3.0
+            expected: ==0.3.0
+          - lane: latest-stable
+            spec: flydsl<0.4
+            expected: ">=0.3,<0.4"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install CPU runtime and selected FlyDSL
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            --index-url https://download.pytorch.org/whl/cpu \
+            "torch==2.9.1"
+          python -m pip install -e ".[flydsl]" \
+            "packaging" \
+            "${{ matrix.spec }}"
+          python -m pip check
+      - name: Verify distribution and static public contract
+        env:
+          EXPECTED_FLYDSL: ${{ matrix.expected }}
+        run: |
+          python - <<'PY'
+          import ast
+          import importlib.metadata as metadata
+          import inspect
+          import os
+          import sys
+          from pathlib import Path
+          from packaging.specifiers import SpecifierSet
+          from packaging.version import Version
+          import torch
+          version = Version(metadata.version("flydsl"))
+          expected = SpecifierSet(os.environ["EXPECTED_FLYDSL"])
+          assert version in expected, (version, expected)
+          assert not version.is_prerelease, version
+          assert Version(torch.__version__.split("+", 1)[0]) == Version("2.9.1")
+          assert torch.version.hip is None
+          assert not torch.cuda.is_available()
+          torch.version.hip = "static-contract"
+          import quack
+          assert quack.__all__ == ["rmsnorm"]
+          assert "quack.rmsnorm" not in sys.modules
+          assert "quack.rmsnorm_flydsl" not in sys.modules
+          assert not any(
+              name == "flydsl" or name.startswith("flydsl.") for name in sys.modules
+          )
+
+          public = quack.rmsnorm
+          assert public is quack.rmsnorm
+          assert public.__module__ == "quack.rmsnorm_flydsl"
+          assert "quack.rmsnorm" not in sys.modules
+          assert "quack.rmsnorm_flydsl" in sys.modules
+          assert any(name == "flydsl" or name.startswith("flydsl.") for name in sys.modules)
+
+          source = Path("quack/rmsnorm.py").read_text(encoding="utf-8")
+          upstream = next(
+              node
+              for node in ast.parse(source).body
+              if isinstance(node, ast.FunctionDef) and node.name == "rmsnorm"
+          )
+          names = [argument.arg for argument in upstream.args.args]
+          defaults = [ast.unparse(default) for default in upstream.args.defaults]
+          expected_defaults = dict(zip(names[-len(defaults):], defaults))
+          actual = inspect.signature(public).parameters
+          assert list(actual) == names
+          for name, default in expected_defaults.items():
+              assert repr(actual[name].default) == default, name
+
+          print(f"resolved flydsl=={version}; expected {expected}")
+          print(
+              "WAIVER: static contract only; no GPU, codegen, numerics, "
+              "determinism, or autotune behavior is tested."
+          )
+          PY
