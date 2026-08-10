@@ -50,6 +50,39 @@ JAX bindings are also available for some kernels (see [docs/jax.md](docs/jax.md)
 from quack.softmax_jax import softmax
 ```
 
+## ROCm / FlyDSL
+
+On AMD MI355X (gfx950), install the optional FlyDSL backend and benchmark
+dependencies from this checkout:
+
+```bash
+pip install -e '.[flydsl,bench]'
+```
+
+The public RMSNorm call selects FlyDSL on ROCm while CUDA keeps the existing
+CuTe backend:
+
+```python
+from quack import rmsnorm
+
+y = rmsnorm(x, weight, eps=1e-6)
+```
+
+Run the complete correctness-gated, 11-shape forward/backward comparison of
+FlyDSL, autotuned FlyDSL, and `torch.compile` with one command:
+
+```bash
+HIP_VISIBLE_DEVICES=<idle-gfx950-gpu> PYTHONPATH=$PWD \
+  python benchmarks/reproduce_rmsnorm_flydsl.py \
+  --output-dir /root/artifacts/rmsnorm-$(git rev-parse --short HEAD)
+```
+
+Each artifact records the installed FlyDSL distribution version at
+`versions.flydsl_distribution` and the resolved module origin at
+`imports.flydsl_module_origin`. These fields replace the integration artifact's
+`versions.flydsl_module` and `imports.flydsl` fields; consumers should migrate
+to the new keys. The reproducer does not read FlyDSL module version/path APIs.
+
 ## Documentations
 
 - [JAX interface](docs/jax.md) — optional `jax` + `jax-tvm-ffi` bindings, see `quack/softmax_jax.py` for an example.
