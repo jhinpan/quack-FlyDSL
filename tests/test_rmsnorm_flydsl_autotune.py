@@ -110,12 +110,35 @@ def test_persistent_candidates_follow_geometry_for_off_ladder_rows():
         persistent = [config for config in configs if config.kwargs.get("packed_flat_rows")]
 
         assert persistent
+        policies = set()
         for config in persistent:
             row_groups = config.kwargs["row_groups_per_block"]
             assert row_groups > 1
-            assert config.kwargs["output_cache_modifier"] == 3
+            policies.add(
+                (
+                    config.kwargs["input_cache_modifier"],
+                    config.kwargs["output_cache_modifier"],
+                )
+            )
             assert config.kwargs["persistent_single_pass"] is True
             assert config.kwargs["persistent_programs"] == (rows + row_groups - 1) // row_groups
+        assert policies == set(autotune._PACKED_CACHE_POLICY_CANDIDATES)
+
+
+def test_persistent_row_loop_candidates_use_generic_grid_fractions():
+    rows = 4097
+    args, kwargs = _direct_call(rows=rows, n=512)
+    configs = autotune.rmsnorm_search_configs(*args, **kwargs)
+    num_cus = torch.cuda.get_device_properties(args[0].device).multi_processor_count
+    row_loop = {
+        config.kwargs["persistent_programs"]
+        for config in configs
+        if config.kwargs.get("persistent_programs")
+        and config.kwargs.get("row_groups_per_block") == 1
+        and not config.kwargs.get("persistent_single_pass")
+    }
+
+    assert row_loop == set(autotune._persistent_program_candidates(rows, num_cus))
 
 
 def test_wide_candidate_uses_register_budget_not_exact_n():
@@ -146,11 +169,26 @@ def test_cache_policy_candidates_are_explicit_and_shape_independent():
         for config in configs
     }
 
-    assert autotune.RMSNORM_AUTOTUNE_SCHEMA_VERSION == 6
+    assert autotune.RMSNORM_AUTOTUNE_SCHEMA_VERSION == 7
     assert {(0, 0), (2, 2)} <= policies
     source = inspect.getsource(autotune.rmsnorm_search_configs)
     assert "_PERSISTENT_FWD_CONFIGS" not in source
     assert "32768" not in source
+
+
+def test_waves_search_is_pruned_by_default_and_exhaustive_on_request(monkeypatch):
+    tuner = autotune._rmsnorm_fwd_tuner
+    args, kwargs = _direct_call(rows=64, n=4096)
+    monkeypatch.delenv("QUACK_RMSNORM_EXHAUSTIVE_WAVES", raising=False)
+    default = autotune.rmsnorm_search_configs(n=4096, input_dtype_str="bf16")
+    default_key = tuner._contextual_decision_key(args, kwargs)
+    monkeypatch.setenv("QUACK_RMSNORM_EXHAUSTIVE_WAVES", "1")
+    exhaustive = autotune.rmsnorm_search_configs(n=4096, input_dtype_str="bf16")
+    exhaustive_key = tuner._contextual_decision_key(args, kwargs)
+
+    assert {config.waves_per_eu for config in default} == {None, 4}
+    assert {config.waves_per_eu for config in exhaustive} == {None, 1, 2, 4}
+    assert default_key != exhaustive_key
 
 
 def test_decision_key_partitions_shapes_and_features_but_not_runtime_eps():
@@ -207,6 +245,110 @@ def test_training_search_reuses_the_profiled_inference_geometry(monkeypatch):
     assert selected.kwargs == {"threads_per_row": 64}
     assert selected.waves_per_eu == 2
     tuner.cache.pop(inference_key)
+
+
+def test_deployment_rerank_rejects_a_cold_only_cache_winner(monkeypatch):
+    tuner = autotune._rmsnorm_fwd_tuner
+    args, kwargs = _direct_call(rows=4097, n=512)
+    incumbent = autotune.rmsnorm_default_config(*args, **kwargs)
+    cold_winner = Config(
+        threads_per_row=incumbent.kwargs["threads_per_row"],
+        input_cache_modifier=2,
+        output_cache_modifier=2,
+    )
+    deployment_times = {
+        tuner._config_identity(cold_winner): 0.013,
+        tuner._config_identity(incumbent): 0.010,
+    }
+    monkeypatch.setattr(
+        tuner,
+        "_deployment_time",
+        lambda config, call_args, call_kwargs, plan: deployment_times[
+            tuner._config_identity(config)
+        ],
+    )
+    tuner._active_call.rotation_plan = object()
+    try:
+        selected, _elapsed = tuner._rerank_result(
+            [(cold_winner, 0.012), (incumbent, 0.013)],
+            (cold_winner, 0.012),
+            args,
+            kwargs,
+        )
+    finally:
+        tuner._active_call.rotation_plan = None
+
+    assert tuner._config_identity(selected) == tuner._config_identity(incumbent)
+
+
+def test_deployment_tie_prefers_a_generic_persistent_schedule(monkeypatch):
+    tuner = autotune._rmsnorm_fwd_tuner
+    args, kwargs = _direct_call(rows=4097, n=512)
+    incumbent = autotune.rmsnorm_default_config(*args, **kwargs)
+    persistent = Config(
+        threads_per_row=incumbent.kwargs["threads_per_row"],
+        row_groups_per_block=1,
+        persistent_programs=2048,
+    )
+    deployment_times = {
+        tuner._config_identity(incumbent): 0.0100,
+        tuner._config_identity(persistent): 0.0090,
+    }
+    monkeypatch.setattr(
+        tuner,
+        "_deployment_time",
+        lambda config, call_args, call_kwargs, plan: deployment_times[
+            tuner._config_identity(config)
+        ],
+    )
+    tuner._active_call.rotation_plan = object()
+    try:
+        selected, _elapsed = tuner._rerank_result(
+            [(incumbent, 0.0100), (persistent, 0.0090)],
+            (persistent, 0.0090),
+            args,
+            kwargs,
+        )
+    finally:
+        tuner._active_call.rotation_plan = None
+
+    assert tuner._config_identity(selected) == tuner._config_identity(persistent)
+
+
+def test_host_bound_regime_keeps_the_generic_public_path(monkeypatch):
+    tuner = autotune._rmsnorm_fwd_tuner
+    args, kwargs = _direct_call(rows=4097, n=2048)
+    incumbent = autotune.rmsnorm_default_config(*args, **kwargs)
+    persistent = Config(
+        threads_per_row=64,
+        row_groups_per_block=2,
+        persistent_programs=2049,
+        persistent_single_pass=True,
+        packed_flat_rows=True,
+    )
+    deployment_times = {
+        tuner._config_identity(incumbent): 0.047,
+        tuner._config_identity(persistent): 0.038,
+    }
+    monkeypatch.setattr(
+        tuner,
+        "_deployment_time",
+        lambda config, call_args, call_kwargs, plan: deployment_times[
+            tuner._config_identity(config)
+        ],
+    )
+    tuner._active_call.rotation_plan = object()
+    try:
+        selected, _elapsed = tuner._rerank_result(
+            [(incumbent, 0.047), (persistent, 0.038)],
+            (persistent, 0.038),
+            args,
+            kwargs,
+        )
+    finally:
+        tuner._active_call.rotation_plan = None
+
+    assert tuner._config_identity(selected) == tuner._config_identity(incumbent)
 
 
 def test_selected_config_launch_passes_the_correctness_gate(tmp_path, monkeypatch):
