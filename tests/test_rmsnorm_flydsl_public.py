@@ -165,6 +165,8 @@ def test_repeated_metadata_reuses_validated_input_plan(monkeypatch):
 
 def test_resolved_generic_winner_uses_the_lower_overhead_public_launcher(monkeypatch):
     calls = []
+    validation_entry = (("metadata",), ("result",))
+    rmsnorm_flydsl_impl._VALIDATED_INPUT_LAST[0] = validation_entry
     rmsnorm_flydsl_impl._FWD_PUBLIC_GENERIC_LAST[0] = None
     monkeypatch.setattr(
         rmsnorm_flydsl_impl,
@@ -191,11 +193,10 @@ def test_resolved_generic_winner_uses_the_lower_overhead_public_launcher(monkeyp
         store_rstd=False,
         per_head=False,
         num_heads=1,
-        public_key=("generic",),
     )
 
     assert len(calls) == 1
-    assert rmsnorm_flydsl_impl._FWD_PUBLIC_GENERIC_LAST[0] == ("generic",)
+    assert rmsnorm_flydsl_impl._FWD_PUBLIC_GENERIC_LAST[0] is validation_entry
 
 
 def test_autotuned_forward_last_hit_bypasses_tuner_on_runtime_stream(monkeypatch):

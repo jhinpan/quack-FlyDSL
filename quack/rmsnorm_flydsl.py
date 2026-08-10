@@ -50,7 +50,7 @@ _BWD_CACHE: dict[tuple, object] = {}
 _FWD_AUTOTUNED_FAST_CACHE: dict[tuple, tuple] = {}
 _BWD_AUTOTUNED_FAST_CACHE: dict[tuple, tuple] = {}
 _FWD_AUTOTUNED_LAST: list[tuple[tuple, tuple] | None] = [None]
-_FWD_PUBLIC_GENERIC_LAST: list[tuple | None] = [None]
+_FWD_PUBLIC_GENERIC_LAST: list[object | None] = [None]
 _VALIDATED_INPUT_LAST: list[tuple[tuple, tuple] | None] = [None]
 _BWD_CU_COUNT_CACHE: dict[torch.device, int] = {}
 _DEVICE_ARCH_CACHE: dict[int, str] = {}
@@ -574,11 +574,10 @@ def _launch_resolved_fwd_entry(
     store_rstd,
     per_head,
     num_heads,
-    public_key,
 ) -> None:
     config, compiled, constexpr_suffix = entry
     if _is_generic_forward_config(config):
-        _FWD_PUBLIC_GENERIC_LAST[0] = public_key
+        _FWD_PUBLIC_GENERIC_LAST[0] = _VALIDATED_INPUT_LAST[0]
         _launch_rmsnorm_fwd(
             x,
             weight,
@@ -598,7 +597,7 @@ def _launch_resolved_fwd_entry(
             num_heads=num_heads,
         )
         return
-    if _FWD_PUBLIC_GENERIC_LAST[0] == public_key:
+    if _FWD_PUBLIC_GENERIC_LAST[0] is _VALIDATED_INPUT_LAST[0]:
         _FWD_PUBLIC_GENERIC_LAST[0] = None
     compiled(
         *(
@@ -671,7 +670,6 @@ def _launch_rmsnorm_fwd_autotuned(
                 store_rstd=store_rstd,
                 per_head=per_head,
                 num_heads=num_heads,
-                public_key=public_key,
             )
         return
 
@@ -724,7 +722,6 @@ def _launch_rmsnorm_fwd_autotuned(
                     store_rstd=store_rstd,
                     per_head=per_head,
                     num_heads=num_heads,
-                    public_key=public_key,
                 )
                 return
 
@@ -769,8 +766,8 @@ def _launch_rmsnorm_fwd_autotuned(
             _FWD_AUTOTUNED_FAST_CACHE[fast_key] = resolved
             _FWD_AUTOTUNED_LAST[0] = (last_key, resolved)
             if _is_generic_forward_config(resolved[0]):
-                _FWD_PUBLIC_GENERIC_LAST[0] = public_key
-            elif _FWD_PUBLIC_GENERIC_LAST[0] == public_key:
+                _FWD_PUBLIC_GENERIC_LAST[0] = _VALIDATED_INPUT_LAST[0]
+            elif _FWD_PUBLIC_GENERIC_LAST[0] is _VALIDATED_INPUT_LAST[0]:
                 _FWD_PUBLIC_GENERIC_LAST[0] = None
 
 
@@ -1567,22 +1564,7 @@ def _rmsnorm_impl(
         use_generic_winner = (
             autotuned
             and not _env_flag_enabled("FLYDSL_AUTOTUNE")
-            and _FWD_PUBLIC_GENERIC_LAST[0]
-            == _forward_public_key(
-                x_flat,
-                weight_arg,
-                bias_arg,
-                residual_arg,
-                out,
-                residual_out,
-                has_weight=weight is not None,
-                has_bias=bias is not None,
-                has_residual=residual is not None,
-                store_residual=store_residual,
-                store_rstd=False,
-                per_head=per_head,
-                num_heads=num_heads,
-            )
+            and _FWD_PUBLIC_GENERIC_LAST[0] is _VALIDATED_INPUT_LAST[0]
         )
         launch = (
             _launch_rmsnorm_fwd
