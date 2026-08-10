@@ -202,9 +202,13 @@ def pytest_configure(config):
     if jobs is not None:
         import os as _os
 
-        import torch
+        from quack._platform import is_rocm
 
-        if torch.version.hip is not None:
+        # `async_compile` only imports stdlib at module level, but importing it
+        # initializes `quack.cache`, whose __init__ pulls in `quack.cache.jit`
+        # and its top-level `import cutlass`. Keep this guard even if
+        # async_compile's own imports ever look harmless.
+        if is_rocm():
             raise pytest.UsageError(
                 "--async-compile is unavailable on ROCm because it loads the incompatible "
                 "CuTe MLIR runtime"
@@ -217,6 +221,11 @@ def pytest_configure(config):
 
             n_workers = int(_os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1"))
             pool = activate(max(2, jobs // n_workers))
+            # Record that a pool exists rather than making pytest_unconfigure
+            # re-derive it: the xdist master and the ROCm UsageError above both
+            # reach unconfigure with a non-None --async-compile and no pool.
+            # Set before prewarm() so a failed prewarm still tears the pool down.
+            config._quack_async_pool_active = True
             pool.prewarm()  # sidecar import overlaps collection, not the first miss
             if worker is not None:
                 config.pluginmanager.register(_XdistWorkerDefer(pool), "quack-xdist-defer")
@@ -235,9 +244,9 @@ def pytest_configure(config):
 
 def pytest_unconfigure(config):
     """Tear down the compile pool and undo any pytest-internal patches."""
-    import torch
-
-    if config.getoption("--async-compile", default=None) is None or torch.version.hip is not None:
+    if not getattr(config, "_quack_async_pool_active", False):
+        # No pool was activated, so importing async_compile here would load
+        # CuTe for nothing (and fail outright on ROCm).
         _restore_getfuncargnames_cache()
         return
 
@@ -292,7 +301,9 @@ def _defer_if_compile_pending(item, outcome, force_pass: bool) -> bool:
     must not run the test body. Setup-phase compiles are rare, so the
     longrepr cost is negligible there.
     """
-    if item.config.getoption("--async-compile", default=None) is None:
+    # CompilePending is only ever raised while a pool is active, which is
+    # narrower than "--async-compile was passed" (the xdist master has no pool).
+    if not getattr(item.config, "_quack_async_pool_active", False):
         return False
     if outcome.excinfo is None:
         return False
