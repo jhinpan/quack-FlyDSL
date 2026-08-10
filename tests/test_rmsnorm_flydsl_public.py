@@ -140,10 +140,33 @@ def test_forward_matches_fp32_reference():
     _assert_close(actual, expected)
 
 
+def test_repeated_metadata_reuses_validated_input_plan(monkeypatch):
+    rmsnorm_flydsl_impl._VALIDATED_INPUT_LAST[0] = None
+    calls = 0
+    real_validate = rmsnorm_flydsl_impl._validate_inputs
+
+    def count_validate(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_validate(*args, **kwargs)
+
+    monkeypatch.setattr(rmsnorm_flydsl_impl, "_validate_inputs", count_validate)
+    weight = torch.randn(512, device="cuda", dtype=torch.float32)
+    for _ in range(2):
+        x = torch.randn((64, 512), device="cuda", dtype=torch.bfloat16)
+        rmsnorm(x, weight)
+    assert calls == 1
+
+    x = torch.randn((64, 512), device="cuda", dtype=torch.bfloat16)
+    rmsnorm(x, weight, eps=1e-5)
+    assert calls == 2
+
+
 def test_autotuned_forward_last_hit_bypasses_key_work_on_runtime_stream(monkeypatch):
     tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
     rmsnorm_flydsl_impl._FWD_AUTOTUNED_FAST_CACHE.clear()
     rmsnorm_flydsl_impl._FWD_AUTOTUNED_LAST[0] = None
+    rmsnorm_flydsl_impl._VALIDATED_INPUT_LAST[0] = None
     tuner.cache.clear()
     tuner._hot_cache.clear()
     torch.manual_seed(4)
