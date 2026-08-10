@@ -22,9 +22,9 @@ except ModuleNotFoundError as exc:
 
 import quack
 import quack.flydsl.autotune_harness as autotune_harness_impl
-import quack.flydsl.rmsnorm_arch as rmsnorm_arch_impl
 import quack.flydsl.rmsnorm_autotune as rmsnorm_autotune_impl
 import quack.flydsl.rmsnorm_bwd_autotune as rmsnorm_bwd_autotune_impl
+import quack.flydsl.rmsnorm_preflight as rmsnorm_arch_impl
 import quack.rmsnorm_flydsl as rmsnorm_flydsl_impl
 from quack.flydsl.rmsnorm_autotune import rmsnorm_search_configs
 from quack.flydsl.rmsnorm_bwd_autotune import (
@@ -1058,6 +1058,10 @@ def _clear_caches():
     rmsnorm_flydsl_impl._BWD_CACHE.clear()
     rmsnorm_flydsl_impl._FWD_AUTOTUNED_FAST_CACHE.clear()
     rmsnorm_flydsl_impl._BWD_AUTOTUNED_FAST_CACHE.clear()
+    rmsnorm_flydsl_impl._FWD_AUTOTUNED_LAST[0] = None
+    rmsnorm_flydsl_impl._FWD_PUBLIC_GENERIC_LAST[0] = None
+    rmsnorm_flydsl_impl._FWD_PUBLIC_RESOLVED_LAST[0] = None
+    rmsnorm_flydsl_impl._VALIDATED_INPUT_LAST[0] = None
     rmsnorm_flydsl_impl._EAGER_EMPTY_CACHE.clear()
     rmsnorm_flydsl_impl._BWD_CU_COUNT_CACHE.clear()
     rmsnorm_flydsl_impl._DEVICE_ARCH_CACHE.clear()
@@ -1363,8 +1367,8 @@ def _direct_autotune_call_args(
     return args, kwargs
 
 
-def test_autotune_schema_six_and_candidates_retain_the_heuristic():
-    assert rmsnorm_autotune_impl.RMSNORM_AUTOTUNE_SCHEMA_VERSION == 6
+def test_autotune_schema_seven_and_candidates_retain_the_heuristic():
+    assert rmsnorm_autotune_impl.RMSNORM_AUTOTUNE_SCHEMA_VERSION == 7
     for n, dtype_name in ((128, "bf16"), (512, "bf16"), (2048, "bf16"), (4096, "f32")):
         default = rmsnorm_autotune_impl.rmsnorm_default_config(
             n=n,
@@ -1392,13 +1396,20 @@ def test_autotune_offers_geometry_driven_persistent_candidates_off_ladder():
     candidates = rmsnorm_autotune_impl.rmsnorm_search_configs(*args, **kwargs)
     persistent = [config for config in candidates if config.kwargs.get("packed_flat_rows")]
 
-    assert len(persistent) == 1
-    candidate = persistent[0]
-    row_groups = candidate.kwargs["row_groups_per_block"]
-    assert row_groups > 1
-    assert candidate.kwargs["persistent_programs"] == (4097 + row_groups - 1) // row_groups
-    assert candidate.kwargs["output_cache_modifier"] == 3
-    assert candidate.kwargs["persistent_single_pass"] is True
+    assert persistent
+    policies = set()
+    for candidate in persistent:
+        row_groups = candidate.kwargs["row_groups_per_block"]
+        assert row_groups > 1
+        assert candidate.kwargs["persistent_programs"] == (4097 + row_groups - 1) // row_groups
+        assert candidate.kwargs["persistent_single_pass"] is True
+        policies.add(
+            (
+                candidate.kwargs["input_cache_modifier"],
+                candidate.kwargs["output_cache_modifier"],
+            )
+        )
+    assert policies == set(rmsnorm_autotune_impl._PACKED_CACHE_POLICY_CANDIDATES)
 
 
 def test_l2_rotation_clones_preserve_metadata_aliases_and_distinct_addresses():
@@ -3557,6 +3568,9 @@ def test_a_persisted_singleton_artifact_cannot_be_loaded_for_another_row_count(
     tuner.cache.clear()
     tuner._hot_cache.clear()
     rmsnorm_flydsl_impl._FWD_AUTOTUNED_FAST_CACHE.clear()
+    rmsnorm_flydsl_impl._FWD_AUTOTUNED_LAST[0] = None
+    rmsnorm_flydsl_impl._FWD_PUBLIC_GENERIC_LAST[0] = None
+    rmsnorm_flydsl_impl._FWD_PUBLIC_RESOLVED_LAST[0] = None
     monkeypatch.delenv("FLYDSL_AUTOTUNE")
 
     loaded = []
