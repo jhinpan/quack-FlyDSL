@@ -140,6 +140,36 @@ def test_forward_matches_fp32_reference():
     _assert_close(actual, expected)
 
 
+def test_autotuned_forward_last_hit_bypasses_key_work_on_runtime_stream(monkeypatch):
+    tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
+    rmsnorm_flydsl_impl._FWD_AUTOTUNED_FAST_CACHE.clear()
+    rmsnorm_flydsl_impl._FWD_AUTOTUNED_LAST[0] = None
+    tuner.cache.clear()
+    tuner._hot_cache.clear()
+    torch.manual_seed(4)
+    x = torch.randn((64, 512), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(512, device=x.device, dtype=torch.float32)
+
+    first = rmsnorm_autotuned(x, weight)
+    assert rmsnorm_flydsl_impl._FWD_AUTOTUNED_LAST[0] is not None
+
+    def forbid_tuner_entry(*args, **kwargs):
+        raise AssertionError("warm forward call re-entered the tuner")
+
+    def forbid_dtype_conversion(*args, **kwargs):
+        raise AssertionError("warm forward call rebuilt dtype strings")
+
+    monkeypatch.setattr(type(tuner), "__call__", forbid_tuner_entry)
+    monkeypatch.setattr(rmsnorm_flydsl_impl, "_dtype_to_str", forbid_dtype_conversion)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        second = rmsnorm_autotuned(x, weight)
+    stream.synchronize()
+
+    torch.testing.assert_close(second, first, rtol=0.0, atol=0.0)
+
+
 def test_default_launch_policy_contains_no_benchmark_shape_literals():
     policy = "\n".join(
         inspect.getsource(function)
@@ -195,6 +225,7 @@ def test_backward_matches_reference_and_is_deterministic():
 def test_autotuned_backward_reuses_resolved_callable(monkeypatch):
     tuner = rmsnorm_flydsl_impl._rmsnorm_bwd_tuner
     rmsnorm_flydsl_impl._FWD_AUTOTUNED_FAST_CACHE.clear()
+    rmsnorm_flydsl_impl._FWD_AUTOTUNED_LAST[0] = None
     rmsnorm_flydsl_impl._BWD_AUTOTUNED_FAST_CACHE.clear()
     tuner.cache.clear()
     tuner._hot_cache.clear()
