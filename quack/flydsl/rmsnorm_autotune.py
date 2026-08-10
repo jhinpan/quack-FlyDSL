@@ -70,6 +70,7 @@ _HOST_BOUND_MAX_MS = 0.10
 _HOST_BOUND_TIE_BAND = 0.25
 _RERANK_CALLS = 64
 _RERANK_SAMPLES = 3
+_PERSISTENT_GRID_FRACTIONS = ((1, 4), (3, 8), (7, 16), (1, 2))
 
 
 def _waves_per_eu_candidates():
@@ -79,8 +80,8 @@ def _waves_per_eu_candidates():
 
 def _persistent_program_candidates(m: int, num_cus: int) -> list[int]:
     programs = set()
-    for divisor in (4, 2):
-        target = (m + divisor - 1) // divisor
+    for numerator, denominator in _PERSISTENT_GRID_FRACTIONS:
+        target = (m * numerator + denominator - 1) // denominator
         rounded = ((target + num_cus - 1) // num_cus) * num_cus
         programs.add(min(m, max(num_cus, rounded)))
     return sorted(programs)
@@ -228,12 +229,13 @@ def rmsnorm_search_configs(*args, **kwargs) -> list[Config]:
                     persistent_single_pass=True,
                     packed_flat_rows=True,
                 )
-        for persistent_programs in _persistent_program_candidates(m, num_cus):
-            append(
-                threads_per_row=threads,
-                row_groups_per_block=1,
-                persistent_programs=persistent_programs,
-            )
+        if threads == WAVE_SIZE:
+            for persistent_programs in _persistent_program_candidates(m, num_cus):
+                append(
+                    threads_per_row=threads,
+                    row_groups_per_block=1,
+                    persistent_programs=persistent_programs,
+                )
     return configs
 
 
