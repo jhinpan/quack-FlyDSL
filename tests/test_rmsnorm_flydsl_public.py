@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from flydsl.autotune import Config
 
 if torch.version.hip is None:
     pytest.skip("FlyDSL RMSNorm requires a ROCm PyTorch build", allow_module_level=True)
@@ -162,7 +163,39 @@ def test_repeated_metadata_reuses_validated_input_plan(monkeypatch):
     assert calls == 2
 
 
-def test_autotuned_forward_last_hit_bypasses_key_work_on_runtime_stream(monkeypatch):
+def test_resolved_generic_winner_uses_the_lower_overhead_public_launcher(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        rmsnorm_flydsl_impl,
+        "_launch_rmsnorm_fwd",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+    tensor = object()
+    rmsnorm_flydsl_impl._launch_resolved_fwd_entry(
+        (Config(threads_per_row=64), None, None),
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+        64,
+        1e-6,
+        0.0,
+        has_weight=True,
+        has_bias=False,
+        has_residual=False,
+        store_residual=False,
+        store_rstd=False,
+        per_head=False,
+        num_heads=1,
+    )
+
+    assert len(calls) == 1
+
+
+def test_autotuned_forward_last_hit_bypasses_tuner_on_runtime_stream(monkeypatch):
     tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
     rmsnorm_flydsl_impl._FWD_AUTOTUNED_FAST_CACHE.clear()
     rmsnorm_flydsl_impl._FWD_AUTOTUNED_LAST[0] = None
@@ -179,11 +212,7 @@ def test_autotuned_forward_last_hit_bypasses_key_work_on_runtime_stream(monkeypa
     def forbid_tuner_entry(*args, **kwargs):
         raise AssertionError("warm forward call re-entered the tuner")
 
-    def forbid_dtype_conversion(*args, **kwargs):
-        raise AssertionError("warm forward call rebuilt dtype strings")
-
     monkeypatch.setattr(type(tuner), "__call__", forbid_tuner_entry)
-    monkeypatch.setattr(rmsnorm_flydsl_impl, "_dtype_to_str", forbid_dtype_conversion)
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):

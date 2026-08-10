@@ -513,6 +513,61 @@ def _launch_rmsnorm_fwd(
         )
 
 
+def _is_generic_forward_config(config) -> bool:
+    return config.waves_per_eu is None and set(config.kwargs) == {"threads_per_row"}
+
+
+def _launch_resolved_fwd_entry(
+    entry,
+    x,
+    weight,
+    bias,
+    residual,
+    out,
+    residual_out,
+    rstd,
+    m,
+    eps,
+    weight_offset,
+    *,
+    has_weight,
+    has_bias,
+    has_residual,
+    store_residual,
+    store_rstd,
+    per_head,
+    num_heads,
+) -> None:
+    config, compiled, constexpr_suffix = entry
+    if _is_generic_forward_config(config):
+        _launch_rmsnorm_fwd(
+            x,
+            weight,
+            bias,
+            residual,
+            out,
+            residual_out,
+            rstd,
+            eps,
+            weight_offset,
+            has_weight=has_weight,
+            has_bias=has_bias,
+            has_residual=has_residual,
+            store_residual=store_residual,
+            store_rstd=store_rstd,
+            per_head=per_head,
+            num_heads=num_heads,
+        )
+        return
+    compiled(
+        *(
+            (x, weight, bias, residual, out, residual_out, rstd, m, eps, weight_offset)
+            + constexpr_suffix
+            + (_current_raw_stream(x.device),)
+        )
+    )
+
+
 def _launch_rmsnorm_fwd_autotuned(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -559,13 +614,25 @@ def _launch_rmsnorm_fwd_autotuned(
     last_entry = _FWD_AUTOTUNED_LAST[0]
     if not forced and not compile_only and last_entry is not None and last_entry[0] == last_key:
         with torch.cuda.device(x.device):
-            _config, compiled, constexpr_suffix = last_entry[1]
-            compiled(
-                *(
-                    (x, weight, bias, residual, out, residual_out, rstd, m, eps, weight_offset)
-                    + constexpr_suffix
-                    + (_current_raw_stream(x.device),)
-                )
+            _launch_resolved_fwd_entry(
+                last_entry[1],
+                x,
+                weight,
+                bias,
+                residual,
+                out,
+                residual_out,
+                rstd,
+                m,
+                eps,
+                weight_offset,
+                has_weight=has_weight,
+                has_bias=has_bias,
+                has_residual=has_residual,
+                store_residual=store_residual,
+                store_rstd=store_rstd,
+                per_head=per_head,
+                num_heads=num_heads,
             )
         return
 
@@ -599,24 +666,25 @@ def _launch_rmsnorm_fwd_autotuned(
             fast_entry = _FWD_AUTOTUNED_FAST_CACHE.get(fast_key)
             if fast_entry is not None:
                 _FWD_AUTOTUNED_LAST[0] = (last_key, fast_entry)
-                _config, compiled, constexpr_suffix = fast_entry
-                compiled(
-                    *(
-                        (
-                            x,
-                            weight,
-                            bias,
-                            residual,
-                            out,
-                            residual_out,
-                            rstd,
-                            m,
-                            eps,
-                            weight_offset,
-                        )
-                        + constexpr_suffix
-                        + (_current_raw_stream(x.device),)
-                    )
+                _launch_resolved_fwd_entry(
+                    fast_entry,
+                    x,
+                    weight,
+                    bias,
+                    residual,
+                    out,
+                    residual_out,
+                    rstd,
+                    m,
+                    eps,
+                    weight_offset,
+                    has_weight=has_weight,
+                    has_bias=has_bias,
+                    has_residual=has_residual,
+                    store_residual=store_residual,
+                    store_rstd=store_rstd,
+                    per_head=per_head,
+                    num_heads=num_heads,
                 )
                 return
 
