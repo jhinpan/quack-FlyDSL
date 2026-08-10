@@ -270,17 +270,50 @@ def test_rocm_cute_exports_fail_without_submodule_fallback():
     assert not any(name == "cutlass" or name.startswith("cutlass.") for name in sys.modules)
 
 
+class _AsyncCompileConfig:
+    """Stub config where only ``--async-compile`` is answerable.
+
+    Anything else means the ROCm guard is no longer the first thing
+    ``pytest_configure`` does, which is the failure this exercises.
+    """
+
+    @staticmethod
+    def getoption(name, default=None):
+        if name != "--async-compile":
+            raise AssertionError(f"unexpected getoption({name!r}) before the ROCm guard")
+        return 1
+
+
 def test_async_compile_is_rejected_before_loading_cute():
     from quack.testing import pytest_plugin
 
-    class AsyncCompileConfig:
-        @staticmethod
-        def getoption(*_args, **_kwargs):
-            return 1
-
     with pytest.raises(pytest.UsageError, match="unavailable on ROCm"):
-        pytest_plugin.pytest_configure(AsyncCompileConfig())
+        pytest_plugin.pytest_configure(_AsyncCompileConfig())
 
+    assert "quack.cache.jit" not in sys.modules
+    assert not any(name == "cutlass" or name.startswith("cutlass.") for name in sys.modules)
+
+
+def test_rejected_async_compile_leaves_no_pool_flag():
+    """Pin the contract pytest_unconfigure relies on: no pool, no flag."""
+    from quack.testing import pytest_plugin
+
+    config = _AsyncCompileConfig()
+    with pytest.raises(pytest.UsageError, match="unavailable on ROCm"):
+        pytest_plugin.pytest_configure(config)
+
+    assert not getattr(config, "_quack_async_pool_active", False)
+
+
+def test_unconfigure_without_a_pool_never_loads_cute():
+    from quack.testing import pytest_plugin
+
+    class NoPoolConfig:
+        """pytest_configure never activated a pool, so no flag was set."""
+
+    pytest_plugin.pytest_unconfigure(NoPoolConfig())
+
+    assert "quack.cache.async_compile" not in sys.modules
     assert "quack.cache.jit" not in sys.modules
     assert not any(name == "cutlass" or name.startswith("cutlass.") for name in sys.modules)
 
