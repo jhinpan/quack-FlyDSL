@@ -181,6 +181,7 @@ def test_resolved_generic_winner_uses_the_lower_overhead_public_launcher(monkeyp
     validation_entry = (("metadata",), ("result",))
     rmsnorm_flydsl_impl._VALIDATED_INPUT_LAST[0] = validation_entry
     rmsnorm_flydsl_impl._FWD_PUBLIC_GENERIC_LAST[0] = None
+    rmsnorm_flydsl_impl._FWD_PUBLIC_RESOLVED_LAST[0] = None
     monkeypatch.setattr(
         rmsnorm_flydsl_impl,
         "_launch_rmsnorm_fwd",
@@ -212,11 +213,54 @@ def test_resolved_generic_winner_uses_the_lower_overhead_public_launcher(monkeyp
     assert rmsnorm_flydsl_impl._FWD_PUBLIC_GENERIC_LAST[0] is validation_entry
 
 
+def test_plain_inference_uses_resolved_public_entry_before_tuner_keys(monkeypatch):
+    rmsnorm_flydsl_impl._VALIDATED_INPUT_LAST[0] = None
+    rmsnorm_flydsl_impl._FWD_PUBLIC_RESOLVED_LAST[0] = None
+    x = torch.randn((64, 512), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(512, device=x.device, dtype=torch.float32)
+    rmsnorm_flydsl_impl._validated_inputs(
+        x,
+        weight,
+        None,
+        None,
+        None,
+        None,
+        EPS,
+        False,
+        0.0,
+    )
+    calls = []
+    config = Config(
+        threads_per_row=64,
+        input_cache_modifier=2,
+        output_cache_modifier=2,
+    )
+    rmsnorm_flydsl_impl._FWD_PUBLIC_RESOLVED_LAST[0] = (
+        rmsnorm_flydsl_impl._VALIDATED_INPUT_LAST[0],
+        rmsnorm_flydsl_impl._public_runtime_guard(),
+        (config, lambda *args: calls.append(args), ()),
+    )
+
+    def forbid_context():
+        raise AssertionError("rebuilt tuner context")
+
+    monkeypatch.setattr(
+        rmsnorm_flydsl_impl._rmsnorm_fwd_tuner,
+        "fast_context_token",
+        forbid_context,
+    )
+
+    rmsnorm_autotuned(x, weight)
+
+    assert len(calls) == 1
+
+
 def test_autotuned_forward_last_hit_bypasses_tuner_on_runtime_stream(monkeypatch):
     tuner = rmsnorm_flydsl_impl._rmsnorm_fwd_tuner
     rmsnorm_flydsl_impl._FWD_AUTOTUNED_FAST_CACHE.clear()
     rmsnorm_flydsl_impl._FWD_AUTOTUNED_LAST[0] = None
     rmsnorm_flydsl_impl._FWD_PUBLIC_GENERIC_LAST[0] = None
+    rmsnorm_flydsl_impl._FWD_PUBLIC_RESOLVED_LAST[0] = None
     rmsnorm_flydsl_impl._VALIDATED_INPUT_LAST[0] = None
     tuner.cache.clear()
     tuner._hot_cache.clear()
