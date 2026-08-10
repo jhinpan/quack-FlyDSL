@@ -146,11 +146,26 @@ def test_cache_policy_candidates_are_explicit_and_shape_independent():
         for config in configs
     }
 
-    assert autotune.RMSNORM_AUTOTUNE_SCHEMA_VERSION == 6
+    assert autotune.RMSNORM_AUTOTUNE_SCHEMA_VERSION == 7
     assert {(0, 0), (2, 2)} <= policies
     source = inspect.getsource(autotune.rmsnorm_search_configs)
     assert "_PERSISTENT_FWD_CONFIGS" not in source
     assert "32768" not in source
+
+
+def test_waves_search_is_pruned_by_default_and_exhaustive_on_request(monkeypatch):
+    tuner = autotune._rmsnorm_fwd_tuner
+    args, kwargs = _direct_call(rows=64, n=4096)
+    monkeypatch.delenv("QUACK_RMSNORM_EXHAUSTIVE_WAVES", raising=False)
+    default = autotune.rmsnorm_search_configs(n=4096, input_dtype_str="bf16")
+    default_key = tuner._contextual_decision_key(args, kwargs)
+    monkeypatch.setenv("QUACK_RMSNORM_EXHAUSTIVE_WAVES", "1")
+    exhaustive = autotune.rmsnorm_search_configs(n=4096, input_dtype_str="bf16")
+    exhaustive_key = tuner._contextual_decision_key(args, kwargs)
+
+    assert {config.waves_per_eu for config in default} == {None, 4}
+    assert {config.waves_per_eu for config in exhaustive} == {None, 1, 2, 4}
+    assert default_key != exhaustive_key
 
 
 def test_decision_key_partitions_shapes_and_features_but_not_runtime_eps():
@@ -207,6 +222,40 @@ def test_training_search_reuses_the_profiled_inference_geometry(monkeypatch):
     assert selected.kwargs == {"threads_per_row": 64}
     assert selected.waves_per_eu == 2
     tuner.cache.pop(inference_key)
+
+
+def test_deployment_rerank_rejects_a_cold_only_cache_winner(monkeypatch):
+    tuner = autotune._rmsnorm_fwd_tuner
+    args, kwargs = _direct_call(rows=4097, n=512)
+    incumbent = autotune.rmsnorm_default_config(*args, **kwargs)
+    cold_winner = Config(
+        threads_per_row=incumbent.kwargs["threads_per_row"],
+        input_cache_modifier=2,
+        output_cache_modifier=2,
+    )
+    deployment_times = {
+        tuner._config_identity(cold_winner): 0.013,
+        tuner._config_identity(incumbent): 0.010,
+    }
+    monkeypatch.setattr(
+        tuner,
+        "_deployment_time",
+        lambda config, call_args, call_kwargs, plan: deployment_times[
+            tuner._config_identity(config)
+        ],
+    )
+    tuner._active_call.rotation_plan = object()
+    try:
+        selected, _elapsed = tuner._rerank_result(
+            [(cold_winner, 0.012), (incumbent, 0.013)],
+            (cold_winner, 0.012),
+            args,
+            kwargs,
+        )
+    finally:
+        tuner._active_call.rotation_plan = None
+
+    assert tuner._config_identity(selected) == tuner._config_identity(incumbent)
 
 
 def test_selected_config_launch_passes_the_correctness_gate(tmp_path, monkeypatch):
