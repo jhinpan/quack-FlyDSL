@@ -3,6 +3,7 @@
 """Native FlyDSL autotuning for the RMSNorm forward direct-JIT entry."""
 
 import os
+import statistics
 from dataclasses import dataclass
 
 import torch
@@ -57,6 +58,11 @@ RMSNORM_AUTOTUNE_SCHEMA_VERSION = 6
 _WAVES_PER_EU = (None, 1, 2, 4)
 _CACHE_POLICY_CANDIDATES = ((2, 2),)
 _CORRECTNESS_ROWS = 16
+_RERANK_RELATIVE_BAND = 0.03
+_RERANK_ABSOLUTE_BAND_MS = 0.002
+_RERANK_FINAL_TIE_BAND = 0.02
+_RERANK_CALLS = 64
+_RERANK_SAMPLES = 3
 
 
 def _row_candidates(n: int, dtype_width: int) -> list[int]:
@@ -456,6 +462,67 @@ class RmsNormAutotuner(FlydslL2Autotuner):
         )
         results = self._benchmark_configs([candidate], args, kwargs)
         return self._select_result(results, args, kwargs)
+
+    @staticmethod
+    def _config_identity(config):
+        return _typed_identity(config.to_dict())
+
+    def _deployment_time(self, config, args, kwargs, plan):
+        compiled, _positional, _ = self._compiled_callable(config, args, kwargs)
+        arg_sets = plan.arg_sets[:2]
+        kwarg_sets = plan.kwarg_sets[:2]
+        positional_sets = [
+            self._positional_arguments(config, set_args, set_kwargs)
+            for set_args, set_kwargs in zip(arg_sets, kwarg_sets)
+        ]
+        positional_sets = _with_runtime_stream(positional_sets, plan.bench_stream)
+        with torch.cuda.stream(plan.bench_stream):
+            for index in range(8):
+                compiled(*positional_sets[index % len(positional_sets)])
+            plan.bench_stream.synchronize()
+            samples = []
+            for sample in range(_RERANK_SAMPLES):
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                start.record()
+                for index in range(_RERANK_CALLS):
+                    compiled(*positional_sets[(sample + index) % len(positional_sets)])
+                end.record()
+                end.synchronize()
+                samples.append(start.elapsed_time(end) / _RERANK_CALLS)
+        return statistics.median(samples)
+
+    def _rerank_result(self, results, selected, args, kwargs):
+        plan = getattr(self._active_call, "rotation_plan", None)
+        if plan is None or self._do_bench is not l2_cold_bench:
+            return selected
+        cold_best = selected[1]
+        threshold = cold_best + max(
+            cold_best * _RERANK_RELATIVE_BAND,
+            _RERANK_ABSOLUTE_BAND_MS,
+        )
+        incumbent = rmsnorm_default_config(*args, **kwargs)
+        incumbent_identity = self._config_identity(incumbent)
+        candidates = [
+            config
+            for config, elapsed in results
+            if elapsed <= threshold or self._config_identity(config) == incumbent_identity
+        ]
+        reranked = [
+            (config, self._deployment_time(config, args, kwargs, plan)) for config in candidates
+        ]
+        for config, elapsed in reranked:
+            print(f"  [rerank] {config} -> {elapsed:.3f} ms")
+        best_time = min(elapsed for _config, elapsed in reranked)
+        final = [
+            (config, elapsed)
+            for config, elapsed in reranked
+            if elapsed <= best_time * (1.0 + _RERANK_FINAL_TIE_BAND)
+        ]
+        for config, elapsed in final:
+            if self._config_identity(config) == incumbent_identity:
+                return config, elapsed
+        return min(final, key=lambda item: (item[1], self._config_identity(item[0])))
 
     def _bench_one(self, config, args, kwargs):
         """Compile one candidate untimed, then benchmark only its fast callable."""
