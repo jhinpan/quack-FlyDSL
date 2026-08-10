@@ -59,6 +59,7 @@ _WAVES_PER_EU = (None, 4)
 _EXHAUSTIVE_WAVES_PER_EU = (None, 1, 2, 4)
 _EXHAUSTIVE_WAVES_ENV = "QUACK_RMSNORM_EXHAUSTIVE_WAVES"
 _CACHE_POLICY_CANDIDATES = ((2, 2),)
+_PACKED_CACHE_POLICY_CANDIDATES = ((0, 0), (0, 2), (0, 3), (2, 2))
 _CORRECTNESS_ROWS = 16
 _RERANK_RELATIVE_BAND = 0.10
 _RERANK_ABSOLUTE_BAND_MS = 0.005
@@ -201,20 +202,28 @@ def rmsnorm_search_configs(*args, **kwargs) -> list[Config]:
         )
         if threads > WAVE_SIZE or row.reload_from == "gmem":
             continue
-        row_groups_per_block = multi_row_block_rows(threads)
-        if row_groups_per_block <= 1:
+        max_row_groups = multi_row_block_rows(threads)
+        row_group_candidates = {
+            max_row_groups,
+            max(1, max_row_groups // 2),
+        }
+        row_group_candidates.discard(1)
+        if not row_group_candidates:
             continue
-        available_blocks = (m + row_groups_per_block - 1) // row_groups_per_block
-        if available_blocks < num_cus:
-            continue
-        append(
-            threads_per_row=threads,
-            row_groups_per_block=row_groups_per_block,
-            persistent_programs=available_blocks,
-            output_cache_modifier=3,
-            persistent_single_pass=True,
-            packed_flat_rows=True,
-        )
+        for row_groups_per_block in sorted(row_group_candidates):
+            available_blocks = (m + row_groups_per_block - 1) // row_groups_per_block
+            if available_blocks < num_cus:
+                continue
+            for input_modifier, output_modifier in _PACKED_CACHE_POLICY_CANDIDATES:
+                append(
+                    threads_per_row=threads,
+                    row_groups_per_block=row_groups_per_block,
+                    persistent_programs=available_blocks,
+                    input_cache_modifier=input_modifier,
+                    output_cache_modifier=output_modifier,
+                    persistent_single_pass=True,
+                    packed_flat_rows=True,
+                )
         for persistent_programs in _persistent_program_candidates(m, num_cus):
             append(
                 threads_per_row=threads,

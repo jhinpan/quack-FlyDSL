@@ -110,12 +110,19 @@ def test_persistent_candidates_follow_geometry_for_off_ladder_rows():
         persistent = [config for config in configs if config.kwargs.get("packed_flat_rows")]
 
         assert persistent
+        policies = set()
         for config in persistent:
             row_groups = config.kwargs["row_groups_per_block"]
             assert row_groups > 1
-            assert config.kwargs["output_cache_modifier"] == 3
+            policies.add(
+                (
+                    config.kwargs["input_cache_modifier"],
+                    config.kwargs["output_cache_modifier"],
+                )
+            )
             assert config.kwargs["persistent_single_pass"] is True
             assert config.kwargs["persistent_programs"] == (rows + row_groups - 1) // row_groups
+        assert policies == set(autotune._PACKED_CACHE_POLICY_CANDIDATES)
 
 
 def test_persistent_row_loop_candidates_use_generic_grid_fractions():
