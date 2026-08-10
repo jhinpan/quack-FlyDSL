@@ -50,6 +50,7 @@ _BWD_CACHE: dict[tuple, object] = {}
 _FWD_AUTOTUNED_FAST_CACHE: dict[tuple, tuple] = {}
 _BWD_AUTOTUNED_FAST_CACHE: dict[tuple, tuple] = {}
 _FWD_AUTOTUNED_LAST: list[tuple[tuple, tuple] | None] = [None]
+_VALIDATED_INPUT_LAST: list[tuple[tuple, tuple] | None] = [None]
 _BWD_CU_COUNT_CACHE: dict[torch.device, int] = {}
 _DEVICE_ARCH_CACHE: dict[int, str] = {}
 _AUTOTUNE_ARCH_CACHE: dict[tuple, str] = {}
@@ -247,6 +248,91 @@ def _validate_inputs(
     if m > _MAX_ROWS:
         raise ValueError(f"x has {m} rows, but the kernels address at most {_MAX_ROWS}")
     return m, n, num_heads, per_head, eps, weight_offset
+
+
+def _validation_tensor_metadata(tensor):
+    if type(tensor) is not torch.Tensor:
+        return (type(tensor),)
+    return (
+        torch.Tensor,
+        tuple(tensor.shape),
+        tensor.dtype,
+        tensor.device,
+        tensor.layout,
+    )
+
+
+def _validated_inputs(
+    x,
+    weight,
+    bias,
+    residual,
+    out_dtype,
+    residual_dtype,
+    eps,
+    prenorm,
+    weight_offset,
+):
+    if torch.compiler.is_compiling():
+        return _validate_inputs(
+            x,
+            weight,
+            bias,
+            residual,
+            out_dtype,
+            residual_dtype,
+            eps,
+            prenorm,
+            weight_offset,
+        )
+    if (
+        isinstance(eps, bool)
+        or not isinstance(eps, numbers.Real)
+        or not isinstance(prenorm, bool)
+        or isinstance(weight_offset, bool)
+        or not isinstance(weight_offset, numbers.Real)
+    ):
+        return _validate_inputs(
+            x,
+            weight,
+            bias,
+            residual,
+            out_dtype,
+            residual_dtype,
+            eps,
+            prenorm,
+            weight_offset,
+        )
+    key = (
+        _validation_tensor_metadata(x),
+        _validation_tensor_metadata(weight),
+        _validation_tensor_metadata(bias),
+        _validation_tensor_metadata(residual),
+        out_dtype,
+        residual_dtype,
+        type(eps),
+        eps,
+        type(prenorm),
+        prenorm,
+        type(weight_offset),
+        weight_offset,
+    )
+    cached = _VALIDATED_INPUT_LAST[0]
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    result = _validate_inputs(
+        x,
+        weight,
+        bias,
+        residual,
+        out_dtype,
+        residual_dtype,
+        eps,
+        prenorm,
+        weight_offset,
+    )
+    _VALIDATED_INPUT_LAST[0] = (key, result)
+    return result
 
 
 def _current_raw_stream(device: torch.device) -> int:
@@ -1305,7 +1391,7 @@ def _rmsnorm_impl(
     autotuned: bool,
 ) -> torch.Tensor:
     """Apply RMSNorm over the last dimension using the FlyDSL backend."""
-    m, n, num_heads, per_head, eps, weight_offset = _validate_inputs(
+    m, n, num_heads, per_head, eps, weight_offset = _validated_inputs(
         x,
         weight,
         bias,
