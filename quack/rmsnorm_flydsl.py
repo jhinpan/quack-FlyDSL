@@ -21,6 +21,7 @@ from flydsl.expr import math as fmath
 from flydsl.expr.typing import ReductionOp
 from flydsl.runtime.device import get_rocm_arch
 
+from quack._platform import is_rocm
 from quack.rmsnorm_flydsl_config import (
     ACCESS_BITS,
     MAX_N,
@@ -985,7 +986,7 @@ def _validate_inputs(
     ):
         if tensor is not None and tensor.layout != torch.strided:
             raise ValueError(f"{name} must use torch.strided layout, got {tensor.layout}")
-    if torch.version.hip is None or x.device.type != "cuda":
+    if not is_rocm() or x.device.type != "cuda":
         raise ValueError(f"x must be on a ROCm device, got {x.device}")
     for name, tensor in (("weight", weight), ("bias", bias), ("residual", residual)):
         if tensor is not None and tensor.device != x.device:

@@ -2,9 +2,9 @@ __version__ = "0.6.4"
 
 import os
 
-import torch
+from quack._platform import is_rocm
 
-_IS_ROCM = torch.version.hip is not None
+_IS_ROCM = is_rocm()
 _CUTE_ONLY_EXPORTS = frozenset({"RoundingMode", "cross_entropy", "rmsnorm", "softmax"})
 
 
