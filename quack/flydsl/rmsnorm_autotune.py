@@ -64,6 +64,7 @@ _CORRECTNESS_ROWS = 16
 _RERANK_RELATIVE_BAND = 0.10
 _RERANK_ABSOLUTE_BAND_MS = 0.005
 _RERANK_FINAL_TIE_BAND = 0.05
+_LAUNCH_BOUND_TIE_BAND = 0.25
 _HOST_BOUND_MIN_MS = 0.03
 _HOST_BOUND_MAX_MS = 0.10
 _HOST_BOUND_TIE_BAND = 0.25
@@ -555,24 +556,48 @@ class RmsNormAutotuner(FlydslL2Autotuner):
         for config, elapsed in reranked:
             print(f"  [rerank] {config} -> {elapsed:.3f} ms")
         best_time = min(elapsed for _config, elapsed in reranked)
+        launch_bound = best_time < _HOST_BOUND_MIN_MS
+        host_bound = _HOST_BOUND_MIN_MS <= best_time <= _HOST_BOUND_MAX_MS
         tie_band = (
-            _HOST_BOUND_TIE_BAND
-            if _HOST_BOUND_MIN_MS <= best_time <= _HOST_BOUND_MAX_MS
-            else _RERANK_FINAL_TIE_BAND
+            _LAUNCH_BOUND_TIE_BAND
+            if launch_bound
+            else (_HOST_BOUND_TIE_BAND if host_bound else _RERANK_FINAL_TIE_BAND)
         )
         final = [
             (config, elapsed)
             for config, elapsed in reranked
             if elapsed <= best_time * (1.0 + tie_band)
         ]
-        for config, elapsed in final:
-            if self._config_identity(config) == incumbent_identity:
-                return config, elapsed
         persistent = [
             (config, elapsed)
             for config, elapsed in final
             if config.kwargs.get("persistent_programs")
         ]
+        if launch_bound and persistent:
+
+            def persistent_priority(item):
+                config, elapsed = item
+                policy = (
+                    config.kwargs.get("input_cache_modifier", 0),
+                    config.kwargs.get("output_cache_modifier", 0),
+                )
+                policy_rank = {
+                    (0, 3): 0,
+                    (0, 2): 1,
+                    (0, 0): 2,
+                    (2, 2): 3,
+                }.get(policy, 4)
+                return (
+                    policy_rank,
+                    -int(config.kwargs.get("row_groups_per_block", 1)),
+                    elapsed,
+                    self._config_identity(config),
+                )
+
+            return min(persistent, key=persistent_priority)
+        for config, elapsed in final:
+            if self._config_identity(config) == incumbent_identity:
+                return config, elapsed
         if persistent:
             return min(
                 persistent,
