@@ -51,6 +51,7 @@ _FWD_AUTOTUNED_FAST_CACHE: dict[tuple, tuple] = {}
 _BWD_AUTOTUNED_FAST_CACHE: dict[tuple, tuple] = {}
 _FWD_AUTOTUNED_LAST: list[tuple[tuple, tuple] | None] = [None]
 _FWD_PUBLIC_GENERIC_LAST: list[object | None] = [None]
+_FWD_PUBLIC_RESOLVED_LAST: list[tuple[object, tuple, tuple] | None] = [None]
 _VALIDATED_INPUT_LAST: list[tuple[tuple, tuple] | None] = [None]
 _BWD_CU_COUNT_CACHE: dict[torch.device, int] = {}
 _DEVICE_ARCH_CACHE: dict[int, str] = {}
@@ -518,6 +519,17 @@ def _is_generic_forward_config(config) -> bool:
     return config.waves_per_eu is None and set(config.kwargs) == {"threads_per_row"}
 
 
+def _public_runtime_guard():
+    return (
+        os.environ.get("FLYDSL_COMPILE_BACKEND", ""),
+        os.environ.get("FLYDSL_RUNTIME_KIND", ""),
+        os.environ.get("FLYDSL_GPU_ARCH", ""),
+        os.environ.get("HSA_OVERRIDE_GFX_VERSION", ""),
+        os.environ.get("ARCH", ""),
+        tuple(sorted(getattr(_rmsnorm_fwd_tuner.fn, "compile_hints", {}).items())),
+    )
+
+
 def _forward_public_key(
     x,
     weight,
@@ -576,6 +588,11 @@ def _launch_resolved_fwd_entry(
     num_heads,
 ) -> None:
     config, compiled, constexpr_suffix = entry
+    _FWD_PUBLIC_RESOLVED_LAST[0] = (
+        _VALIDATED_INPUT_LAST[0],
+        _public_runtime_guard(),
+        entry,
+    )
     if _is_generic_forward_config(config):
         _FWD_PUBLIC_GENERIC_LAST[0] = _VALIDATED_INPUT_LAST[0]
         _launch_rmsnorm_fwd(
@@ -765,6 +782,11 @@ def _launch_rmsnorm_fwd_autotuned(
         if resolved is not None:
             _FWD_AUTOTUNED_FAST_CACHE[fast_key] = resolved
             _FWD_AUTOTUNED_LAST[0] = (last_key, resolved)
+            _FWD_PUBLIC_RESOLVED_LAST[0] = (
+                _VALIDATED_INPUT_LAST[0],
+                _public_runtime_guard(),
+                resolved,
+            )
             if _is_generic_forward_config(resolved[0]):
                 _FWD_PUBLIC_GENERIC_LAST[0] = _VALIDATED_INPUT_LAST[0]
             elif _FWD_PUBLIC_GENERIC_LAST[0] is _VALIDATED_INPUT_LAST[0]:
@@ -1550,6 +1572,36 @@ def _rmsnorm_impl(
         residual_out = _eager_empty(x.device, x.dtype)
         rstd = _eager_empty(x.device, torch.float32)
         out = torch.empty_like(x)
+        resolved_public = _FWD_PUBLIC_RESOLVED_LAST[0]
+        if (
+            autotuned
+            and not _env_flag_enabled("FLYDSL_AUTOTUNE")
+            and resolved_public is not None
+            and resolved_public[0] is _VALIDATED_INPUT_LAST[0]
+            and resolved_public[1] == _public_runtime_guard()
+        ):
+            with torch.cuda.device(x.device):
+                _launch_resolved_fwd_entry(
+                    resolved_public[2],
+                    x,
+                    weight,
+                    absent,
+                    x,
+                    out,
+                    residual_out,
+                    rstd,
+                    m,
+                    eps,
+                    weight_offset,
+                    has_weight=True,
+                    has_bias=False,
+                    has_residual=False,
+                    store_residual=False,
+                    store_rstd=False,
+                    per_head=False,
+                    num_heads=1,
+                )
+            return out
         use_generic_winner = (
             autotuned
             and not _env_flag_enabled("FLYDSL_AUTOTUNE")
