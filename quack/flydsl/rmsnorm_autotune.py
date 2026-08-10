@@ -72,6 +72,15 @@ def _waves_per_eu_candidates():
     return _EXHAUSTIVE_WAVES_PER_EU if value in {"1", "true", "yes", "on"} else _WAVES_PER_EU
 
 
+def _persistent_program_candidates(m: int, num_cus: int) -> list[int]:
+    programs = set()
+    for divisor in (4, 2):
+        target = (m + divisor - 1) // divisor
+        rounded = ((target + num_cus - 1) // num_cus) * num_cus
+        programs.add(min(m, max(num_cus, rounded)))
+    return sorted(programs)
+
+
 def _row_candidates(n: int, dtype_width: int) -> list[int]:
     heuristic = (
         RmsNormRowConfig.for_lane_group(n, dtype_width)
@@ -206,6 +215,12 @@ def rmsnorm_search_configs(*args, **kwargs) -> list[Config]:
             persistent_single_pass=True,
             packed_flat_rows=True,
         )
+        for persistent_programs in _persistent_program_candidates(m, num_cus):
+            append(
+                threads_per_row=threads,
+                row_groups_per_block=1,
+                persistent_programs=persistent_programs,
+            )
     return configs
 
 
@@ -533,6 +548,16 @@ class RmsNormAutotuner(FlydslL2Autotuner):
             for config, elapsed in reranked
             if elapsed <= best_time * (1.0 + _RERANK_FINAL_TIE_BAND)
         ]
+        persistent = [
+            (config, elapsed)
+            for config, elapsed in final
+            if config.kwargs.get("persistent_programs")
+        ]
+        if persistent:
+            return min(
+                persistent,
+                key=lambda item: (item[1], self._config_identity(item[0])),
+            )
         for config, elapsed in final:
             if self._config_identity(config) == incumbent_identity:
                 return config, elapsed
