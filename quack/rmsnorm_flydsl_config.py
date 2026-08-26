@@ -49,7 +49,13 @@ class RmsNormFwdConfig:
 
     @classmethod
     def for_forward(cls, n: int, dtype_width: int) -> "RmsNormFwdConfig":
-        """Choose the stable analytical row geometry."""
+        """Choose the stable analytical row geometry.
+
+        ``dtype_width`` is the *input's* element width, so the input span fills
+        one access; a wider operand splits into several atoms over the same tile
+        rather than shrinking everyone's span (see
+        :mod:`quack.flydsl_copy_utils`).
+        """
         vecsize = _vector_size(n, dtype_width)
         num_vecs = n // vecsize
         if num_vecs < MIN_NUM_THREADS:

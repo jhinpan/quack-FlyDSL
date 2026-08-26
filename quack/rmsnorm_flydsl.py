@@ -110,9 +110,6 @@ class RMSNorm(ReductionBase):
     def _num_threads(self):
         return self.config.num_threads * self.config.rows_per_block
 
-    def _operand_widths(self):
-        return self.widths
-
     def _blocks_per_tile(self, vecsize: int):
         # A row wide enough that keeping it resident would spill takes one block
         # per tile and is read twice; anything else is covered by a single tile.
@@ -167,7 +164,7 @@ class RMSNorm(ReductionBase):
             tidx = fx.thread_idx.x
             bidx, bidz = fx.block_idx.x, fx.block_idx.z
 
-            tiled_copy = copy_utils.tiled_copy_2d(widths, threads_per_row, num_threads, vecsize)
+            tiled_copy = copy_utils.TiledCopy2d(widths, threads_per_row, num_threads, vecsize)
             reduction_buffer = make_reduction_buffer(*reduction_shape)
 
             # Drop the operands this specialization does not carry, so every use

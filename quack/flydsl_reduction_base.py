@@ -18,7 +18,7 @@ The cluster tier is dropped throughout: CDNA has no distributed shared memory to
 split a row across CTAs.
 """
 
-from typing import Sequence, Type
+from typing import Type
 
 from quack.flydsl_constants import WAVE_SIZE
 
@@ -39,10 +39,6 @@ class ReductionBase:
 
     def _num_threads(self) -> int:
         return 128 if self.N <= 16384 else 256
-
-    def _operand_widths(self) -> Sequence[int]:
-        """Element widths the kernel's operands span; one atom is built per width."""
-        return (self.dtype.width,)
 
     def _blocks_per_tile(self, vecsize: int) -> int:
         """How many ``threads_per_row * vecsize`` blocks one tile covers.
