@@ -10,9 +10,8 @@ here and every runtime row access share one ceiling.
 import math
 from dataclasses import dataclass
 
-from quack.flydsl_constants import MAX_ACCESS_BITS
+from quack.flydsl_constants import MAX_ACCESS_BITS, WAVE_SIZE
 
-WAVE_SIZE = 64
 MIN_NUM_THREADS = WAVE_SIZE
 TARGET_BLOCK_THREADS = 256
 MAX_WIDE_ROW_THREADS = 1024
@@ -50,7 +49,13 @@ class RmsNormFwdConfig:
 
     @classmethod
     def for_forward(cls, n: int, dtype_width: int) -> "RmsNormFwdConfig":
-        """Choose the stable analytical row geometry."""
+        """Choose the stable analytical row geometry.
+
+        ``dtype_width`` is the *input's* element width, so the input span fills
+        one access; a wider operand splits into several atoms over the same tile
+        rather than shrinking everyone's span (see
+        :mod:`quack.flydsl_copy_utils`).
+        """
         vecsize = _vector_size(n, dtype_width)
         num_vecs = n // vecsize
         if num_vecs < MIN_NUM_THREADS:

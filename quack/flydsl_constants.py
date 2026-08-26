@@ -6,4 +6,8 @@
 # Each operand picks a supported width up to this cap.
 MAX_ACCESS_BITS = 128
 
-__all__ = ["MAX_ACCESS_BITS"]
+# CDNA's subgroup width, the unit a shuffle reduction closes over before it has
+# to go through LDS. CuTe's cute.arch.WARP_SIZE counterpart.
+WAVE_SIZE = 64
+
+__all__ = ["MAX_ACCESS_BITS", "WAVE_SIZE"]

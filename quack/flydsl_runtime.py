@@ -129,7 +129,12 @@ def _rows_are_disjoint_and_packed(tensor: torch.Tensor) -> bool:
     for stride, size in sorted(
         zip(tensor.stride()[:-1], tensor.shape[:-1]), key=lambda axis: axis[0]
     ):
-        if size > 1 and (stride * tensor.element_size()) % access_bytes:
+        # A singleton axis is never indexed past 0, so its stride describes no
+        # access at all: comparing it against the footprint would reject layouts
+        # the kernel reads perfectly well, at the cost of a full copy.
+        if size <= 1:
+            continue
+        if (stride * tensor.element_size()) % access_bytes:
             return False
         if stride < span:
             return False

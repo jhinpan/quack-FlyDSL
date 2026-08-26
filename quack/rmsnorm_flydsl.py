@@ -5,11 +5,28 @@
 # Device code adapted for Quack from ROCm/FlyDSL commit
 # ddaa507f56aa3fe9c08ebe6161a717b755540248.
 
-"""Direct eager RMSNorm forward for ROCm gfx950 using FlyDSL."""
+"""Direct eager RMSNorm forward for ROCm gfx950 using FlyDSL.
+
+:meth:`RMSNorm.compile`'s kernel is laid out section for section against
+``quack/rmsnorm.py``'s ``RMSNorm.kernel``, over FlyDSL siblings of the same
+helpers (:mod:`quack.flydsl_copy_utils`, :mod:`quack.flydsl_reduce`,
+:mod:`quack.flydsl_reduction_base`). Where it departs, it is because CDNA
+differs from the SM90+ target the CuTe kernel is written for:
+
+* no cluster tier, so no distributed shared memory and no mbarriers;
+* no ``cp.async``, so a tile lands in registers rather than being staged through
+  LDS -- which also means a masked lane keeps its old value instead of being
+  zero-filled, and the fragment is cleared before a predicated load;
+* a 128-bit ceiling on a buffer access, so operands of different element widths
+  need different atoms over one tile (see :mod:`quack.flydsl_copy_utils`);
+* rows too wide to keep in registers are walked in several tiles, where the CuTe
+  kernel always covers a row with one.
+"""
 
 import functools
 import math
 import numbers
+from functools import partial
 
 import torch
 
@@ -21,10 +38,13 @@ if not IS_ROCM_BUILD:
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import const_expr, gpu, range_constexpr
+from flydsl.expr import const_expr
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import ReductionOp
 
+import quack.flydsl_copy_utils as copy_utils
+from quack.flydsl_reduce import make_reduction_buffer, row_reduce
+from quack.flydsl_reduction_base import ReductionBase
 from quack.flydsl_runtime import (
     SUPPORTED_DTYPES as _SUPPORTED_DTYPES,
 )
@@ -38,7 +58,6 @@ from quack.flydsl_runtime import (
 )
 from quack.rmsnorm_flydsl_config import (
     MAX_N,
-    WAVE_SIZE,
     RmsNormFwdConfig,
 )
 
@@ -50,62 +69,239 @@ _MAX_ROWS = 2**31 - 1
 _MAX_RSTD_ROWS = (2**32 - 1) // 4
 
 
-def _row_records(elem_bits: int, n: int, valid=None):
-    """Row-scoped buffer bound; zero for an invalid grid row."""
-    row_bytes = n * (elem_bits // 8)
-    if valid is None:
-        return row_bytes
-    return valid.select(fx.Int32(row_bytes), fx.Int32(0))
+class RMSNorm(ReductionBase):
+    """RMSNorm forward for one feature set, as ``quack.rmsnorm.RMSNorm`` is.
 
+    Everything the geometry depends on is fixed here on the host, because the
+    kernel is specialized per feature set anyway: a FlyDSL ``TiledCopy`` is a
+    bundle of MLIR values and cannot be passed in from outside the trace the way
+    the CuTe kernel receives one.
+    """
 
-def _shuffle_reduce_add(value, lanes: int):
-    """Butterfly-sum a row's partials across ``lanes`` lanes of a wave."""
-    result = value
-    for shift_exp in range_constexpr(int(math.log2(lanes))):
-        offset = lanes // (2 << shift_exp)
-        result = result + fx.gpu.shuffle_xor(result, offset, fx.Int32(lanes))
-    return result
+    def __init__(
+        self,
+        dtype,
+        N: int,
+        config: RmsNormFwdConfig,
+        num_heads: int,
+        *,
+        has_weight: bool,
+        has_bias: bool,
+        has_residual: bool,
+        store_residual: bool,
+        store_rstd: bool,
+        apply_weight_offset: bool,
+    ):
+        super().__init__(dtype, N)
+        self.config = config
+        self.num_heads = num_heads
+        self.has_weight = has_weight
+        self.has_bias = has_bias
+        self.has_residual = has_residual
+        self.store_residual = store_residual
+        self.store_rstd = store_rstd
+        self.apply_weight_offset = apply_weight_offset
 
+    def _threads_per_row(self):
+        return self.config.num_threads
 
-def _load_native(access, index):
-    """One buffer copy, still in the operand's own dtype."""
-    atom, dtype, width, _, div = access
-    register = fx.make_rmem_tensor(width, dtype)
-    fx.copy(atom, fx.slice(div, (None, index)), register)
-    return fx.memref_load_vec(register)
+    def _num_threads(self):
+        return self.config.num_threads * self.config.rows_per_block
 
+    def _blocks_per_tile(self, vecsize: int):
+        # A row wide enough that keeping it resident would spill takes one block
+        # per tile and is read twice; anything else is covered by a single tile.
+        return 1 if self.config.reload_from_gmem else self._num_blocks_n(vecsize)
 
-def _copy_out(access, value, index):
-    atom, dtype, width, _, div = access
-    register = fx.make_rmem_tensor(width, dtype)
-    fx.memref_store_vec(value, register)
-    fx.copy(atom, register, fx.slice(div, (None, index)))
+    def compile(self) -> Launcher:
+        """Trace and compile this specialization.
 
+        Stands in for the CuTe class's ``@cute.jit __call__`` plus
+        ``@cute.kernel kernel`` pair: FlyDSL rewrites control flow into ``scf``
+        only within the body it decorates, so the device code cannot be split
+        across methods the way CuTe's can.
 
-def _load(access, index):
-    """One activation-width span as fp32, joining wider operand storage."""
-    _, _, width, copies, _ = access
-    if const_expr(copies == 1):
-        return _load_native(access, index).to(fx.Float32)
-    elements = []
-    for part in range(copies):
-        chunk = _load_native(access, index * copies + part)
-        elements.extend(chunk[lane] for lane in range(width))
-    return fx.Vector.from_elements(elements, fx.Float32)
+        Every value the kernel body branches on is bound to a local first, and
+        the body reads no attribute of ``self``. That is what makes two feature
+        sets distinct to FlyDSL: it keys an artifact on the kernel's source plus
+        the scalar closure values it can see, and an object reference tells it
+        nothing, so a flag reached through ``self`` would let the first feature
+        set compiled answer for every other one.
+        """
+        N, num_heads = self.N, self.num_heads
+        has_weight, has_bias, has_residual = self.has_weight, self.has_bias, self.has_residual
+        store_residual, store_rstd = self.store_residual, self.store_rstd
+        apply_weight_offset = self.apply_weight_offset
 
+        vecsize = self.config.vecsize
+        n_tiles = self._num_tiles_n(vecsize)
+        threads_per_row, num_threads = self._threads_per_row(), self._num_threads()
+        tiler_mn = self._get_tiler(vecsize)
+        reduction_shape = self._reduction_buffer_shape()
+        is_even_N = N == tiler_mn[1] * n_tiles
+        rows_per_block = tiler_mn[0]
+        # A tile one row tall makes the grid cover the rows exactly, so no block
+        # overhangs and the M-dimension guard is dead. Only a tile that packs
+        # several short rows can have its last block run past the last row.
+        grid_covers_rows = rows_per_block == 1
+        launch_bounds = {} if num_threads <= 256 else {"known_block_size": [num_threads, 1, 1]}
 
-def _store(access, value, index):
-    """One activation-width span, converted to the operand dtype and stored."""
-    _, dtype, width, copies, _ = access
-    if const_expr(dtype is not fx.Float32):
-        # gfx950 provides the packed fp32-to-bf16 conversion used by vector stores.
-        value = value.to(dtype)
-    if const_expr(copies == 1):
-        _copy_out(access, value, index)
-        return
-    for part in range(copies):
-        lanes = list(range(part * width, (part + 1) * width))
-        _copy_out(access, value.shuffle(value, lanes), index * copies + part)
+        @flyc.kernel(**launch_bounds)
+        def rmsnorm_kernel(
+            mX: fx.Tensor,  # (M, H, N)
+            mW: fx.Tensor,  # (H, N)
+            mB: fx.Tensor,  # (H, N)
+            mRes: fx.Tensor,  # (M, H, N)
+            mO: fx.Tensor,  # (M, H, N)
+            mResO: fx.Tensor,  # (M, H, N)
+            mRstd: fx.Tensor,  # (M, H)
+            num_rows: fx.Int32,
+            eps: fx.Float32,
+            weight_offset: fx.Float32,
+        ):
+            tidx = fx.thread_idx.x
+            bidx, bidz = fx.block_idx.x, fx.block_idx.z
+
+            tiled_copy = copy_utils.TiledCopy2d(threads_per_row, num_threads, vecsize, tidx)
+            reduction_buffer = make_reduction_buffer(*reduction_shape)
+
+            # Drop the operands this specialization does not carry, so every use
+            # below is the compile-time test against None that the CuTe kernel
+            # makes against its Optional arguments.
+            mW = mW if const_expr(has_weight) else None
+            mB = mB if const_expr(has_bias) else None
+            mRes = mRes if const_expr(has_residual) else None
+            mResO = mResO if const_expr(store_residual) else None
+            mRstd = mRstd if const_expr(store_rstd) else None
+
+            # Slice per head. Inputs are always rank 3 and parameters rank 2, so
+            # a plain RMSNorm is the H == 1 case of the per-head one.
+            mX, mRes, mO, mResO = [
+                mT[None, bidz, None] if const_expr(mT is not None) else None
+                for mT in (mX, mRes, mO, mResO)
+            ]
+            mW, mB = [mT[bidz, None] if const_expr(mT is not None) else None for mT in (mW, mB)]
+            mRstd = mRstd[None, bidz] if const_expr(mRstd is not None) else None
+
+            shape = (num_rows, N)
+
+            # Weight and bias repeat down a tile, rstd across it, so one tiler
+            # covers every operand.
+            mW, mB = [copy_utils.expand(mT, dim=0, size=tiler_mn[0]) for mT in (mW, mB)]
+            mRstd = copy_utils.expand(mRstd, dim=1, size=N)
+
+            # Slice for CTAs, then bind each tile to the buffer descriptor a CDNA
+            # copy atom addresses. Per tile rather than per tensor because a
+            # descriptor indexes 32 bits of bytes: based at the tensor, anything
+            # past 4 GiB would wrap. The trailing None keeps the mode the row's
+            # tiles are indexed by -- a single tile unless the row is too wide.
+            gX, gRes, gO, gResO, gRstd = [
+                copy_utils.buffer_tensor(copy_utils.local_tile(mT, tiler_mn, (bidx, None)))
+                for mT in (mX, mRes, mO, mResO, mRstd)
+            ]
+            gW, gB = [
+                copy_utils.buffer_tensor(copy_utils.local_tile(mT, tiler_mn, (0, None)))
+                for mT in (mW, mB)
+            ]
+
+            tXgW = tiled_copy.partition_S(gW)
+            tXgB = tiled_copy.partition_S(gB)
+            tXgX = tiled_copy.partition_S(gX)
+            tXgRes = tiled_copy.partition_S(gRes)
+            tXgO = tiled_copy.partition_D(gO)
+            tXgResO = tiled_copy.partition_D(gResO)
+            tXrRstd = tiled_copy.partition_D(gRstd)
+            tXcX = copy_utils.thread_coords(tiled_copy, bidx, tiler_mn)
+
+            # allocate fragments for gmem->rmem, one tile wide
+            tXrW, tXrB, tXrX, tXrRes, tXrO, tXrResO = [
+                copy_utils.make_fragment(t) for t in (tXgW, tXgB, tXgX, tXgRes, tXgO, tXgResO)
+            ]
+
+            tXpX = (
+                copy_utils.predicate_k(tXcX, limit=shape[1]) if const_expr(not is_even_N) else None
+            )
+            # Each copy will use the same predicate
+            copy = partial(copy_utils.copy, pred=tXpX)
+
+            in_row = True if const_expr(grid_covers_rows) else tXcX.row < num_rows
+
+            # Both passes walk the row a tile at a time. A row that fits in
+            # registers is a single tile, so the fragments this pass fills are
+            # still live for the epilogue; a wider row re-copies them below.
+            sum_sq_x = fx.Float32(0.0)
+            for tile in range(n_tiles):
+                if in_row:
+                    copy(tXgX, tXrX, tile=tile)
+                    if const_expr(mRes is not None):
+                        copy(tXgRes, tXrRes, tile=tile)
+                x = copy_utils.load(tXrX, fx.Float32)
+                if const_expr(mRes is not None):
+                    x = x + copy_utils.load(tXrRes, fx.Float32)
+                if const_expr(mResO is not None):
+                    copy_utils.store(tXrResO, x)
+                    if in_row:
+                        copy(tXrResO, tXgResO, tile=tile)
+                sum_sq_x = sum_sq_x + (x * x).reduce(ReductionOp.ADD)
+
+            sum_sq_x = row_reduce(sum_sq_x, ReductionOp.ADD, threads_per_row, reduction_buffer)
+            rstd = fmath.rsqrt(sum_sq_x / fx.Float32(shape[1]) + eps)
+            if const_expr(mRstd is not None):
+                # Only the thread corresponding to column 0 writes out the rstd to gmem
+                if in_row:
+                    if tXcX.col == fx.Int32(0):
+                        tXrRstd[(0, 0), 0, 0, 0] = rstd
+
+            for tile in range(n_tiles):
+                if const_expr(n_tiles > 1):
+                    # The tile the first pass left in registers is gone by now.
+                    if in_row:
+                        copy(tXgX, tXrX, tile=tile)
+                        if const_expr(mRes is not None):
+                            copy(tXgRes, tXrRes, tile=tile)
+                x = copy_utils.load(tXrX, fx.Float32)
+                if const_expr(mRes is not None):
+                    x = x + copy_utils.load(tXrRes, fx.Float32)
+                y = x * rstd
+                if const_expr(mW is not None):
+                    copy(tXgW, tXrW, tile=tile)
+                    w = copy_utils.load(tXrW, fx.Float32)
+                    if const_expr(apply_weight_offset):
+                        # fp32 add so e.g. (1 + w) doesn't round through the weight dtype
+                        w = w + weight_offset
+                    y = y * w
+                if const_expr(mB is not None):
+                    copy(tXgB, tXrB, tile=tile)
+                    y = y + copy_utils.load(tXrB, fx.Float32)
+                copy_utils.store(tXrO, y)
+                if in_row:
+                    copy(tXrO, tXgO, tile=tile)
+
+        @flyc.jit
+        def launch_rmsnorm(
+            mX: fx.Tensor,
+            mW: fx.Tensor,
+            mB: fx.Tensor,
+            mRes: fx.Tensor,
+            mO: fx.Tensor,
+            mResO: fx.Tensor,
+            mRstd: fx.Tensor,
+            m: fx.Int32,
+            eps: fx.Float32,
+            weight_offset: fx.Float32,
+            stream: fx.Stream = fx.Stream(None),  # noqa: B008 - FlyDSL traced ABI
+        ):
+            rmsnorm_kernel(mX, mW, mB, mRes, mO, mResO, mRstd, m, eps, weight_offset).launch(
+                grid=(
+                    (m + fx.Int32(rows_per_block - 1)) // fx.Int32(rows_per_block),
+                    1,
+                    num_heads,
+                ),
+                block=(num_threads, 1, 1),
+                stream=stream,
+            )
+
+        return Launcher(flyc.compile[{"fastmath": "fast"}](launch_rmsnorm))
 
 
 @functools.cache
@@ -123,7 +319,6 @@ def _compiled_forward(
     has_residual: bool,
     store_residual: bool,
     store_rstd: bool,
-    per_head: bool,
     num_heads: int,
     apply_weight_offset: bool,
 ):
@@ -134,266 +329,25 @@ def _compiled_forward(
     torch dtypes resolve here, so device code captures only FlyDSL types.
     """
     input_dtype, input_bits = dtype_spec(input_torch_dtype)
-    output_dtype, output_bits = dtype_spec(output_torch_dtype)
-    weight_dtype, weight_bits = dtype_spec(weight_torch_dtype)
-    bias_dtype, bias_bits = dtype_spec(bias_torch_dtype)
-    residual_dtype, residual_bits = dtype_spec(residual_torch_dtype)
-    residual_out_dtype, residual_out_bits = dtype_spec(residual_out_torch_dtype)
 
     config = RmsNormFwdConfig.for_forward(n, input_bits)
-    threads_per_row = config.num_threads
-    rows_per_block = config.rows_per_block
-    block_threads = rows_per_block * threads_per_row
-    vecsize = config.vecsize
-    num_vecs = config.num_vecs
-    last_tile = config.num_tiles - 1
-    reload_from_gmem = config.reload_from_gmem
-    wide_full_tiles = num_vecs // threads_per_row
-    wide_tail_vecs = num_vecs % threads_per_row
-
-    reduce_lanes = min(threads_per_row, WAVE_SIZE)
-    red_slots = max(1, threads_per_row // WAVE_SIZE)
-
-    @fx.struct
-    class SharedStorage:
-        s_red: fx.Array[fx.Float32, red_slots, 16]
-
     # An input span is always one copy, so a cached tile stays in the input dtype.
-    assert vecsize * input_bits <= MAX_ACCESS_BITS
+    # A wider operand takes several atoms over the same tile, each built where
+    # the tile is partitioned (see :mod:`quack.flydsl_copy_utils`).
+    assert config.vecsize * input_bits <= MAX_ACCESS_BITS
 
-    @flyc.kernel(**({} if block_threads <= 256 else {"known_block_size": [block_threads, 1, 1]}))
-    def rmsnorm_kernel(
-        input_tensor: fx.Tensor,
-        weight_tensor: fx.Tensor,
-        bias_tensor: fx.Tensor,
-        residual_tensor: fx.Tensor,
-        output_tensor: fx.Tensor,
-        residual_out_tensor: fx.Tensor,
-        rstd_tensor: fx.Tensor,
-        num_programs: fx.Int32,
-        eps: fx.Float32,
-        weight_offset: fx.Float32,
-    ):
-        tid = fx.thread_idx.x
-        if const_expr(rows_per_block > 1):
-            lane = tid % threads_per_row
-            program = fx.block_idx.x * fx.Int32(rows_per_block) + tid // threads_per_row
-            in_grid = program < num_programs
-        else:
-            lane = tid
-            program = fx.block_idx.x
-            in_grid = None
-        row = program // fx.Int32(num_heads) if per_head else program
-        head = program % fx.Int32(num_heads) if per_head else fx.Int32(0)
-
-        if const_expr(red_slots > 1):
-            storage = fx.SharedAllocator().allocate(SharedStorage).peek()
-            reduction = storage.s_red.view(fx.make_layout(red_slots, 1))
-
-        def group_reduce_add(value):
-            return _shuffle_reduce_add(value, reduce_lanes)
-
-        def row_reduce_add(value):
-            """Sum one row's partials: in-wave shuffles, then LDS across waves."""
-            if const_expr(red_slots == 1):
-                return group_reduce_add(value)
-            wave_lane = tid % WAVE_SIZE
-            wave = tid // WAVE_SIZE
-            reduced = group_reduce_add(value)
-            if wave_lane == 0:
-                fx.memref_store(reduced, reduction, wave)
-            gpu.barrier()
-            if wave == 0:
-                in_range = wave_lane < red_slots
-                safe_lane = in_range.select(wave_lane, 0)
-                partial = in_range.select(
-                    fx.memref_load(reduction, safe_lane),
-                    fx.Float32(0.0),
-                )
-                partial = group_reduce_add(partial)
-                if wave_lane == 0:
-                    fx.memref_store(partial, reduction, 0)
-            gpu.barrier()
-            return fx.memref_load(reduction, 0)
-
-        def access(buffer, dtype, bits):
-            """Copy atom, element type, elements per copy, copies per vector,
-            and the divided view they index. ``MAX_ACCESS_BITS`` caps each MUBUF
-            transaction -- narrower spans emit narrower ones -- so an operand
-            wider than the input takes >1 copy.
-            """
-            width = min(vecsize, MAX_ACCESS_BITS // bits)
-            return (
-                fx.make_copy_atom(fx.rocdl.BufferCopy(width * bits, 0), bits),
-                dtype,
-                width,
-                vecsize // width,
-                fx.logical_divide(buffer, fx.make_layout(width, 1)),
-            )
-
-        def bind_row(tensor, dtype, bits):
-            """Bind this program's row, so padded row pitches stay in bounds."""
-            coords = (row, head, None) if per_head else (row, None)
-            buffer = fx.rocdl.make_buffer_tensor(
-                fx.slice(tensor, coords),
-                num_records_bytes=_row_records(bits, n, in_grid),
-            )
-            return access(buffer, dtype, bits)
-
-        def bind_parameter(tensor, dtype, bits):
-            """Bind a weight or bias: the whole vector, or this program's head."""
-            buffer = (
-                fx.rocdl.make_buffer_tensor(
-                    fx.slice(tensor, (head, None)),
-                    num_records_bytes=_row_records(bits, n),
-                )
-                if per_head
-                else fx.rocdl.make_buffer_tensor(tensor)
-            )
-            return access(buffer, dtype, bits)
-
-        inp = bind_row(input_tensor, input_dtype, input_bits)
-        out = bind_row(output_tensor, output_dtype, output_bits)
-        if const_expr(has_residual):
-            res = bind_row(residual_tensor, residual_dtype, residual_bits)
-        if const_expr(store_residual):
-            res_out = bind_row(residual_out_tensor, residual_out_dtype, residual_out_bits)
-        if const_expr(has_weight):
-            wgt = bind_parameter(weight_tensor, weight_dtype, weight_bits)
-        if const_expr(has_bias):
-            bia = bind_parameter(bias_tensor, bias_dtype, bias_bits)
-        if const_expr(store_rstd):
-            rstd_buffer = fx.rocdl.make_buffer_tensor(
-                rstd_tensor,
-                num_records_bytes=num_programs * fx.Int32(4),
-            )
-            rstd_div = fx.logical_divide(rstd_buffer, fx.make_layout(1, 1))
-
-        # One tile-geometry driver for both passes: body(clamped load index,
-        # unclamped store index, store guard (None if full tile), tile ordinal).
-        # Nested so plain ``range`` traces as a runtime loop, bounding code size
-        # and VGPRs on wide rows.
-        def sweep(body, reduce=False):
-            total = fx.Float32(0.0)
-            if const_expr(reload_from_gmem):
-                for tile_i in range(wide_full_tiles):
-                    index = lane + tile_i * threads_per_row
-                    part = body(index, index, None, None)
-                    if const_expr(reduce):
-                        total = total + part
-                if const_expr(wide_tail_vecs > 0):
-                    index = lane + wide_full_tiles * threads_per_row
-                    in_row = lane < wide_tail_vecs
-                    part = body(in_row.select(index, 0), index, in_row, None)
-                    if const_expr(reduce):
-                        total = total + part
-            else:
-                for tile_i in range_constexpr(config.num_tiles):
-                    index = lane + tile_i * threads_per_row
-                    in_row = None
-                    load_index = index
-                    if const_expr(config.needs_predicate and tile_i == last_tile):
-                        in_row = index < num_vecs
-                        load_index = in_row.select(index, 0)
-                    part = body(load_index, index, in_row, tile_i)
-                    if const_expr(reduce):
-                        total = total + part
-            return total
-
-        def guarded(guard, action):
-            if const_expr(guard is None):
-                action()
-            else:
-                if guard:
-                    action()
-
-        def row_span(index):
-            """This row's span at ``index``, plus the residual if fused.
-
-            Without a residual it stays in the input dtype, halving a cached
-            tile's registers; ``widen`` folds the conversion into consumers.
-            """
-            value = _load_native(inp, index)
-            if const_expr(has_residual):
-                value = value.to(fx.Float32) + _load(res, index)
-            return value
-
-        def widen(value):
-            return value if const_expr(has_residual) else value.to(fx.Float32)
-
-        # Tiles the first pass leaves in registers for the second; empty when
-        # the row is wide enough that reloading beats the register pressure.
-        cached = []
-
-        def accumulate(load_index, store_index, guard, tile_i):
-            value = row_span(load_index)
-            wide = widen(value)
-            if const_expr(store_residual):
-                guarded(guard, lambda: _store(res_out, wide, store_index))
-            if const_expr(not reload_from_gmem):
-                cached.append(value)
-            contribution = (wide * wide).reduce(ReductionOp.ADD)
-            if const_expr(guard is None):
-                return contribution
-            return guard.select(contribution, fx.Float32(0.0))
-
-        def normalize(load_index, store_index, guard, tile_i):
-            """Scale one span by rrms, fold in weight and bias, and store it."""
-            source = cached[tile_i] if const_expr(not reload_from_gmem) else row_span(load_index)
-            result = widen(source) * rrms
-            if const_expr(has_weight):
-                weights = _load(wgt, load_index)
-                if const_expr(apply_weight_offset):
-                    weights = weights + weight_offset
-                result = result * weights
-            if const_expr(has_bias):
-                result = result + _load(bia, load_index)
-            guarded(guard, lambda: _store(out, result, store_index))
-
-        sum_sq = row_reduce_add(sweep(accumulate, reduce=True))
-        rrms = fmath.rsqrt(sum_sq / float(n) + eps)
-        if const_expr(store_rstd):  # noqa: SIM102 - compile-time guard
-            if lane == 0:
-                rstd_div[program] = rrms
-        sweep(normalize)
-
-    @flyc.jit
-    def launch_rmsnorm(
-        input_tensor: fx.Tensor,
-        weight_tensor: fx.Tensor,
-        bias_tensor: fx.Tensor,
-        residual_tensor: fx.Tensor,
-        output_tensor: fx.Tensor,
-        residual_out_tensor: fx.Tensor,
-        rstd_tensor: fx.Tensor,
-        m: fx.Int32,
-        eps: fx.Float32,
-        weight_offset: fx.Float32,
-        stream: fx.Stream = fx.Stream(None),  # noqa: B008 - FlyDSL traced ABI
-    ):
-        num_programs = m * fx.Int32(num_heads)
-        rmsnorm_kernel(
-            input_tensor,
-            weight_tensor,
-            bias_tensor,
-            residual_tensor,
-            output_tensor,
-            residual_out_tensor,
-            rstd_tensor,
-            num_programs,
-            eps,
-            weight_offset,
-        ).launch(
-            grid=(
-                (num_programs - fx.Int32(1)) // fx.Int32(rows_per_block) + fx.Int32(1),
-                1,
-                1,
-            ),
-            block=(block_threads, 1, 1),
-            stream=stream,
-        )
-
-    return Launcher(flyc.compile[{"fastmath": "fast"}](launch_rmsnorm))
+    return RMSNorm(
+        input_dtype,
+        n,
+        config,
+        num_heads,
+        has_weight=has_weight,
+        has_bias=has_bias,
+        has_residual=has_residual,
+        store_residual=store_residual,
+        store_rstd=store_rstd,
+        apply_weight_offset=apply_weight_offset,
+    ).compile()
 
 
 def _validate_inputs(
@@ -539,7 +493,7 @@ def _rmsnorm_fwd_core(
 ):
     """Shared body; absent outputs are None, not sentinel tensors. Two empty CUDA
     tensors cost 2.1us, an eighth of the host path, and only the op needs them."""
-    m, n, num_heads, per_head = _validate_inputs(
+    m, n, num_heads, _ = _validate_inputs(
         x, weight, bias, residual, out_dtype, residual_dtype, store_rstd, weight_offset
     )
     output_dtype, residual_out_dtype, store_residual = _output_dtypes(
@@ -555,12 +509,21 @@ def _rmsnorm_fwd_core(
             torch.empty(x.shape[:-1], device=x.device, dtype=torch.float32) if store_rstd else None,
         )
 
-    last_shape = (num_heads, n) if per_head else (n,)
-    x_flat = packed_rows(x.reshape(-1, *last_shape))
-    weight_arg = packed_rows(weight) if weight is not None else empty_placeholder(x.device, x.dtype)
-    bias_arg = packed_rows(bias) if bias is not None else empty_placeholder(x.device, x.dtype)
+    # Rank 3 on the device even without heads, so the kernel has one shape to
+    # partition rather than a per-head and a plain variant.
+    x_flat = packed_rows(x.reshape(-1, num_heads, n))
+    weight_arg = (
+        packed_rows(weight.reshape(num_heads, n))
+        if weight is not None
+        else empty_placeholder(x.device, x.dtype)
+    )
+    bias_arg = (
+        packed_rows(bias.reshape(num_heads, n))
+        if bias is not None
+        else empty_placeholder(x.device, x.dtype)
+    )
     residual_arg = (
-        packed_rows(residual.reshape(-1, *last_shape))
+        packed_rows(residual.reshape(-1, num_heads, n))
         if residual is not None
         else empty_placeholder(x.device, x.dtype)
     )
@@ -572,7 +535,7 @@ def _rmsnorm_fwd_core(
         else empty_placeholder(x.device, residual_out_dtype)
     )
     rstd_flat = (
-        torch.empty(m * num_heads, device=x.device, dtype=torch.float32)
+        torch.empty(m, num_heads, device=x.device, dtype=torch.float32)
         if store_rstd
         else empty_placeholder(x.device, torch.float32)
     )
@@ -580,7 +543,7 @@ def _rmsnorm_fwd_core(
     device_index = x.device.index
     if device_index is None:
         device_index = torch.cuda.current_device()
-    # Positional, not keyword: matching sixteen keywords through lru_cache costs
+    # Positional, not keyword: matching fifteen keywords through lru_cache costs
     # ~0.4us per launch on gfx950, against a ~20us host path at small M.
     launcher = _compiled_forward(
         device_index,
@@ -596,7 +559,6 @@ def _rmsnorm_fwd_core(
         residual is not None,
         store_residual,
         store_rstd,
-        per_head,
         num_heads,
         weight_offset != 0.0,
     )
