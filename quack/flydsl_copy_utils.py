@@ -30,8 +30,6 @@ one that has to narrow. Median over a shape/feature sweep was 1%, so it is the
 wide-row backward feeder that pays, not the common case.
 """
 
-from typing import Sequence
-
 import flydsl.expr as fx
 
 from quack.flydsl_constants import MAX_ACCESS_BITS
@@ -100,76 +98,65 @@ def _atom_elems(width: int, num_copy_elems: int) -> int:
 
 
 class TiledCopy2d:
-    """One tile, partitioned once per operand element width in ``widths``.
+    """One thread's view of a tile, at whatever width the operand it partitions has.
 
-    Stands in for ``cute.TiledCopy`` where CuTe needs only one: the CuTe kernel
-    partitions every operand with a single ``tiled_copy`` because its ``vecsize``
-    was capped so one atom fits them all.
+    Stands in for ``cute.TiledCopy`` and the ``ThrCopy`` it slices into, which
+    CuTe keeps apart because one of each serves every operand there: its
+    ``vecsize`` was capped so a single atom fits them all. Here ``ATOM_V``
+    follows the operand's element width, so the atom is built where that width
+    is known -- read off the tensor being partitioned, exactly as :func:`copy`
+    reads it off the tensor being moved.
 
     Every width shares the thread and value layouts, so the tile and the columns
     a thread owns are identical; only the atom differs, and with it the
     ``(ATOM_V, REST_V)`` split of the innermost mode.
     """
 
-    __slots__ = ("num_copy_elems", "threads_per_row", "tiled")
+    __slots__ = ("num_copy_elems", "thr_idx", "thr_layout", "threads_per_row", "val_layout")
 
     def __init__(
         self,
-        widths: Sequence[int],
         threads_per_row: int,
         num_threads: int,
-        num_copy_elems: int = 1,
+        num_copy_elems: int,
+        thr_idx,
     ):
         assert num_threads % threads_per_row == 0
         self.threads_per_row = threads_per_row
         self.num_copy_elems = num_copy_elems
-        thr_layout = fx.make_ordered_layout(
+        self.thr_idx = thr_idx
+        self.thr_layout = fx.make_ordered_layout(
             (num_threads // threads_per_row, threads_per_row), order=(1, 0)
         )
-        val_layout = fx.make_ordered_layout((1, num_copy_elems), order=(0, 1))
-        self.tiled = {
-            width: fx.make_tiled_copy_tv(
-                fx.make_copy_atom(
-                    fx.rocdl.BufferCopy(_atom_elems(width, num_copy_elems) * width, 0), width
-                ),
-                thr_layout,
-                val_layout,
-            )
-            for width in sorted(set(widths))
-        }
+        self.val_layout = fx.make_ordered_layout((1, num_copy_elems), order=(0, 1))
 
     @property
     def cols_per_block(self) -> int:
         """Columns one pass of the thread layout covers, before any rest modes."""
         return self.threads_per_row * self.num_copy_elems
 
-    def get_slice(self, thr_idx) -> "ThrCopy2d":
-        return ThrCopy2d(self, thr_idx)
+    def _thr_copy(self, width: int):
+        """This thread's slice of the tile, split into ``width``'s atoms.
 
-
-class ThrCopy2d:
-    """One thread's slice of a :class:`TiledCopy2d`.
-
-    ``partition_S``/``partition_D`` pick the partitioner from the tensor's own
-    element width, so call sites read exactly like the CuTe ones.
-    """
-
-    __slots__ = ("slices", "thr_idx", "tiled_copy")
-
-    def __init__(self, tiled_copy: TiledCopy2d, thr_idx):
-        self.tiled_copy = tiled_copy
-        self.thr_idx = thr_idx
-        self.slices = {w: t.get_slice(thr_idx) for w, t in tiled_copy.tiled.items()}
+        Rebuilt per partition rather than kept per width: the ops are pure and
+        identical for a repeated width, so they fold, and nothing then has to
+        enumerate the widths a specialization uses ahead of time.
+        """
+        atom = fx.make_copy_atom(
+            fx.rocdl.BufferCopy(_atom_elems(width, self.num_copy_elems) * width, 0), width
+        )
+        tiled = fx.make_tiled_copy_tv(atom, self.thr_layout, self.val_layout)
+        return tiled.get_slice(self.thr_idx)
 
     def partition_S(self, tensor):
         if tensor is None:
             return None
-        return self.slices[tensor.element_type.width].partition_S(tensor)
+        return self._thr_copy(tensor.element_type.width).partition_S(tensor)
 
     def partition_D(self, tensor):
         if tensor is None:
             return None
-        return self.slices[tensor.element_type.width].partition_D(tensor)
+        return self._thr_copy(tensor.element_type.width).partition_D(tensor)
 
 
 def tile_of(tensor, tile):
@@ -212,7 +199,7 @@ def copy(src, dst, *, pred=None, tile=None) -> None:
     fx.copy(atom, src, dst, pred=pred)
 
 
-def thread_coords(thr_copy: ThrCopy2d, block_row, tiler_mn) -> "ThreadCoords":
+def thread_coords(tiled_copy: "TiledCopy2d", block_row, tiler_mn) -> "ThreadCoords":
     """Where this thread's slice of the tile sits in the tensor.
 
     CuTe reads this off an identity tensor put through the same partitioner.
@@ -224,7 +211,7 @@ def thread_coords(thr_copy: ThrCopy2d, block_row, tiler_mn) -> "ThreadCoords":
     carrying the value that row wanted.) The same numbers follow from the
     geometry, so they are derived rather than read back.
     """
-    return ThreadCoords(thr_copy, block_row, tiler_mn)
+    return ThreadCoords(tiled_copy, block_row, tiler_mn)
 
 
 class ThreadCoords:
@@ -237,10 +224,9 @@ class ThreadCoords:
 
     __slots__ = ("col", "row", "tiled_copy", "tiler_mn")
 
-    def __init__(self, thr_copy: ThrCopy2d, block_row, tiler_mn):
-        tiled_copy = thr_copy.tiled_copy
+    def __init__(self, tiled_copy: TiledCopy2d, block_row, tiler_mn):
         threads_per_row = fx.Int32(tiled_copy.threads_per_row)
-        thr_idx = fx.Int32(thr_copy.thr_idx)
+        thr_idx = fx.Int32(tiled_copy.thr_idx)
         self.tiled_copy = tiled_copy
         self.tiler_mn = tiler_mn
         self.row = fx.Int32(block_row) * fx.Int32(tiler_mn[0]) + thr_idx // threads_per_row

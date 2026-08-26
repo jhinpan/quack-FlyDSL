@@ -83,7 +83,6 @@ class RMSNorm(ReductionBase):
         dtype,
         N: int,
         config: RmsNormFwdConfig,
-        widths,
         num_heads: int,
         *,
         has_weight: bool,
@@ -95,7 +94,6 @@ class RMSNorm(ReductionBase):
     ):
         super().__init__(dtype, N)
         self.config = config
-        self.widths = widths
         self.num_heads = num_heads
         self.has_weight = has_weight
         self.has_bias = has_bias
@@ -130,7 +128,7 @@ class RMSNorm(ReductionBase):
         nothing, so a flag reached through ``self`` would let the first feature
         set compiled answer for every other one.
         """
-        N, widths, num_heads = self.N, self.widths, self.num_heads
+        N, num_heads = self.N, self.num_heads
         has_weight, has_bias, has_residual = self.has_weight, self.has_bias, self.has_residual
         store_residual, store_rstd = self.store_residual, self.store_rstd
         apply_weight_offset = self.apply_weight_offset
@@ -164,7 +162,7 @@ class RMSNorm(ReductionBase):
             tidx = fx.thread_idx.x
             bidx, bidz = fx.block_idx.x, fx.block_idx.z
 
-            tiled_copy = copy_utils.TiledCopy2d(widths, threads_per_row, num_threads, vecsize)
+            tiled_copy = copy_utils.TiledCopy2d(threads_per_row, num_threads, vecsize, tidx)
             reduction_buffer = make_reduction_buffer(*reduction_shape)
 
             # Drop the operands this specialization does not carry, so every use
@@ -206,16 +204,14 @@ class RMSNorm(ReductionBase):
                 for mT in (mW, mB)
             ]
 
-            thr_copy_X = tiled_copy.get_slice(tidx)
-
-            tXgW = thr_copy_X.partition_S(gW)
-            tXgB = thr_copy_X.partition_S(gB)
-            tXgX = thr_copy_X.partition_S(gX)
-            tXgRes = thr_copy_X.partition_S(gRes)
-            tXgO = thr_copy_X.partition_D(gO)
-            tXgResO = thr_copy_X.partition_D(gResO)
-            tXrRstd = thr_copy_X.partition_D(gRstd)
-            tXcX = copy_utils.thread_coords(thr_copy_X, bidx, tiler_mn)
+            tXgW = tiled_copy.partition_S(gW)
+            tXgB = tiled_copy.partition_S(gB)
+            tXgX = tiled_copy.partition_S(gX)
+            tXgRes = tiled_copy.partition_S(gRes)
+            tXgO = tiled_copy.partition_D(gO)
+            tXgResO = tiled_copy.partition_D(gResO)
+            tXrRstd = tiled_copy.partition_D(gRstd)
+            tXcX = copy_utils.thread_coords(tiled_copy, bidx, tiler_mn)
 
             # allocate fragments for gmem->rmem, one tile wide
             tXrW, tXrB, tXrX, tXrRes, tXrO, tXrResO = [
@@ -333,34 +329,17 @@ def _compiled_forward(
     torch dtypes resolve here, so device code captures only FlyDSL types.
     """
     input_dtype, input_bits = dtype_spec(input_torch_dtype)
-    _, output_bits = dtype_spec(output_torch_dtype)
-    _, weight_bits = dtype_spec(weight_torch_dtype)
-    _, bias_bits = dtype_spec(bias_torch_dtype)
-    _, residual_bits = dtype_spec(residual_torch_dtype)
-    _, residual_out_bits = dtype_spec(residual_out_torch_dtype)
-
-    # One atom, and one partition of the tile, per width any operand takes.
-    widths = {input_bits, output_bits}
-    if has_weight:
-        widths.add(weight_bits)
-    if has_bias:
-        widths.add(bias_bits)
-    if has_residual:
-        widths.add(residual_bits)
-    if store_residual:
-        widths.add(residual_out_bits)
-    if store_rstd:
-        widths.add(32)
 
     config = RmsNormFwdConfig.for_forward(n, input_bits)
     # An input span is always one copy, so a cached tile stays in the input dtype.
+    # A wider operand takes several atoms over the same tile, each built where
+    # the tile is partitioned (see :mod:`quack.flydsl_copy_utils`).
     assert config.vecsize * input_bits <= MAX_ACCESS_BITS
 
     return RMSNorm(
         input_dtype,
         n,
         config,
-        tuple(sorted(widths)),
         num_heads,
         has_weight=has_weight,
         has_bias=has_bias,
