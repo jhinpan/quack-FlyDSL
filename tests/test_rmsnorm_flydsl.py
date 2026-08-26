@@ -220,6 +220,22 @@ def test_rmsnorm_strided_tensor(use_compile):
     _assert_close(out, expected, x.dtype)
 
 
+@_requires_flydsl
+@pytest.mark.parametrize("shape", [(8, 1, 256), (8, 1, 1, 256), (1, 8, 256)])
+def test_packed_rows_keeps_singleton_axes(shape):
+    """A singleton axis must not force a copy.
+
+    Its stride describes no access -- the axis is never indexed past 0 -- but it
+    still looks like an overlap against the footprint of the axes below it. The
+    kernel reads such a tensor perfectly well, and copying it doubles the traffic
+    of every call, silently: the results stay correct, only twice as slow. Every
+    input reaches the kernel as (rows, heads, N), so plain RMSNorm hits this on
+    each launch.
+    """
+    x = torch.randn(*shape, device=_DEVICE, dtype=torch.bfloat16)
+    assert fly_rmsnorm.packed_rows(x).data_ptr() == x.data_ptr()
+
+
 @_flydsl_suite_owner
 @pytest.mark.parametrize("use_compile", [False, True])
 @pytest.mark.parametrize("n", [131072, 262144])
