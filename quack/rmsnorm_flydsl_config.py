@@ -10,9 +10,8 @@ here and every runtime row access share one ceiling.
 import math
 from dataclasses import dataclass
 
-from quack.flydsl_constants import MAX_ACCESS_BITS
+from quack.flydsl_constants import MAX_ACCESS_BITS, WAVE_SIZE
 
-WAVE_SIZE = 64
 MIN_NUM_THREADS = WAVE_SIZE
 TARGET_BLOCK_THREADS = 256
 MAX_WIDE_ROW_THREADS = 1024

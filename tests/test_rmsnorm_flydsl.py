@@ -340,6 +340,42 @@ def test_rmsnorm_compile_cache():
     assert fly_rmsnorm._compiled_forward.cache_info().currsize == 3
 
 
+@_requires_flydsl
+def test_rmsnorm_specializations_do_not_share_a_kernel():
+    """Feature sets that differ only in a compile-time flag must compile apart.
+
+    FlyDSL keys a compiled artifact on the kernel's source plus the scalar values
+    in its closure, and an object reference contributes nothing to that key. A
+    flag the kernel reached through ``self`` would therefore be invisible, and
+    whichever feature set compiled first would answer for the rest -- silently,
+    with the wrong arithmetic rather than an error. Same shape and dtypes for
+    every call here, so only the flags can tell the kernels apart.
+    """
+    m, n = 3, 256
+    x = torch.randn(m, n, device=_DEVICE, dtype=torch.bfloat16)
+    weight = torch.randn(n, device=_DEVICE, dtype=torch.float32)
+    residual = torch.randn(m, n, device=_DEVICE, dtype=torch.bfloat16)
+
+    # Plain first, so a shared kernel would be the one without any of the below.
+    out, _, _ = fly_rmsnorm.rmsnorm_fwd(x, weight)
+    _assert_close(out, _reference(x, weight)[0], x.dtype)
+
+    offset_out, _, _ = fly_rmsnorm.rmsnorm_fwd(x, weight, weight_offset=1.0)
+    _assert_close(offset_out, _reference(x, weight + 1.0)[0], x.dtype)
+
+    bias = torch.randn(n, device=_DEVICE, dtype=torch.float32)
+    bias_out, _, _ = fly_rmsnorm.rmsnorm_fwd(x, weight, bias=bias)
+    _assert_close(bias_out, _reference(x, weight, bias)[0], x.dtype)
+
+    res_out, residual_out, rstd = fly_rmsnorm.rmsnorm_fwd(
+        x, weight, residual=residual, store_rstd=True
+    )
+    expected, combined, expected_rstd = _reference(x, weight, residual=residual)
+    _assert_close(res_out, expected, x.dtype)
+    _assert_close(residual_out, combined, x.dtype)
+    _assert_close(rstd, expected_rstd, x.dtype)
+
+
 @pytest.mark.parametrize("use_compile", [False, True])
 def test_rmsnorm_with_bias(use_compile):
     m, n = 32, 1024
