@@ -67,6 +67,7 @@ __all__ = ["rmsnorm_fwd"]
 
 _SUPPORTED_ARCHES = frozenset({"gfx950"})
 _MAX_ROWS = 2**31 - 1
+_MAX_BUFFER_BYTES = 1 << 32
 # rstd's buffer descriptor carries a 32-bit num_records over fp32 elements.
 _MAX_RSTD_ROWS = (2**32 - 1) // 4
 _KERNEL_HELPER_FILES = (
@@ -97,6 +98,19 @@ def _ceil_div_positive_i32(value, divisor: int):
     return (value - one) // fx.Int32(divisor) + one
 
 
+def _buffer_tile_fits(tensor: torch.Tensor, rows_per_block: int, m: int, n: int) -> bool:
+    """Whether one CTA's byte span fits the buffer descriptor's 32-bit offset."""
+    rows = min(rows_per_block, m)
+    span_elements = (rows - 1) * tensor.stride(0) + n
+    return span_elements * tensor.element_size() < _MAX_BUFFER_BYTES
+
+
+@functools.cache
+def _forward_config(n: int, input_bits: int) -> RmsNormFwdConfig:
+    """Share the host geometry lookup between layout gating and compilation."""
+    return RmsNormFwdConfig.for_forward(n, input_bits)
+
+
 class RMSNorm(ReductionBase):
     """RMSNorm forward for one feature set, as ``quack.rmsnorm.RMSNorm`` is.
 
@@ -119,6 +133,7 @@ class RMSNorm(ReductionBase):
         store_residual: bool,
         store_rstd: bool,
         apply_weight_offset: bool,
+        use_buffer_copy: bool,
     ):
         super().__init__(dtype, N)
         self.config = config
@@ -129,6 +144,7 @@ class RMSNorm(ReductionBase):
         self.store_residual = store_residual
         self.store_rstd = store_rstd
         self.apply_weight_offset = apply_weight_offset
+        self.use_buffer_copy = use_buffer_copy
 
     def _threads_per_row(self):
         return self.config.num_threads
@@ -160,6 +176,7 @@ class RMSNorm(ReductionBase):
         has_weight, has_bias, has_residual = self.has_weight, self.has_bias, self.has_residual
         store_residual, store_rstd = self.store_residual, self.store_rstd
         apply_weight_offset = self.apply_weight_offset
+        use_buffer_copy = self.use_buffer_copy
 
         vecsize = self.config.vecsize
         n_tiles = self._num_tiles_n(vecsize)
@@ -193,7 +210,13 @@ class RMSNorm(ReductionBase):
             bidx = flat_block // fx.Int32(num_heads)
             bidz = flat_block % fx.Int32(num_heads)
 
-            tiled_copy = copy_utils.TiledCopy2d(threads_per_row, num_threads, vecsize, tidx)
+            tiled_copy = copy_utils.TiledCopy2d(
+                threads_per_row,
+                num_threads,
+                vecsize,
+                tidx,
+                use_buffer_copy=use_buffer_copy,
+            )
             reduction_buffer = make_reduction_buffer(*reduction_shape)
 
             # Drop the operands this specialization does not carry, so every use
@@ -221,19 +244,25 @@ class RMSNorm(ReductionBase):
             mW, mB = [copy_utils.expand(mT, dim=0, size=tiler_mn[0]) for mT in (mW, mB)]
             mRstd = copy_utils.expand(mRstd, dim=1, size=N)
 
-            # Slice for CTAs while the tensors still carry raw 64-bit pointers.
-            # The trailing None keeps the mode the row's N-tiles are indexed by.
+            # Slice for CTAs, then use a buffer descriptor only when every active
+            # multi-row tile fits its 32-bit byte offset. The fallback keeps the
+            # raw 64-bit pointers for UniversalCopy. The trailing None keeps the
+            # mode the row's N-tiles are indexed by.
             gX, gRes, gO, gResO, gRstd = [
-                copy_utils.local_tile(mT, tiler_mn, (bidx, None))
+                copy_utils.buffer_tensor(
+                    copy_utils.local_tile(mT, tiler_mn, (bidx, None)),
+                    use_buffer_copy,
+                )
                 for mT in (mX, mRes, mO, mResO, mRstd)
             ]
-            gW, gB = [copy_utils.local_tile(mT, tiler_mn, (0, None)) for mT in (mW, mB)]
+            gW, gB = [
+                copy_utils.buffer_tensor(
+                    copy_utils.local_tile(mT, tiler_mn, (0, None)),
+                    use_buffer_copy,
+                )
+                for mT in (mW, mB)
+            ]
 
-            # Partition before creating buffer descriptors. Their per-thread
-            # voffset is only 32 bits; rebasing at the CTA tile still leaves a
-            # multi-row tile vulnerable when its row pitch reaches 4 GiB.
-            # Partitioning first folds the row offset into the raw pointer and
-            # leaves only the small within-row/N-tile offset in the descriptor.
             tXgW = tiled_copy.partition_S(gW)
             tXgB = tiled_copy.partition_S(gB)
             tXgX = tiled_copy.partition_S(gX)
@@ -252,7 +281,11 @@ class RMSNorm(ReductionBase):
                 copy_utils.predicate_k(tXcX, limit=shape[1]) if const_expr(not is_even_N) else None
             )
             # Each copy will use the same predicate
-            copy = partial(copy_utils.copy, pred=tXpX)
+            copy = partial(
+                copy_utils.copy,
+                pred=tXpX,
+                use_buffer_copy=use_buffer_copy,
+            )
 
             in_row = True if const_expr(grid_covers_rows) else tXcX.row < num_rows
 
@@ -355,6 +388,7 @@ def _compiled_forward(
     store_rstd: bool,
     num_heads: int,
     apply_weight_offset: bool,
+    use_buffer_copy: bool,
 ):
     """Build and memoize one feature-specialized forward launcher.
 
@@ -364,7 +398,7 @@ def _compiled_forward(
     """
     input_dtype, input_bits = dtype_spec(input_torch_dtype)
 
-    config = RmsNormFwdConfig.for_forward(n, input_bits)
+    config = _forward_config(n, input_bits)
     # An input span is always one copy, so a cached tile stays in the input dtype.
     # A wider operand takes several atoms over the same tile, each built where
     # the tile is partitioned (see :mod:`quack.flydsl_copy_utils`).
@@ -381,6 +415,7 @@ def _compiled_forward(
         store_residual=store_residual,
         store_rstd=store_rstd,
         apply_weight_offset=apply_weight_offset,
+        use_buffer_copy=use_buffer_copy,
     ).compile()
 
 
@@ -574,10 +609,25 @@ def _rmsnorm_fwd_core(
         else empty_placeholder(x.device, torch.float32)
     )
 
+    config = _forward_config(n, x_flat.element_size() * 8)
+    # One-row CTAs never put the runtime row pitch in a descriptor offset.
+    if config.rows_per_block == 1:
+        use_buffer_copy = True
+    else:
+        use_buffer_copy = (
+            _buffer_tile_fits(x_flat, config.rows_per_block, m, n)
+            and _buffer_tile_fits(out_flat, config.rows_per_block, m, n)
+            and (residual is None or _buffer_tile_fits(residual_arg, config.rows_per_block, m, n))
+            and (
+                not store_residual
+                or _buffer_tile_fits(residual_out_flat, config.rows_per_block, m, n)
+            )
+        )
+
     device_index = x.device.index
     if device_index is None:
         device_index = torch.cuda.current_device()
-    # Positional, not keyword: matching fifteen keywords through lru_cache costs
+    # Positional, not keyword: matching sixteen keywords through lru_cache costs
     # ~0.4us per launch on gfx950, against a ~20us host path at small M.
     launcher = _compiled_forward(
         device_index,
@@ -595,6 +645,7 @@ def _rmsnorm_fwd_core(
         store_rstd,
         num_heads,
         weight_offset != 0.0,
+        use_buffer_copy,
     )
     args = (
         x_flat,

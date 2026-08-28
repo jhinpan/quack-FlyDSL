@@ -283,16 +283,75 @@ def test_packed_rows_keeps_singleton_axes(shape):
 
 
 @_requires_flydsl
+@pytest.mark.parametrize(
+    "rows,m,pitch,dtype,rows_per_block,expected",
+    [
+        pytest.param(2, 2, 256, torch.bfloat16, 256, True, id="ordinary-padding"),
+        pytest.param(
+            2,
+            2,
+            (1 << 31) - 16,
+            torch.bfloat16,
+            256,
+            True,
+            id="below-four-gib",
+        ),
+        pytest.param(
+            2,
+            2,
+            (1 << 31) - 8,
+            torch.bfloat16,
+            256,
+            False,
+            id="exactly-four-gib",
+        ),
+        pytest.param(
+            1,
+            1,
+            1 << 31,
+            torch.bfloat16,
+            256,
+            True,
+            id="unused-large-row-stride",
+        ),
+        pytest.param(2, 2, 1 << 31, torch.bfloat16, 1, True, id="single-row-cta"),
+        pytest.param(
+            2,
+            2,
+            (1 << 30) - 8,
+            torch.bfloat16,
+            256,
+            True,
+            id="same-pitch-bf16",
+        ),
+        pytest.param(
+            2,
+            2,
+            (1 << 30) - 8,
+            torch.float32,
+            256,
+            False,
+            id="same-pitch-fp32",
+        ),
+    ],
+)
+def test_buffer_tile_fits_descriptor_offset(rows, m, pitch, dtype, rows_per_block, expected):
+    tensor = torch.empty_strided((rows, 8), (pitch, 1), device="meta", dtype=dtype)
+    assert fly_rmsnorm._buffer_tile_fits(tensor, rows_per_block, m=m, n=8) is expected
+
+
+@_requires_flydsl
 def test_grid_ceil_div_does_not_overflow_int32():
     assert int(fly_rmsnorm._ceil_div_positive_i32(fx.Int32(2**31 - 1), 256)) == 2**23
 
 
 @_flydsl_suite_owner
 def test_rmsnorm_four_gib_row_pitch():
-    """Thread-local descriptors must not wrap a 4 GiB row offset."""
-    n = 8
+    """A 4 GiB row offset selects flat addressing instead of wrapping MUBUF."""
+    n = 24  # Also exercises the predicated tail of the 32-column CTA tile.
     pitch = 1 << 31  # bf16 elements: row 1 begins exactly 2**32 bytes after row 0.
     required_bytes = (pitch + n) * torch.bfloat16.itemsize
+    torch.cuda.empty_cache()
     free_bytes = torch.cuda.mem_get_info()[0]
     if required_bytes > free_bytes * 0.9:
         pytest.skip(
@@ -300,13 +359,41 @@ def test_rmsnorm_four_gib_row_pitch():
             f" need ~{required_bytes // 2**30} GiB)"
         )
 
-    x = torch.empty_strided((2, n), (pitch, 1), device=_DEVICE, dtype=torch.bfloat16)
-    x[0].copy_(torch.arange(1, n + 1, device=_DEVICE, dtype=x.dtype))
-    x[1].copy_(torch.arange(n, 0, -1, device=_DEVICE, dtype=x.dtype))
-    assert fly_rmsnorm.packed_rows(x).data_ptr() == x.data_ptr()
+    weight = torch.linspace(0.5, 1.5, n, device=_DEVICE, dtype=torch.float32)
+    bias = torch.linspace(-0.5, 0.5, n, device=_DEVICE, dtype=torch.float32)
+    residual = torch.linspace(-1, 1, 2 * n, device=_DEVICE, dtype=torch.float16).reshape(2, n)
 
-    out, _, _ = fly_rmsnorm.rmsnorm_fwd(x)
-    _assert_close(out, _reference(x)[0], x.dtype)
+    def run(tensor):
+        out, residual_out, rstd = fly_rmsnorm.rmsnorm_fwd(
+            tensor,
+            weight,
+            bias=bias,
+            residual=residual,
+            out_dtype=torch.float32,
+            residual_dtype=torch.float32,
+            store_rstd=True,
+        )
+        expected, expected_residual, expected_rstd = _reference(tensor, weight, bias, residual)
+        _assert_close(out, expected, tensor.dtype)
+        torch.testing.assert_close(residual_out, expected_residual, atol=0, rtol=0)
+        _assert_close(rstd, expected_rstd, tensor.dtype)
+
+    fly_rmsnorm._compiled_forward.cache_clear()
+    safe_x = torch.arange(1, 2 * n + 1, device=_DEVICE, dtype=torch.bfloat16).reshape(2, n)
+    run(safe_x)
+    assert fly_rmsnorm._compiled_forward.cache_info().currsize == 1
+
+    x = torch.empty_strided((2, n), (pitch, 1), device=_DEVICE, dtype=torch.bfloat16)
+    try:
+        x[0].copy_(torch.arange(1, n + 1, device=_DEVICE, dtype=x.dtype))
+        x[1].copy_(torch.arange(n, 0, -1, device=_DEVICE, dtype=x.dtype))
+        assert fly_rmsnorm.packed_rows(x).data_ptr() == x.data_ptr()
+
+        run(x)
+        assert fly_rmsnorm._compiled_forward.cache_info().currsize == 2
+    finally:
+        del x
+        torch.cuda.empty_cache()
 
 
 @_flydsl_suite_owner

@@ -97,6 +97,11 @@ def _atom_elems(width: int, num_copy_elems: int) -> int:
     return min(num_copy_elems, MAX_ACCESS_BITS // width)
 
 
+def _copy_op(bit_size: int, use_buffer_copy: bool):
+    """Select MUBUF for bounded descriptors and flat addressing otherwise."""
+    return fx.rocdl.BufferCopy(bit_size, 0) if use_buffer_copy else fx.UniversalCopy(bit_size)
+
+
 class TiledCopy2d:
     """One thread's view of a tile, at whatever width the operand it partitions has.
 
@@ -112,7 +117,14 @@ class TiledCopy2d:
     ``(ATOM_V, REST_V)`` split of the innermost mode.
     """
 
-    __slots__ = ("num_copy_elems", "thr_idx", "thr_layout", "threads_per_row", "val_layout")
+    __slots__ = (
+        "num_copy_elems",
+        "thr_idx",
+        "thr_layout",
+        "threads_per_row",
+        "use_buffer_copy",
+        "val_layout",
+    )
 
     def __init__(
         self,
@@ -120,11 +132,14 @@ class TiledCopy2d:
         num_threads: int,
         num_copy_elems: int,
         thr_idx,
+        *,
+        use_buffer_copy: bool = True,
     ):
         assert num_threads % threads_per_row == 0
         self.threads_per_row = threads_per_row
         self.num_copy_elems = num_copy_elems
         self.thr_idx = thr_idx
+        self.use_buffer_copy = use_buffer_copy
         self.thr_layout = fx.make_ordered_layout(
             (num_threads // threads_per_row, threads_per_row), order=(1, 0)
         )
@@ -143,7 +158,11 @@ class TiledCopy2d:
         enumerate the widths a specialization uses ahead of time.
         """
         atom = fx.make_copy_atom(
-            fx.rocdl.BufferCopy(_atom_elems(width, self.num_copy_elems) * width, 0), width
+            _copy_op(
+                _atom_elems(width, self.num_copy_elems) * width,
+                self.use_buffer_copy,
+            ),
+            width,
         )
         tiled = fx.make_tiled_copy_tv(atom, self.thr_layout, self.val_layout)
         return tiled.get_slice(self.thr_idx)
@@ -151,14 +170,12 @@ class TiledCopy2d:
     def partition_S(self, tensor):
         if tensor is None:
             return None
-        partition = self._thr_copy(tensor.element_type.width).partition_S(tensor)
-        return buffer_tensor(partition)
+        return self._thr_copy(tensor.element_type.width).partition_S(tensor)
 
     def partition_D(self, tensor):
         if tensor is None:
             return None
-        partition = self._thr_copy(tensor.element_type.width).partition_D(tensor)
-        return buffer_tensor(partition)
+        return self._thr_copy(tensor.element_type.width).partition_D(tensor)
 
 
 def tile_of(tensor, tile):
@@ -179,7 +196,7 @@ def make_fragment(partitioned):
     return fx.make_fragment_like(tile_of(partitioned, 0))
 
 
-def copy(src, dst, *, pred=None, tile=None) -> None:
+def copy(src, dst, *, pred=None, tile=None, use_buffer_copy: bool = True) -> None:
     """Move one tile between gmem and registers, atom chosen from the operands.
 
     ``src.shape[0][0]`` is the atom's element count -- the ``ATOM_V`` the tiled
@@ -197,7 +214,7 @@ def copy(src, dst, *, pred=None, tile=None) -> None:
         pred = pred.at(tile, width)
         if dst.address_space == fx.AddressSpace.Register:
             dst.fill(0)
-    atom = fx.make_copy_atom(fx.rocdl.BufferCopy(_shape(src)[0][0] * width, 0), width)
+    atom = fx.make_copy_atom(_copy_op(_shape(src)[0][0] * width, use_buffer_copy), width)
     fx.copy(atom, src, dst, pred=pred)
 
 
