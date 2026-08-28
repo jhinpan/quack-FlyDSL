@@ -28,7 +28,31 @@ if _CAN_RUN:
     # Through the package: a direct backend import would not notice a mis-pick.
     from quack import rmsnorm_fwd as _rmsnorm_fwd
 if _IS_FLYDSL:
+    import flydsl.compiler as flyc
+    import flydsl.expr as fx
+    from flydsl.expr.typing import ReductionOp
+
     import quack.rmsnorm_flydsl as fly_rmsnorm
+    from quack.flydsl_reduce import row_reduce
+    from quack.flydsl_runtime import current_raw_stream
+
+    @flyc.kernel
+    def _row_extrema_kernel(out: fx.Tensor):
+        tidx = fx.Int32(fx.thread_idx.x)
+        value = fx.Float32(tidx) - fx.Float32(32.0)
+        maximum = row_reduce(value, ReductionOp.MAX, 64)
+        minimum = row_reduce(value, ReductionOp.MIN, 64)
+        if tidx == fx.Int32(0):
+            out[0] = maximum
+            out[1] = minimum
+
+    @flyc.jit
+    def _launch_row_extrema(
+        out: fx.Tensor,
+        stream: fx.Stream = fx.Stream(None),  # noqa: B008 - FlyDSL traced ABI
+    ):
+        _row_extrema_kernel(out).launch(grid=(1, 1, 1), block=(64, 1, 1), stream=stream)
+
 
 torch._dynamo.config.cache_size_limit = 1024
 torch._dynamo.config.accumulated_cache_size_limit = 1024
@@ -202,6 +226,28 @@ def test_rmsnorm_qk_4d(use_compile):
 
 
 @_requires_flydsl
+def test_rmsnorm_many_heads_uses_flat_launch_grid():
+    """HIP limits grid.z to 65535, while grid.x covers all supported rows."""
+    shape = (1, 65537, 8)
+    x = torch.randn(shape, device=_DEVICE, dtype=torch.bfloat16)
+    weight = torch.randn(shape[-2:], device=_DEVICE, dtype=torch.float32)
+
+    out, _, rstd = fly_rmsnorm.rmsnorm_fwd(x, weight, store_rstd=True)
+    expected, _, expected_rstd = _reference(x, weight)
+
+    _assert_close(out, expected, x.dtype)
+    _assert_close(rstd, expected_rstd, x.dtype)
+
+
+@_requires_flydsl
+def test_row_reduce_min_max():
+    out = torch.empty(2, device=_DEVICE, dtype=torch.float32)
+    _launch_row_extrema(out, current_raw_stream(out.device))
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out.cpu(), torch.tensor([31.0, -32.0]))
+
+
+@_requires_flydsl
 @pytest.mark.parametrize("use_compile", [False, True])
 def test_rmsnorm_strided_tensor(use_compile):
     """FlyDSL copies a row pitch that CuTe's TVM-FFI contract rejects."""
@@ -218,6 +264,49 @@ def test_rmsnorm_strided_tensor(use_compile):
     out, _, _ = _fwd(use_compile)(x, weight)
     expected, _, _ = _reference(x, weight)
     _assert_close(out, expected, x.dtype)
+
+
+@_requires_flydsl
+@pytest.mark.parametrize("shape", [(8, 1, 256), (8, 1, 1, 256), (1, 8, 256)])
+def test_packed_rows_keeps_singleton_axes(shape):
+    """A singleton axis must not force a copy.
+
+    Its stride describes no access -- the axis is never indexed past 0 -- but it
+    still looks like an overlap against the footprint of the axes below it. The
+    kernel reads such a tensor perfectly well, and copying it doubles the traffic
+    of every call, silently: the results stay correct, only twice as slow. Every
+    input reaches the kernel as (rows, heads, N), so plain RMSNorm hits this on
+    each launch.
+    """
+    x = torch.randn(*shape, device=_DEVICE, dtype=torch.bfloat16)
+    assert fly_rmsnorm.packed_rows(x).data_ptr() == x.data_ptr()
+
+
+@_requires_flydsl
+def test_grid_ceil_div_does_not_overflow_int32():
+    assert int(fly_rmsnorm._ceil_div_positive_i32(fx.Int32(2**31 - 1), 256)) == 2**23
+
+
+@_flydsl_suite_owner
+def test_rmsnorm_four_gib_row_pitch():
+    """Thread-local descriptors must not wrap a 4 GiB row offset."""
+    n = 8
+    pitch = 1 << 31  # bf16 elements: row 1 begins exactly 2**32 bytes after row 0.
+    required_bytes = (pitch + n) * torch.bfloat16.itemsize
+    free_bytes = torch.cuda.mem_get_info()[0]
+    if required_bytes > free_bytes * 0.9:
+        pytest.skip(
+            f"Insufficient free VRAM ({free_bytes // 2**30} GiB free,"
+            f" need ~{required_bytes // 2**30} GiB)"
+        )
+
+    x = torch.empty_strided((2, n), (pitch, 1), device=_DEVICE, dtype=torch.bfloat16)
+    x[0].copy_(torch.arange(1, n + 1, device=_DEVICE, dtype=x.dtype))
+    x[1].copy_(torch.arange(n, 0, -1, device=_DEVICE, dtype=x.dtype))
+    assert fly_rmsnorm.packed_rows(x).data_ptr() == x.data_ptr()
+
+    out, _, _ = fly_rmsnorm.rmsnorm_fwd(x)
+    _assert_close(out, _reference(x)[0], x.dtype)
 
 
 @_flydsl_suite_owner
@@ -322,6 +411,42 @@ def test_rmsnorm_compile_cache():
     # built for another element width.
     call(3, 8, dtype=torch.bfloat16)
     assert fly_rmsnorm._compiled_forward.cache_info().currsize == 3
+
+
+@_requires_flydsl
+def test_rmsnorm_specializations_do_not_share_a_kernel():
+    """Feature sets that differ only in a compile-time flag must compile apart.
+
+    FlyDSL keys a compiled artifact on the kernel's source plus the scalar values
+    in its closure, and an object reference contributes nothing to that key. A
+    flag the kernel reached through ``self`` would therefore be invisible, and
+    whichever feature set compiled first would answer for the rest -- silently,
+    with the wrong arithmetic rather than an error. Same shape and dtypes for
+    every call here, so only the flags can tell the kernels apart.
+    """
+    m, n = 3, 256
+    x = torch.randn(m, n, device=_DEVICE, dtype=torch.bfloat16)
+    weight = torch.randn(n, device=_DEVICE, dtype=torch.float32)
+    residual = torch.randn(m, n, device=_DEVICE, dtype=torch.bfloat16)
+
+    # Plain first, so a shared kernel would be the one without any of the below.
+    out, _, _ = fly_rmsnorm.rmsnorm_fwd(x, weight)
+    _assert_close(out, _reference(x, weight)[0], x.dtype)
+
+    offset_out, _, _ = fly_rmsnorm.rmsnorm_fwd(x, weight, weight_offset=1.0)
+    _assert_close(offset_out, _reference(x, weight + 1.0)[0], x.dtype)
+
+    bias = torch.randn(n, device=_DEVICE, dtype=torch.float32)
+    bias_out, _, _ = fly_rmsnorm.rmsnorm_fwd(x, weight, bias=bias)
+    _assert_close(bias_out, _reference(x, weight, bias)[0], x.dtype)
+
+    res_out, residual_out, rstd = fly_rmsnorm.rmsnorm_fwd(
+        x, weight, residual=residual, store_rstd=True
+    )
+    expected, combined, expected_rstd = _reference(x, weight, residual=residual)
+    _assert_close(res_out, expected, x.dtype)
+    _assert_close(residual_out, combined, x.dtype)
+    _assert_close(rstd, expected_rstd, x.dtype)
 
 
 @pytest.mark.parametrize("use_compile", [False, True])
